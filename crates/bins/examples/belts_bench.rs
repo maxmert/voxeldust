@@ -10,6 +10,10 @@
 //! - `belts`: the limits as laws AND the belts by their influx.
 //! - `today-geometric`: the solve's own laws on the geometric time axis (L5) — the axis alone.
 //! - `belts-geometric`: the limits as laws, the belts by their influx, and the geometric axis.
+//! - `b40`: ruling B40 — the limits as laws, the belts by their influx at the plates' corrected mean speed (Earth's
+//!   50 mm/yr), held by the force balance and widening into plateaus; `b40-geometric` on the geometric axis.
+//! - `today-craters`, `b40-craters`: each crater stamped in the pass where its impact falls (ruling B37's landscape time).
+//! - any case `@N`: on N passes, the pass-counted cadences scaled to keep their spacing in years (M-TIME-1).
 //!
 //! **THE CAUSES**, exclusive, in this order: a CLOSED BASIN'S WALL (the relief window reaches the sea level or under
 //! it); a CRATER (within one diameter of a crater's centre, by the summed chord); a BELT (the folded belt's rock: the
@@ -158,6 +162,36 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved) {
             pct(mount_a[c], all_mount)
         );
     }
+    // B40 item 1: each pair's plateau — the nodes within 100 m of their ceiling — and its half-width.
+    if let Some(b) = &solved.belts
+        && solved.carry_left_m3 >= 0.0
+        && b.pairs.iter().any(|l| !l.is_empty())
+    {
+        let near = 100 * Z_STEPS_PER_M;
+        let mut widths: Vec<f64> = Vec::new();
+        let mut plateau_area = 0u128;
+        for list in &b.pairs {
+            let mut w = 0u32;
+            for &(dist, j) in list {
+                let j = j as usize;
+                if b.ceiling[j] != i32::MAX && state.z[j] >= b.ceiling[j] - near {
+                    w = w.max(dist);
+                    plateau_area += u128::from(area[j]);
+                }
+            }
+            widths.push(f64::from(w) / 1_000.0);
+        }
+        widths.sort_by(f64::total_cmp);
+        println!(
+            "  THE PLATEAUS (B40): {} convergent pairs; the half-width at 50 % / the largest: {:.0} / {:.0} km; the land \
+             within 100 m of its ceiling {:.2} million km²; the rock that found no room {:.3e} m³",
+            widths.len(),
+            widths.get(widths.len() / 2).copied().unwrap_or(0.0),
+            widths.last().copied().unwrap_or(0.0),
+            plateau_area as f64 / 1e12,
+            solved.carry_left_m3
+        );
+    }
     belt_over.sort_unstable();
     let belt_area: u64 = belt_over.iter().map(|&(_, a)| a).sum();
     let share_over = |h: i32| -> f64 {
@@ -245,9 +279,37 @@ fn main() {
                 limits_as_law: true,
                 belts_by_influx: true,
                 geometric_last_yr: Some(GEOMETRIC_LAST_YR),
+                ..Laws::default()
+            },
+            "b40" => Laws {
+                limits_as_law: true,
+                belts_by_influx: true,
+                mean_speed: true,
+                force_balance: true,
+                ..Laws::default()
+            },
+            "b40-geometric" => Laws {
+                limits_as_law: true,
+                belts_by_influx: true,
+                mean_speed: true,
+                force_balance: true,
+                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
+                ..Laws::default()
+            },
+            "today-craters" => Laws {
+                craters_at_own_age: true,
+                ..Laws::default()
+            },
+            "b40-craters" => Laws {
+                limits_as_law: true,
+                belts_by_influx: true,
+                mean_speed: true,
+                force_balance: true,
+                craters_at_own_age: true,
+                ..Laws::default()
             },
             other => panic!(
-                "a case is today, belts-today-limits, limits, belts, today-geometric or belts-geometric, not {other}"
+                "a case is today, belts-today-limits, limits, belts, today-geometric, belts-geometric, b40, b40-geometric, today-craters or b40-craters, not {other}"
             ),
         };
         let started = Instant::now();

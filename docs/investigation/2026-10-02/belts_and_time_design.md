@@ -434,3 +434,63 @@ rule (03 §4.6) and ruling B38 ("no artificial changes"). So more passes alone a
 (the belts at Earth's rates over their own windows, each landscape's own time — the craters' included — and the erosion
 constant's calibration), and the integration must then converge, measured by a gate (the readings at N and 2N passes
 within a stated reading's tolerance). The cost: 160 passes took 311 s against 150 s for 40.
+
+**Run 4, ruling B40 in the copy (MEASURED; the control matches the pin again):**
+- **The plates' corrected mean speed** (a unit share 100 mm/yr, so a plate's mean is Earth's 50): the ridges' production
+  `C0` = 2.70 km²/yr — Earth's measured 2.7 ± 0.2 [R, Cogné & Humler 2006], a number the correction was NOT fitted to —
+  the turnover 225 Myr (Earth ~190–220), convergence at 10 / 50 / 90 %: 9.4 / 28.4 / 76.0 mm/yr, windows 10.0 / 37.2 /
+  133.3 Myr. A belt's total influx does not depend on the speed (the rate doubles, the window halves): mean 19.8 km of
+  surface uplift, the largest 219 km.
+- **The force balance and the widening** settle (no node over the peak law's cap after any pass), but with today's
+  erosion the plateaus grow to continent size: half-widths 1 636 km at the median and 3 511 km at the largest (Tibet
+  ~500 km), 29.9 million km² within 100 m of their ceilings, and 1.09 × 10¹⁷ m³ of rock still without room. Mountains on
+  the land away from closed basins: 3.15 % (even axis), 16.54 % (geometric axis, craters 64 % of them).
+- **So the erosion constant decides** (F49): on Earth the rivers remove most of what the plates push in (the India–Asia
+  balance loses roughly half), and today's constant removes too little. Its calibration is the next item, by a published
+  law with its calibration body (ruling B38), never a value turned toward these readings.
+
+**Run 5, the craters' own time (MEASURED; the control matches the pin again):** stamping each crater in the pass where
+its impact falls moves today's laws from 0.47 % to 0.77 % mountains on the land away from closed basins (craters 24 % of
+them, from 18 %), and B40 from 3.15 % to 2.72 %; the plateaus do not change. Most of the population is billions of years
+old, so it is stamped early either way. The crater law already chooses which craters survive by each province's
+retention age, and the solve's erosion then wears them again: one of the two is a second truth for the same survival
+(ruling B21), a question for the build.
+
+---
+
+## 11. The erosion law's calibration (F49): the research (2026-10-03; a read-only agent, its extracted sources and its
+arithmetic `predict.py` in the session's scratchpad `sources/`)
+
+**Facts that frame it.**
+1. In the solve's convention a surface uplift of 0.5 mm/yr is the Airy rise of a thickening crust; the rebound gives back
+   0.848 of each cut, so the STEADY EROSION is 0.5/0.1515 = 3.3 mm/yr — Taiwan's rate (ARITH). The bench's belts (0.1–
+   1.4 mm/yr of surface uplift) need steady erosion of 0.66–9.2 mm/yr.
+2. `K₀` is a rate at 1 m/yr of rain: the cut reads `E = K₀·q·√(P/1 m yr⁻¹)·√A·S` (ARITH, `solve.rs:1190-1196`).
+3. **The cited calibration is misread** (`solve.rs:85`): Stock & Montgomery 1999's values are at `m = 0.4` [V]; converted
+   to `m = ½` at one node's area (×0.165) granitoids read 7.3 × 10⁻⁸–7.1 × 10⁻⁷ /yr and mudstones 7.8 × 10⁻⁵–1.2 × 10⁻³
+   /yr [V + ARITH]. Today's hard-rock value (1.8 × 10⁻⁷) sits in the granitoids' band; its shale value is 40–600 times too
+   low.
+4. **Every global compilation finds `n > 1`**: the median 2.43 (Harel, Mudd & Attal 2016, 33 zones) [V]; 2.2 (Adams et al.
+   2020, 142 basins) [V]; Harel publish no `n = 1` constant. With `n > 1`, no single `n = 1` constant holds both a 3 mm/yr
+   belt and a slow platform.
+5. **At `m/n = ½` the relief depends on the grid** (Kwang & Parker 2017 [V]): each halving of the node adds `(U/K)·ln 2`;
+   the macro relief is "U/K times a logarithm", not Earth's relief. With `θ = m/n < ½` it does not.
+6. **The node is far coarser than a hillslope** (`√(D/K)` ≈ 100 m, Theodoratos et al. 2018 [V]): every hillslope and
+   first-order channel lies inside one 8.2 km node. Earth's node means hold that inner relief; the macro channel heights
+   do not.
+
+**The options (each a published law with its own calibration body; the owner chooses — ruling B38):**
+
+| # | Law | Calibration body | A belt like Taiwan (crest over its outlet) | An old platform | Weakness |
+|---|---|---|---|---|---|
+| F1 | today's stream power, `n = 1`, `m = ½`, the cited range read right | SE Australian rivers over ~20 Myr | 11–111 km (absurd; today's value 45 km — the bench's belts at the cap) | flat in 13–26 Myr | grid-dependent; contradicted by every compilation; NOT recommended |
+| F2 | stream power from ONE joint calibration: `E = K_lp·(P·A)^m·S^n`, `m = 1`, `n = 2.2`, `θ = 0.45`, `K_lp = 2.2 × 10⁻⁹ m⁻²` (Adams et al. 2020) [V] | Bhutan and central-eastern Nepal, 142 basins, ¹⁰Be | about 3.8 km, in head-node steps of about 1.5 km (nearly free of the grid: `L^0.09`) | low relief survives: 1 000 → 100 m in 8.6 Myr, → 10 m in 144 Myr | one region; outside its data under 0.02 mm/yr and 0.7 m/yr of rain; strong rock, so the rock shares must be referenced to gneiss; `K ∝ P` makes deserts steep |
+| F3 | each node's INNER relief from the 10 km law: `E = 0.01 + 2.5 × 10⁻⁴·Rz/[1 − (Rz/1 500)²]` (Montgomery & Brandon 2002) [V] | Earth's continents and the Olympics | about 1.0–1.4 km of ridges and valleys inside each belt node | 40–180 m | `Rz` is a 1 km-grid statistic inside a 10 km circle (Earth must be read the same way); scatter of one order; no rain term; it moves no sediment, so it rides beside a channel law |
+| F4 | threshold-and-flood incision (Tucker 2004; Lague 2014; DiBiase & Whipple 2011) | San Gabriels, the Himalaya, Eastern Tibet, the Andes | `n ≈ 2` at steady state; no closed form | stalls under the threshold (about 20 times longer) | needs flood statistics the climate does not yet give; collides with R2's one-sweep operator |
+| F5 | Hilley's steepness limit | 96 % of Earth's points | — | — | an observation, so under B23 and B38 a CAP, not a law |
+
+**The research's reading (not a decision):** drop F1; for the routed channels between nodes take `K`, `m`, `n` from ONE
+joint calibration with `θ < ½` (F2 is the cleanest published set); give each node its inner relief from the 10 km law
+(F3), for R2 to draw and for the comparison with Earth's node means; let F4 replace F2 when the weather step supplies flood
+variability. The `n > 1` sweep needs a fixed Newton count as its deterministic form, and R2's operator must take the same
+law (two incision laws at two levels would be a second truth, B21).

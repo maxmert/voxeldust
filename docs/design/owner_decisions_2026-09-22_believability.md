@@ -1108,3 +1108,25 @@ The owner ruled (*"Yes, a binding gate"*; *"Commit now"*):
 **Example.** Today a pilot sees a crater rim stand high on the home planet only because the solve's long first steps
 under-eroded it. After phase 2 the solve takes as many steps as the gate needs, so the rim stands as high as its own age
 and its rock allow, and a second solve with twice the steps shows the pilot the same rim.
+
+## B40. THE BELT WIDENS UNDER A FORCE BALANCE; THE PLATES' MEAN SPEED IS 50 mm/yr (2026-10-03)
+
+The belts' bench (`docs/investigation/2026-10-02/phase0_belts_bench.txt`) showed that a belt rising at Earth's rates takes
+in more rock than today's erosion removes, and that a per-node collapse cannot carry the excess away; and that the world's
+plate speed constant ("Earth's mean plate speed, 50 mm/yr", `craters.rs:133-138`) multiplies a uniform share whose mean is
+½, so the mean is 25 mm/yr and the ridges open at 21 mm/yr against Earth's 53. The owner ruled:
+
+1. **THE FORCE BALANCE, AND THE BELT WIDENS** (owner: *"Force balance, belt widens"*; the design's Q-B2 (b); AMENDS B37
+   item 1's "limited at each node only by the crust's strength"): a belt's MEAN height stops where the plates' force can
+   hold it (Molnar & Lyon-Caen 1988; England & Houseman 1986; Earth's numbers give about 5 km, Tibet's measured mean is
+   5 023 m), and the extra rock WIDENS the belt into a plateau; the width grows only by the influx less the erosion's
+   efflux; at the ceiling the profile is a plateau. Peaks keep the strength law (Everest). The force is a law with its
+   own calibration body (stated in the build), never a knob.
+2. **A PLATE'S MEAN SPEED IS EARTH'S 50 mm/yr** (owner: *"Mean plate speed = 50 mm/yr"*; the design's Q-B1): the
+   constant is corrected to its own stated meaning, checked against Earth's mean ridge opening of 53.4 mm/yr, and the
+   craters' clock and the belts read the ONE corrected speed. A world change in phase 2's macro change.
+
+**Example.** A belt of the home planet that reaches about 5 km over its lowland stops rising in the mean; each million
+years after that its plateau grows wider by the rock its plates push in less the rock its rivers carry away, and its
+peaks stay under Everest's strength. Its plates close at a speed whose mean is Earth's, so its active time follows a
+plates' turnover near Earth's own.

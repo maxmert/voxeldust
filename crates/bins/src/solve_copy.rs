@@ -50,7 +50,31 @@ pub struct Laws {
     /// each pass's years), so the ice works only in the last 2.6 Myr. The routing, climate, talus and rebound cadences
     /// stay counted in passes, as the solve counts them (M-TIME-1 reads whether that matters).
     pub geometric_last_yr: Option<u64>,
+    /// ★ B40 item 2, THE PLATES' MEAN SPEED: `true` reads the world's constant as its own text states it — a plate's MEAN
+    /// speed is Earth's 50 mm/yr — so a unit drift share is 100 mm/yr (the share is uniform on [0, 1): its mean is ½).
+    /// `false`: the constant as the craters read it today (a unit share 50 mm/yr, a mean of 25). The craters' own clock in
+    /// the copy keeps the shipped reading (a bench interim; the build changes the one constant for both).
+    pub mean_speed: bool,
+    /// ★ B40 item 1, THE FORCE BALANCE AND THE WIDENING BELT: `true` holds every belt node's height to its own platform
+    /// plus the force balance's height (`ΔF = ρ_c·g·h·[L + h·ρ_m/(2(ρ_m − ρ_c))] = F_b`, the force calibrated on Tibet's
+    /// measured mean of 5 023 m over Earth's 35 km of crust and carried to a body by its elastic thickness, `L` the node's
+    /// own continental crust); what a belt node cannot take is its pair's excess rock, which fills the pair's continental
+    /// nodes nearest the boundary first, each up to its ceiling, so the belt WIDENS into a plateau; an excess with no room
+    /// left carries into the next pass. Peaks keep the peak law (L0).
+    pub force_balance: bool,
+    /// ★ THE CRATERS' OWN TIME (ruling B37 item 1, the landscape's time applied to craters): `false` stamps every
+    /// crater at the solve's start (the solve's own order, so even a young crater erodes for the whole age); `true`
+    /// stamps each crater in the pass where its impact falls (the solve's start plus the age less the crater's age), so it
+    /// erodes only since it was made. The population is the crater law's own in both.
+    pub craters_at_own_age: bool,
 }
+
+/// ★ THE FORCE'S CALIBRATION BODY (B40 item 1): the Tibetan Plateau's measured mean height, metres (Fielding et al.
+/// 1994, Geology 22: the arid central and northern interior), over Earth's continental crust of 35 km, under Earth's
+/// gravity; the force it implies is carried to a body by the ratio of its elastic thickness to Earth's.
+pub const TIBET_MEAN_M: f64 = 5_023.0;
+/// Earth's surface gravity for the calibration, m/s².
+pub const EARTH_GRAVITY_M_S2: f64 = 9.81;
 
 /// ★ THE PASSES' BOUNDARIES in years from the solve's start, `passes + 1` of them, `0` first and `age` last: even
 /// (`age · p / passes`), or geometric from the present with the last pass `t_min` long (see [`Laws::geometric_last_yr`]).
@@ -151,6 +175,20 @@ pub struct Belts {
     pub total: Vec<i64>,
     pub start_yr: Vec<u64>,
     pub report: BeltReport,
+    /// Each node's convergent pair (an index into `pairs`), `u32::MAX` where none (B40 item 1).
+    pub pair: Vec<u32>,
+    /// Each node's ceiling: its platform's height plus the force balance's height, sixteenths (`i32::MAX` where none).
+    pub ceiling: Vec<i32>,
+    /// The convergent pairs: their continental nodes nearest the boundary first, with each node's distance in metres.
+    pub pairs: Vec<Vec<(u32, u32)>>,
+}
+
+/// The force balance's height, metres: the root of `ρ_c·g·[L·h + h²·ρ_m/(2Δρ)] = F_b`.
+fn force_height_m(force_n_m: f64, crust_m: f64, gravity_m_s2: f64) -> f64 {
+    use vd_terrain::land::{CONTINENTAL_CRUST_DENSITY_KGM3 as RC, MANTLE_DENSITY_KGM3 as RM};
+    let a = RC * gravity_m_s2 * RM / (2.0 * (RM - RC));
+    let b = RC * gravity_m_s2 * crust_m;
+    (-b + (b * b + 4.0 * a * force_n_m).sqrt()) / (2.0 * a)
 }
 
 /// A node's direction as fenced floats: `vd_terrain::land::dir_of`, re-stated (it is crate-private), the integer
@@ -187,6 +225,7 @@ pub fn belts_by_influx(
     words: &SolveWords,
     land: &vd_terrain::land::Land,
     age_yr: u64,
+    mean_speed: bool,
 ) -> Belts {
     use vd_terrain::Gf;
     use vd_terrain::land::{
@@ -204,7 +243,8 @@ pub fn belts_by_influx(
     let continental_m = EARTH_CONTINENTAL_CRUST_M * relief_cap_m(body) / EARTH_RELIEF_CAP_M
         * land.freeboard_factor.to_f64();
     let airy = (MANTLE_DENSITY_KGM3 - CONTINENTAL_CRUST_DENSITY_KGM3) / MANTLE_DENSITY_KGM3;
-    let speed_m_yr = vd_terrain::craters::EARTH_MEAN_PLATE_SPEED_MM_YR / 1_000.0;
+    let speed_m_yr = vd_terrain::craters::EARTH_MEAN_PLATE_SPEED_MM_YR / 1_000.0
+        * if mean_speed { 2.0 } else { 1.0 };
     let node_m = lattice.node_m();
     let bounds: Vec<vd_terrain::land::Boundary> = (0..n as u32)
         .map(|k| boundary_of(&land.plates, dir_gf(&lattice, k)))
@@ -287,6 +327,45 @@ pub fn belts_by_influx(
         list.sort_by(f64::total_cmp);
     }
     report.mean_total_m = sum_total / report.nodes.max(1) as f64;
+    // B40 item 1: the convergent pairs, each continental node's ceiling, and the pairs' candidates nearest first.
+    let force_n_m = {
+        use vd_terrain::land::{CONTINENTAL_CRUST_DENSITY_KGM3 as RC, MANTLE_DENSITY_KGM3 as RM};
+        let h = TIBET_MEAN_M;
+        RC * EARTH_GRAVITY_M_S2
+            * h
+            * (EARTH_CONTINENTAL_CRUST_M + h * RM / (2.0 * (RM - RC)))
+            * f64::from(words.elastic_thickness_m)
+            / vd_terrain::land::EARTH_ELASTIC_THICKNESS_M
+    };
+    let g = f64::from(gravity) / 1_000.0;
+    let mut keys: Vec<(u8, u8)> = Vec::new();
+    let mut pair = vec![u32::MAX; n];
+    let mut ceiling = vec![i32::MAX; n];
+    let mut pairs: Vec<Vec<(u32, u32)>> = Vec::new();
+    for k in 0..n {
+        let b = bounds[k];
+        let Some(o) = b.other else { continue };
+        if b.kind != Kind::Convergent || land.crust[k] < 128 {
+            continue;
+        }
+        let key = (b.plate.min(o), b.plate.max(o));
+        let id = match keys.iter().position(|&x| x == key) {
+            Some(i) => i,
+            None => {
+                keys.push(key);
+                pairs.push(Vec::new());
+                keys.len() - 1
+            }
+        };
+        pair[k] = id as u32;
+        let crust = continental_m * land.plates[usize::from(b.plate)].crust_scatter.to_f64();
+        let h = force_height_m(force_n_m, crust, g);
+        ceiling[k] = land.z[k] + (h * f64::from(vd_terrain::solve::Z_STEPS_PER_M)) as i32;
+        pairs[id].push(((radius * b.sine.to_f64()) as u32, k as u32));
+    }
+    for list in &mut pairs {
+        list.sort_unstable();
+    }
     report.windows_myr = [0.1, 0.25, 0.5, 0.75, 0.9].map(|q| quantile(&windows, q));
     report.vn_mm_yr = [0.1, 0.5, 0.9].map(|q| quantile(&vns, q));
     report.rate_mm_yr = [quantile(&rates, 0.5), rates.last().copied().unwrap_or(0.0)];
@@ -294,6 +373,9 @@ pub fn belts_by_influx(
         total,
         start_yr,
         report,
+        pair,
+        ceiling,
+        pairs,
     }
 }
 
@@ -411,6 +493,8 @@ pub struct Solved {
     pub collapsed: usize,
     /// The largest excess over the peak law's cap left after any pass's last round, sixteenths (zero: it settled).
     pub peak_left: i32,
+    /// The belts' excess rock that found no room by the end, m³ (B40 item 1; zero: every metre placed).
+    pub carry_left_m3: f64,
 }
 
 /// ★ THE COPY of `vd_terrain::solve::solve_full` (generator 22), line for line, with the routing variant's
@@ -431,7 +515,7 @@ pub fn solve_copy(
     // LAW (L1, L2, L4): the belts by their influx replace the room's belts; their nodes read the folded belt's rock.
     let belts = laws
         .belts_by_influx
-        .then(|| belts_by_influx(body, words, &land, schedule.age_yr));
+        .then(|| belts_by_influx(body, words, &land, schedule.age_yr, laws.mean_speed));
     let mut even_total = land.uplift.clone();
     if let Some(b) = &belts {
         for (k, &t) in b.total.iter().enumerate() {
@@ -464,7 +548,10 @@ pub fn solve_copy(
         rain_mm_yr: &pre_climate.rain_mm_yr,
     };
     let craters = vd_terrain::craters::crater_population(body, &lattice, words, &surface);
-    vd_terrain::craters::apply_craters(&mut state.z, &lattice, &craters, gravity);
+    // LAW (B37, the craters' own time): today every crater is stamped here; on its own time each waits for its pass.
+    if !laws.craters_at_own_age {
+        vd_terrain::craters::apply_craters(&mut state.z, &lattice, &craters, gravity);
+    }
     let crater_record = craters.clone();
     drop(pre_climate);
     let relief = envelope_steps(body);
@@ -482,6 +569,8 @@ pub fn solve_copy(
         (vd_terrain::land::relief_cap_m(body) * f64::from(vd_terrain::solve::Z_STEPS_PER_M)) as i32;
     let mut collapsed = 0usize;
     let mut peak_left = 0i32;
+    // LAW (B40 item 1): each pair's excess rock with no room yet, volume in sixteenths × m², carried pass to pass.
+    let mut carry: Vec<i128> = Vec::new();
     state.z_flood.clone_from(&state.z);
     if let Some(shot) = trace {
         shot("01_craters", &state.z);
@@ -535,6 +624,21 @@ pub fn solve_copy(
         } else {
             epoch_step
         };
+        // LAW (B37, the craters' own time): the craters whose impact falls in this pass are stamped now.
+        if laws.craters_at_own_age {
+            let (t0, t1) = (times[pass as usize], times[pass as usize + 1]);
+            let due: Vec<vd_terrain::craters::Crater> = crater_record
+                .iter()
+                .copied()
+                .filter(|c| {
+                    let at = schedule.age_yr.saturating_sub(c.age_yr);
+                    at >= t0 && (at < t1 || (pass + 1 == schedule.passes && at <= t1))
+                })
+                .collect();
+            if !due.is_empty() {
+                vd_terrain::craters::apply_craters(&mut state.z, &lattice, &due, gravity);
+            }
+        }
         if since_climate >= schedule.climate_every {
             if let Some(sea) = vd_terrain::land::sea_level_connected(
                 &lattice,
@@ -613,17 +717,63 @@ pub fn solve_copy(
         // LAW (L5): on the geometric axis every node's even total spreads by TIME, not by the pass's index.
         let (t0, t1) = (times[pass as usize], times[pass as usize + 1]);
         if belts.is_some() || laws.geometric_last_yr.is_some() {
-            for (i, &even) in even_total.iter().enumerate() {
-                let belt_total = belts.as_ref().map_or(0, |b| b.total[i]);
-                let step = if belt_total > 0 {
-                    let b = belts.as_ref().expect("a belt total has its belts");
-                    window_step(belt_total, b.start_yr[i], schedule.age_yr, t0, t1)
-                } else if laws.geometric_last_yr.is_some() {
-                    window_step(i64::from(even), 0, schedule.age_yr, t0, t1)
-                } else {
-                    i64::from(MacroSolve::uplift_step(even, pass, schedule.passes))
-                };
-                state.uplift[i] = i32::try_from(step * i64::from(schedule.passes))
+            let mut steps: Vec<i64> = even_total
+                .iter()
+                .enumerate()
+                .map(|(i, &even)| {
+                    let belt_total = belts.as_ref().map_or(0, |b| b.total[i]);
+                    if belt_total > 0 {
+                        let b = belts.as_ref().expect("a belt total has its belts");
+                        window_step(belt_total, b.start_yr[i], schedule.age_yr, t0, t1)
+                    } else if laws.geometric_last_yr.is_some() {
+                        window_step(i64::from(even), 0, schedule.age_yr, t0, t1)
+                    } else {
+                        i64::from(MacroSolve::uplift_step(even, pass, schedule.passes))
+                    }
+                })
+                .collect();
+            // LAW (B40 item 1): every belt node up to its ceiling; the refused rock widens its pair nearest first.
+            if let (true, Some(b)) = (laws.force_balance, belts.as_ref()) {
+                if carry.len() != b.pairs.len() {
+                    carry = vec![0i128; b.pairs.len()];
+                }
+                let mut excess = vec![0i128; b.pairs.len()];
+                for (i, step) in steps.iter_mut().enumerate() {
+                    if b.total[i] <= 0 || b.pair[i] == u32::MAX {
+                        continue;
+                    }
+                    let room = i64::from((b.ceiling[i] - state.z[i]).max(0));
+                    if *step > room {
+                        excess[b.pair[i] as usize] +=
+                            i128::from(*step - room) * i128::from(state.area[i]);
+                        *step = room;
+                    }
+                }
+                for (pi, list) in b.pairs.iter().enumerate() {
+                    let mut remaining = excess[pi] + carry[pi];
+                    for &(_, j) in list {
+                        if remaining <= 0 {
+                            break;
+                        }
+                        let j = j as usize;
+                        let need = i64::from(b.ceiling[j] - state.z[j]) - steps[j];
+                        if need <= 0 {
+                            continue;
+                        }
+                        let area = i128::from(state.area[j].max(1));
+                        let raise = i64::try_from((remaining / area).min(i128::from(need)))
+                            .expect("a raise fits a 64-bit word");
+                        steps[j] += raise;
+                        remaining -= i128::from(raise) * area;
+                        if raise < need {
+                            break;
+                        }
+                    }
+                    carry[pi] = remaining.max(0);
+                }
+            }
+            for (u, step) in state.uplift.iter_mut().zip(&steps) {
+                *u = i32::try_from(*step * i64::from(schedule.passes))
                     .expect("a pass's uplift times the pass count fits a 32-bit word");
             }
         }
@@ -831,6 +981,8 @@ pub fn solve_copy(
         craters: crater_record,
         collapsed,
         peak_left,
+        carry_left_m3: carry.iter().sum::<i128>() as f64
+            / f64::from(vd_terrain::solve::Z_STEPS_PER_M),
     })
 }
 

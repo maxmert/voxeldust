@@ -191,6 +191,11 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     GATE (the readings at N and 2N passes agree within a stated tolerance; as many passes or as fine a step rule as it
     needs), built WITH the new laws in phase 2 (converged today's laws grade the planet flat); the slower first solve
     accepted.
+    ★ B40 (2026-10-03): THE BELT WIDENS UNDER A FORCE BALANCE (a belt's mean height stops where the plates' force holds
+    it — about 5 km for Earth's numbers, Tibet 5 023 m — and the extra rock widens it into a plateau, the width growing
+    by the influx less the erosion's efflux; peaks keep the strength law; AMENDS B37 item 1); A PLATE'S MEAN SPEED IS
+    EARTH'S 50 mm/yr (the constant corrected to its own meaning, checked against Earth's 53.4 mm/yr ridge opening; the
+    craters and the belts read the one speed; a world change in phase 2).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

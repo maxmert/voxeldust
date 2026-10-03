@@ -1428,3 +1428,20 @@ AWAY from the reference, the step's report says so (ruling B6).
   passes, and accurate integration grades it nearly flat.
 - 2026-10-03 — RULING B39: the world converges in time — a binding gate (the readings at N and 2N passes agree within a
   stated tolerance), built with the new laws in phase 2; the slower first solve accepted. One commit, no push.
+- 2026-10-03 — RULING B40: the belt widens under a force balance (its mean height stops near 5 km for Earth's numbers,
+  the extra rock widens it; peaks keep the strength law; amends B37 item 1); a plate's mean speed is Earth's 50 mm/yr
+  (the constant corrected to its own meaning; the craters and the belts read the one speed). Found with it: the widening
+  gives sane belts only once the erosion constant has its calibration (F49), because today's erosion leaves most of the
+  influx in place.
+- 2026-10-03 — B40 IN THE BENCH: the corrected plate speed gives the ridges Earth's measured production (2.70 km²/yr
+  against 2.7 ± 0.2; turnover 225 Myr); the force balance settles, but with today's erosion the plateaus grow to
+  continent size (half-widths 1 600–3 500 km, 30 million km² at their ceilings). The erosion constant's calibration
+  (F49) is next; its published calibration is being researched.
+- 2026-10-03 — THE EROSION LAW'S CALIBRATION RESEARCHED (F49; the design §11): today's `n = 1` law is contradicted by every
+  global compilation (median `n` 2.2–2.4), makes relief depend on the grid at `m/n = ½`, and its cited constant belongs
+  to `m = 0.4`; the options are one joint calibration with `n > 1` (Adams et al. 2020) for the channels, the 10 km relief
+  law (Montgomery & Brandon 2002) for each node's inner relief, or threshold-and-flood incision once floods exist. For the
+  owner.
+- 2026-10-03 — THE OWNER'S NEXT BENCH STEP (F49): bench the channels on one joint calibration with `n > 1` (Adams et
+  al. 2020) and each node's inner relief on the 10 km law (Montgomery & Brandon 2002), with Earth read the same way; the
+  decision comes with those numbers. The B40 bench work committed.
