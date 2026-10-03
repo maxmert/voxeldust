@@ -231,6 +231,24 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
         over_share(1_499.0)
     );
     line("node means (+ Strahler share of Rz), away", &mean_away);
+    // The craters the solve stamped (ruling B3's G-CRATER: about 190 known on Earth), and the land within their reach.
+    {
+        let mut d: Vec<u32> = solved.craters.iter().map(|c| c.diameter_m).collect();
+        d.sort_unstable();
+        let q = |p: f64| {
+            d.get(((d.len().max(1) - 1) as f64 * p) as usize)
+                .copied()
+                .unwrap_or(0) as f64
+                / 1_000.0
+        };
+        println!(
+            "  THE CRATERS STAMPED: {} (G-CRATER: about 190 known on Earth); diameters at 50 / 90 / 100 %: {:.0} / {:.0} / {:.0} km",
+            d.len(),
+            q(0.5),
+            q(0.9),
+            q(1.0)
+        );
+    }
     // The causes, exclusive, in order.
     let craters = crater_reach(lattice, solved);
     let belt_code = Province::FoldedBelt.code();

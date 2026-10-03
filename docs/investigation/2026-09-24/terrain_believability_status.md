@@ -1534,3 +1534,10 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-10-04 — RULING B47: the lakes' cure goes into phase 2; THE GATE'S TOLERANCE stated (every share within 2 points,
   every height within 10 %, at N and 2N passes and twice the routings) — the current law set passes; next THE MOUNTAINS
   (11–13 % against Earth's 2.39 %). Run 22 committed.
+- 2026-10-04 — THE MOUNTAINS BY CAUSE (ruling B47 item 3; run 23; the Earth instrument's run 4 with CRUST 2.0): the old
+  plains now match Earth's (516 / 318 m against 485 / 349 m; ~1 % mountains); the craters are minor (398 stamped, 1.2 % of
+  the mountains — the earlier 43 % "near a crater" counted erased craters); THE BELTS AND THEIR PLATEAUS CARRY 88 % OF THE
+  MOUNTAINS — they cover about Earth's share of the land (17.7 % against 16 %) but are 49–68 % mountains against Earth's
+  orogens' 8–12 % and stand 1–1.8 km higher.
+- 2026-10-04 — RULING B48: research the belts' shape (why Earth's orogens at 8 km are ~12 % mountains and 1.8 km high),
+  then bench the laws found. Run 23, Earth's crust-type split and the corrected crater readout committed.

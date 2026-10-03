@@ -35,7 +35,13 @@
 //!    places print their node's height and side; the land's share at the node scale prints beside the share of the
 //!    cells at or over the sea level.
 //!
-//! `cargo run --release -p vd-bins --example earth_relief -- <the raw grid>`
+//! 7. **EARTH'S MOUNTAINS BY CRUST TYPE** (ruling B47 item 3, the mountains; optional): given CRUST 2.0's 2° crust-type
+//!    map (`CNtype2.txt`; Bassin, Laske & Masters 2000, EOS Trans. AGU 81, F897, the REM site; types after Mooney, Laske &
+//!    Masters 1998; freely shared, its one term a citation; kept OUTSIDE the repository like the grid), each node takes
+//!    the type of the 2° tile under its centre, and the land whose window stays over the sea level (no Antarctica, no ice
+//!    type) prints by crust class: its share of the land, the mountains in it, its share of all mountains, its mean height.
+//!
+//! `cargo run --release -p vd-bins --example earth_relief -- <the raw grid> [<CRUST 2.0's CNtype2.txt>]`
 //!
 //! **Example.** A node of the Tibetan Plateau and a node of the home planet's crystalline basement are both read by the
 //! same window over nodes of 8.2 km, so "tablelands" on Earth means what "tablelands" means on the home planet, and a
@@ -44,8 +50,8 @@
 use vd_bins::artifact_worker::{SolveJob, run_solve};
 use vd_bins::drainage_gates::node_under;
 use vd_bins::stands::{
-    HIGH_M, LAND_CLASSES, LandReading, PERCENTILES, PLAINS, RELIEF, ReliefReading, SEA_FLOOR,
-    VARIETY_GRID, VARIETY_REACH_M, ocean_mean_m, read_land, relief_readings,
+    HIGH_M, LAND_CLASSES, LandReading, MOUNTAINS, PERCENTILES, PLAINS, RELIEF, ReliefReading,
+    SEA_FLOOR, VARIETY_GRID, VARIETY_REACH_M, merged, ocean_mean_m, read_land, relief_readings,
 };
 use vd_core::glam::DVec3;
 use vd_terrain::artifact::FACIES_SHIFT;
@@ -86,6 +92,47 @@ fn dir_at(lat_deg: f64, lon_deg: f64) -> DVec3 {
 /// The latitude of a unit direction, degrees.
 fn lat_of(d: DVec3) -> f64 {
     d.z.clamp(-1.0, 1.0).asin().to_degrees()
+}
+
+/// CRUST 2.0's type map (`CNtype2.txt`): 90 rows of 2° from 90° N, 180 columns of 2° from 180° W, each a type code
+/// whose first letter is its class.
+fn read_crust_types(path: &str) -> Vec<Vec<char>> {
+    let text = std::fs::read_to_string(path).expect("the CRUST 2.0 type map reads");
+    let rows: Vec<Vec<char>> = text
+        .lines()
+        .skip(1)
+        .take(90)
+        .map(|l| {
+            l.split_whitespace()
+                .skip(1)
+                .map(|code| code.chars().next().expect("a type code"))
+                .collect()
+        })
+        .collect();
+    assert!(
+        rows.len() == 90 && rows.iter().all(|r| r.len() == 180),
+        "the CRUST 2.0 map holds 90 × 180 tiles"
+    );
+    rows
+}
+
+/// A CRUST 2.0 type letter's class (Mooney, Laske & Masters 1998's settings, grouped); `None` for ice.
+fn crust_class(letter: char) -> Option<&'static str> {
+    Some(match letter {
+        'G' => "Archean shield",
+        'H' => "early/mid Proterozoic",
+        'I' => "late Proterozoic",
+        'D' | 'E' => "platform",
+        'T' => "margin-shield transition",
+        'Z' => "Phanerozoic",
+        'P' | 'Q' | 'R' => "orogen",
+        'K' | 'L' => "arc and forearc",
+        'M' | 'X' => "extended and rift",
+        'Y' => "thinned, basins",
+        'C' | 'S' => "shelf and slope",
+        'F' | 'N' | 'O' | 'U' => return None,
+        _ => "oceanic and island arcs",
+    })
 }
 
 /// Reads the raw grid.
@@ -320,6 +367,51 @@ fn main() {
     }
     let readings_earth = relief_readings(&lattice, &z_earth, &land_earth);
     let dirs: Vec<DVec3> = (0..n as u32).map(|v| dir_of(&lattice, v)).collect();
+    // B47 item 3: Earth's mountains by crust type, where the type map is given.
+    if let Some(types_path) = std::env::args().nth(2) {
+        let types = read_crust_types(&types_path);
+        let mut by: std::collections::BTreeMap<&'static str, (u128, u128, f64)> =
+            std::collections::BTreeMap::new();
+        let (mut all_land, mut all_mount) = (0u128, 0u128);
+        for v in 0..n {
+            let Some(r) = readings_earth[v] else { continue };
+            let d = dirs[v];
+            let lat = lat_of(d);
+            if lat < ANTARCTIC_LAT_DEG || r.lo_m <= 0 {
+                continue;
+            }
+            let lon = d.y.atan2(d.x).to_degrees();
+            let row = (((90.0 - lat) / 2.0).floor() as usize).min(89);
+            let col = (((lon + 180.0) / 2.0).floor() as usize).min(179);
+            let Some(class) = crust_class(types[row][col]) else {
+                continue;
+            };
+            let a = u128::from(area[v]);
+            let mountain = merged(r.class(false)) == MOUNTAINS;
+            let e = by.entry(class).or_insert((0, 0, 0.0));
+            e.0 += a;
+            e.2 += f64::from(over_earth[v]) * a as f64;
+            all_land += a;
+            if mountain {
+                e.1 += a;
+                all_mount += a;
+            }
+        }
+        println!(
+            "EARTH'S MOUNTAINS BY CRUST TYPE (CRUST 2.0, Bassin, Laske & Masters 2000; the land whose window stays over the \
+             sea level, no Antarctica, no ice type; mountains {:.2} % of it):",
+            all_mount as f64 * 100.0 / all_land.max(1) as f64
+        );
+        for (class, (land, mount, h)) in &by {
+            println!(
+                "  {class:<26} land {:>6.2} % | mountains {:>6.2} % of it | {:>6.2} % of all mountains | mean {:>5.0} m",
+                *land as f64 * 100.0 / all_land.max(1) as f64,
+                *mount as f64 * 100.0 / (*land).max(1) as f64,
+                *mount as f64 * 100.0 / all_mount.max(1) as f64,
+                h / (*land).max(1) as f64
+            );
+        }
+    }
     let earth = read_land(
         &lattice,
         &area,

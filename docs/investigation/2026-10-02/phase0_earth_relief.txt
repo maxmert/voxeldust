@@ -76,3 +76,20 @@ THE HYPSOMETRY (heights over the sea):
   the land's share over 1000 m, %                     25.83        20.80        63.17
   the land's mean height, m                             796          675         1549
 THE CLASS CODES CHECKED: sea floor 0, the land classes [2, 3, 4, 5]
+
+== RUN 4 (ruling B47 item 3: EARTH'S MOUNTAINS BY CRUST TYPE — CRUST 2.0's 2° crust-type map, Bassin, Laske & Masters 2000, EOS Trans. AGU 81, F897, the REM site; types after Mooney, Laske & Masters 1998; kept outside the repository; each node takes the type of the tile under its centre)
+EARTH'S MOUNTAINS BY CRUST TYPE (CRUST 2.0, Bassin, Laske & Masters 2000; the land whose window stays over the sea level, no Antarctica, no ice type; mountains 2.42 % of it):
+  Archean shield             land  21.47 % | mountains   0.41 % of it |   3.62 % of all mountains | mean   534 m
+  Phanerozoic                land   3.85 % | mountains   0.02 % of it |   0.03 % of all mountains | mean   385 m
+  arc and forearc            land   3.86 % | mountains   8.07 % of it |  12.87 % of all mountains | mean   810 m
+  early/mid Proterozoic      land   5.34 % | mountains   0.34 % of it |   0.74 % of all mountains | mean   520 m
+  extended and rift          land   6.19 % | mountains   2.21 % of it |   5.65 % of all mountains | mean   717 m
+  late Proterozoic           land  17.26 % | mountains   0.22 % of it |   1.54 % of all mountains | mean   597 m
+  margin-shield transition   land   3.93 % | mountains   1.84 % of it |   2.98 % of all mountains | mean   329 m
+  oceanic and island arcs    land   1.96 % | mountains   3.80 % of it |   3.08 % of all mountains | mean   294 m
+  orogen                     land  12.16 % | mountains  11.81 % of it |  59.32 % of all mountains | mean  1841 m
+  platform                   land  21.25 % | mountains   0.84 % of it |   7.33 % of all mountains | mean   340 m
+  shelf and slope            land   2.50 % | mountains   2.64 % of it |   2.73 % of all mountains | mean   240 m
+  thinned, basins            land   0.23 % | mountains   1.14 % of it |   0.11 % of all mountains | mean   280 m
+the home planet solved in 170.1 s; its sea's level 3591 m over the ladder radius
+

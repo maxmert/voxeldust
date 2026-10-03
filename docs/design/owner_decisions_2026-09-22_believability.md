@@ -1299,3 +1299,22 @@ old plains about 553–584 m (Earth 485 m), plains / tablelands about 21 / 67 % 
 **Example.** A second solve of the home planet with twice the steps and twice the routings shows a pilot the same old
 plains within a tenth of their height and the same share of mountains within two points — so what the pilot sees is the
 laws' answer, and the next work is to make that answer's mountains as rare as Earth's.
+
+## B48. THE MOUNTAINS MEASURED; THE BELTS' SHAPE RESEARCHED NEXT (2026-10-04)
+
+The mountains by cause, MEASURED (run 23 and the Earth instrument's run 4; the belts' design §16): the belts and their
+plateaus carry 88 % of the home planet's mountains — they cover about Earth's share of the land (17.7 % against Earth's
+orogens' and arcs' 16 %, CRUST 2.0) but are 49–68 % mountains against Earth's 8–12 %, and stand 1–1.8 km higher; the old
+plains match Earth's (516 / 318 m against 485 / 349 m); the craters are minor (398 stamped, 1.2 % of the mountains — the
+earlier "43 % of the land near a crater" counted craters a raise had erased, a readout flaw now fixed). The owner ruled:
+
+1. **RESEARCH THE BELTS' SHAPE** (*"Research the belts' shape"*): why Earth's orogens at 8 km are only about 12 %
+   mountains and 1.8 km high — the belt's cross-section (the critical-taper wedge, Davis, Suppe & Dahlen 1983), a
+   plateau's low inner relief (Tibet), the forelands, and the Andean margins' height law (the parked A2) — compared with
+   the bench's belt today (a smooth bump over two flexural parameters, a force-balance plateau with steep edges); then
+   bench the laws found.
+2. One commit now, on `game`, no push.
+
+**Example.** On Earth a pilot crossing the Himalaya and Tibet flies over a steep front, then a high plateau whose inside
+reads as tablelands at 8 km; on the home planet the same crossing reads mountains across half the belt. The research
+asks which law makes a belt's inside a plateau or a foreland rather than a field of peaks.

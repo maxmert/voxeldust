@@ -939,3 +939,33 @@ joint law, the cured base, the ice cure, the exact rebound every 12.5 Myr and th
    plains 553–584 m, median 376–407 m (Earth 485 / 349 m); plains / tablelands about 21 / 67 % (Earth 52 / 45.5 %). The
    excess left: the mountains (the belts, the widened plateaus and the craters) and the tablelands (the height a young
    plate stands at after its raise, today the freeboard law's starting height — an assumption).
+
+---
+
+## 16. The mountains: which cause carries them (ruling B47 item 3; MEASURED, run 23 and the Earth instrument's run 4)
+
+**Earth, by CRUST 2.0's crust type** (Bassin, Laske & Masters 2000; the same grid and relief rule; the land whose window
+stays over the sea level, no Antarctica, no ice type; mountains 2.42 % of it): ORogens 12.2 % of the land, 11.8 % of it
+mountains, 59.3 % of all mountains, a mean of 1 841 m; arcs and forearcs 3.9 %, 8.1 %, 12.9 %, 810 m; extended and rift
+6.2 %, 2.2 %, 5.7 %; the shields and platforms about 65 % of the land, 0.2–0.8 % of it mountains, about 13 % of all.
+
+**The home planet's converged law set** (the joint law, the cured base, the ice cure, the exact rebound, the landscape's
+time, the lakes' cure; the crater readout now counts only the craters the solve STAMPED — the earlier 43 % of the land
+"near a crater" counted craters a plate's raise had erased):
+
+| Cause | share of the land | mountains in it | share of all mountains | mean / median height |
+|---|---|---|---|---|
+| collision belt | 5.4 % | 68.2 % | 31.7 % | 2 745 / 2 392 m |
+| Andean belt | 6.6 % | 49.1 % | 27.7 % | 2 885 / 2 147 m |
+| widened plateau | 5.7 % | 58.1 % | 28.5 % | 3 635 / 2 542 m |
+| old plains | 76.7 % | 1.1 % | 7.2 % | 516 / 318 m |
+| craters (398 stamped; Earth knows about 190; 24 / 57 / 677 km at 50 / 90 / 100 %) | 1.8 % | 7.8 % | 1.2 % | 615 / 283 m |
+| closed basins' walls | 3.8 % | 11.5 % | 3.8 % | — |
+
+1. **The old plains match Earth's**: 516 / 318 m against Earth's shields and platforms at 485 / 349 m; about 1 % of them
+   mountains against Earth's 0.2–0.8 %.
+2. **THE BELTS AND THEIR PLATEAUS CARRY 88 % OF THE MOUNTAINS**: they cover 17.7 % of the land (Earth's orogens and arcs
+   16 %), but 49–68 % of them are mountains against Earth's 8–12 %, and they stand 1–1.8 km higher (2.7–3.6 km against
+   Earth's orogens' 1.8 km). The excess is the belts' ROUGHNESS and HEIGHT, not their area.
+3. The craters are a small cause; their count (398 against Earth's ~190 known) and their largest (677 km) are G-CRATER's
+   own reading, for the craters' law.

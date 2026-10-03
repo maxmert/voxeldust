@@ -231,6 +231,10 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     dependence gone; the whole law set passes 214 → 414 passes): THE LAKES' CURE GOES INTO PHASE 2; THE GATE'S TOLERANCE
     (B39) — every share within 2 points, every height within 10 %, at N and 2N passes and twice the routings; NEXT THE
     MOUNTAINS (11–13 % against Earth's 2.39 %: which cause carries them, then each one's law); one commit, no push.
+    ★ B48 (2026-10-04, the mountains MEASURED: the belts and their plateaus carry 88 % — Earth's share of the land but
+    49–68 % mountains inside against Earth's orogens' 8–12 %, 1–1.8 km higher; the old plains match Earth's 516 / 318 m
+    against 485 / 349 m; the craters minor): RESEARCH THE BELTS' SHAPE (the critical taper, a plateau's low inner relief,
+    the forelands, the Andean height law), then bench the laws found; one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

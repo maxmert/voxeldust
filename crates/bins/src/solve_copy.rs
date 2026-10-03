@@ -1191,7 +1191,7 @@ pub struct Solved {
     pub rewrites: Vec<String>,
     /// The belts' law's own reading, where the copy raised the belts by their influx.
     pub belts: Option<Belts>,
-    /// The craters stamped at the start (each centre and width), for a reading by cause.
+    /// The craters the solve stamped (each centre and width), for a reading by cause — never one a raise erased.
     pub craters: Vec<vd_terrain::craters::Crater>,
     /// The nodes the peak law collapsed, summed over the passes and their rounds (L0).
     pub collapsed: usize,
@@ -1298,6 +1298,12 @@ pub fn solve_copy(
         vd_terrain::craters::apply_craters(&mut state.z, &lattice, &craters, gravity);
     }
     let crater_record = craters.clone();
+    // The craters actually stamped (a readout: the landscape's time leaves out those a raise erased).
+    let mut stamped: Vec<vd_terrain::craters::Crater> = if laws.craters_at_own_age {
+        Vec::new()
+    } else {
+        craters.clone()
+    };
     drop(pre_climate);
     let relief = envelope_steps(body);
     // LAW (L0): the crater clip and the uplift re-clamp are the solve's own limits; as laws they do not exist.
@@ -1407,6 +1413,7 @@ pub fn solve_copy(
                 .collect();
             if !due.is_empty() {
                 vd_terrain::craters::apply_craters(&mut state.z, &lattice, &due, gravity);
+                stamped.extend_from_slice(&due);
             }
             if let Some(b) = before {
                 entry.craters_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);
@@ -1949,7 +1956,7 @@ pub fn solve_copy(
         facies,
         rewrites,
         belts,
-        craters: crater_record,
+        craters: stamped,
         collapsed,
         peak_left,
         carry_left_m3: carry.iter().sum::<i128>() as f64
