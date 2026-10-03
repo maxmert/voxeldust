@@ -28,6 +28,9 @@
 //! - any case `%K` (last): K sweeps in each pass on the pass's one routing, each a K-th of the pass's time — a
 //!   resolution, not a law (ruling B41 item 1: does the sweep's own step or the routing every pass carry the gate's cause);
 //!   `%Kr`: the same with the drains found again before each sub-sweep.
+//! - any case `+ice`, `+icereb`, `+reb` (before the axis): ruling B42 item 2's cures — the ice stepped in time with no
+//!   per-call cap; the same with its cut booked for the rebound; the rebound after every pass. `+base`: ruling B42 item
+//!   1's mechanism cured — the sweep reads a receiver as a lake only where the routing found one.
 //! - `--ledger=DIR`: each case also writes its PASS LEDGER to `DIR/<case>.csv` — each process's change of volume on the
 //!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause).
 //!
@@ -349,7 +352,8 @@ fn write_ledger(path: &str, ledger: &[vd_bins::solve_copy::PassLedger]) {
     let mut out = String::from(
         "t0_yr,t1_yr,craters_land,craters_sea,talus_land,talus_sea,ice_land,ice_sea,sweep_land,sweep_sea,\
          uplift_land,uplift_sea,cut_land,cut_sea,rebound_land,rebound_sea,peak_land,peak_sea,sea_z,land_mean_m,\
-         land_over_1km,land_share\n",
+         land_over_1km,land_share,cut_lake,cut_held,cut_rerouted,cut_rest,nodes_lake,nodes_held,nodes_rerouted,\
+         nodes_rest,ice_steps\n",
     );
     for e in ledger {
         let _ = write!(out, "{},{}", e.t0_yr, e.t1_yr);
@@ -365,11 +369,18 @@ fn write_ledger(path: &str, ledger: &[vd_bins::solve_copy::PassLedger]) {
         ] {
             let _ = write!(out, ",{:.6e},{:.6e}", pair[0], pair[1]);
         }
-        let _ = writeln!(
+        let _ = write!(
             out,
             ",{},{:.3},{:.6},{:.6}",
             e.sea_z, e.land_mean_m, e.land_over_1km, e.land_share
         );
+        for v in e.cut_by_source_m3 {
+            let _ = write!(out, ",{v:.6e}");
+        }
+        for c in e.nodes_by_source {
+            let _ = write!(out, ",{c}");
+        }
+        let _ = writeln!(out, ",{}", e.ice_steps);
     }
     std::fs::write(path, out).expect("the ledger writes");
     println!(
@@ -435,6 +446,24 @@ fn main() {
             Some((name, n)) => (name, n.parse::<u32>().expect("a pass count after @")),
             None => (case_name, vd_terrain::solve::PASSES),
         };
+        // `name+ice`, `+icereb`, `+reb`: ruling B42 item 2's three cures (the ice stepped in time; the same with its cut
+        // booked for the rebound; the rebound after every pass).
+        let mut cures = name.split('+');
+        let name = cures.next().expect("a case name");
+        let (mut ice_stepped, mut ice_rebound, mut rebound_every_pass, mut base_cure) =
+            (false, false, false, false);
+        for cure in cures {
+            match cure {
+                "ice" => ice_stepped = true,
+                "icereb" => {
+                    ice_stepped = true;
+                    ice_rebound = true;
+                }
+                "reb" => rebound_every_pass = true,
+                "base" => base_cure = true,
+                other => panic!("a cure is ice, icereb, reb or base, not {other}"),
+            }
+        }
         let standard = Schedule::standard(words.age_yr);
         let k = passes / standard.passes;
         assert_eq!(
@@ -575,6 +604,10 @@ fn main() {
         let laws = Laws {
             sub_sweeps,
             sub_route,
+            ice_stepped,
+            ice_rebound,
+            rebound_every_pass,
+            base_cure,
             ..laws
         };
         let case = &if sub_sweeps > 1 {

@@ -735,3 +735,59 @@ MATCHES the release gate's pinned digest, so the ledger changes nothing.
    stretch cuts nothing until a routing finds its new outlet), the lakes (a lake's level falls only once a routing, by
    its spill's last cut), and lateral capture (a node drains into a deeper neighbour only after the next routing).
    **With the routing converged, today's laws grade the home planet flat** (ruling B39's prediction, now measured).
+
+**THE MECHANISM, FOUND (run 14, the cut's anatomy; ruling B42 item 1).** The ledger splits each sweep's cut on the land
+by the node's state at the routing its sweep read: a lake node, a node HELD by a lake (its path to the outlet passes a
+lake), a node REROUTED since the previous routing, and the REST. Today's laws over 5 Gyr, 1 against 2 routings a pass:
+
+| Class | the cut, 1 routing | the cut, 2 routings | change |
+|---|---|---|---|
+| lake (skipped) | 0 | 0 | 0 |
+| held by a lake | 76.3 | 103.2 | +27 |
+| rerouted | 43.8 | 42.1 | −2 |
+| the rest | 468.4 | 656.7 | +188 |
+
+Side capture is refuted (the rerouted class does not grow); true lakes carry about 13 % of the growth; the REST carries
+88 %. THE CODE SAYS WHY (`vd_terrain::solve::MacroSolve::routing_base`, `solve.rs:870`, and its copy in
+`router_variants.rs:331`): the base reads a receiver as a lake wherever `z_flood > z`. The routing sets `z_flood = z` for
+every ordinary node; the sweep then CUTS that node, its ground falls under its stale flood level, and the rule reads it
+as a lake — so its upstream neighbour cuts toward the receiver's height AT THE ROUTING, never toward its new height. A
+lowered node's news climbs one node per routing, and the Braun & Willett implicit sweep, which needs the new height,
+becomes explicit in its receiver: more sweeps on one routing barely help (each relaxes toward the same old heights),
+and each routing adds about the same cut, whatever the time between routings. **THE CURE (in the copy, `+base`):** read
+a receiver as a lake only where the routing found one (`pit > 0`), every other receiver at its ground as it stands now
+(`solve_copy::sweep_base`, `sweep_cured`; the joint law's sweep takes the same base). The game's solve carries the
+defect today; the copy measures the cure first.
+
+**THE CURE MEASURED (run 15; the control, cure off, MATCHES the pin).**
+
+| Today's laws, cured | the cut by 0.25 Gyr | by 1 Gyr | over 5 Gyr | the mean land at 1 Gyr | the relief at the end (50 / 90 / 99 %) |
+|---|---|---|---|---|---|
+| 1 routing a pass | 296 | 817 | 1 162 | 560 m | 3 / 6 / 9 m |
+| 2 routings | 334 | 878 | 1 161 | 462 m | 1 / 4 / 7 m |
+| 4 routings | 352 | 895 | 1 161 | 430 m | 1 / 5 / 8 m |
+| the 414-pass axis | 328 | 867 | 1 163 | 481 m | 1 / 4 / 8 m |
+
+1. **The routing now converges**: each doubling halves the change (by 0.25 Gyr +38, then +18; by 1 Gyr +61, then +17),
+   where the defect gave +214, +189, +112 over the whole age; what is left is first order — the true lakes, whose level
+   still follows its spill only at a routing.
+2. **With a correct sweep, today's laws grade the home planet completely flat** (the relief under 10 m at the end): the
+   world's relief today is the defect's under-erosion (ruling B39's prediction, now with a correct scheme).
+3. **The erosion law decides whether the old continents survive** (the full law sets, cured; the land's share of the
+   globe at 0.5 / 4.5 / 5 Gyr, its mean height and its share over 1 000 m at the end):
+
+| Full law set, cured | passes | land % of the globe | mean land at the end | land over 1 000 m (away from closed basins) | mountains | plateau land |
+|---|---|---|---|---|---|---|
+| B40 + P2 + S2, the solve's own erosion (`n = 1`) | 214 | 24.6 / 18.0 / 6.8 % | 2 717 m | 53.5 % | 28.3 % | 15.2 million km² |
+| the same | 414 | 24.5 / 17.7 / 7.0 % | 2 718 m | 54.5 % | 33.9 % | 12.3 million km² |
+| B40 + P2 + S2, the joint law (F2, `n = 2.2`) | 214 | 24.9 / 22.8 / 17.5 % | 994 m | 19.9 % | 15.2 % | 9.3 million km² |
+| the same | 414 | 25.0 / 22.8 / 19.0 % | 958 m | 21.1 % | 14.6 % | 8.4 million km² |
+| Earth | — | 29 % | 840 m | 20.8 % | 2.39 % | Tibet ~2.5 million km² |
+
+   With `n = 1` the flat lowlands keep eroding and drown (a land share of 6.8 %: only the young belts stand over the sea);
+   with the joint law a gentle slope erodes far more slowly, so the plains keep about 23 % of the globe until the belts'
+   own time and end at 17.5–19 %, the land over 1 000 m near Earth's. **The gate with the joint law nearly passes**: the
+   mountains 15.2 → 14.6 % and the land over 1 000 m 19.9 → 21.1 % from 214 to 414 passes; the plateau land −10 %;
+   the inner relief's rate reading (F3) moves most (Rz over 1 000 m on 3.1 → 5.6 % of the land), because it reads the
+   last pass's rate (0.5 against 0.25 Myr). The mountains stay six times Earth's: the belts' plateaus (the Andean margins
+   parked, ruling B42 item 3) and the craters.

@@ -1488,3 +1488,15 @@ AWAY from the reference, the step's report says so (ruling B6).
   rebound, the rebound by pass count); the Andean margins parked (today's share a registered interim). The history does
   not settle even at 8 routings a pass (run 13): at 1 Gyr the land over 1 km reads 64.9 / 57.7 / 48.9 / 39.3 % at 1 / 2
   / 4 / 8 routings. Runs 11–13 and the pass ledger committed.
+- 2026-10-03 — THE MECHANISM FOUND AND CURED IN THE COPY (ruling B42 item 1; the belts' design §14; runs 14–15): the
+  sweep's base rule (`vd_terrain::solve::MacroSolve::routing_base`) reads a receiver as a LAKE wherever its flood level
+  stands over its ground — true of every node the sweep has just cut, because the routing set its flood level to its old
+  ground — so the implicit sweep cuts toward the receivers' heights at the routing and a lowered node's news climbs one
+  node per routing. THE CURE (`+base`): a receiver is a lake only where the routing found one. MEASURED: the routing
+  now converges at first order; with a correct sweep today's laws grade the planet FLAT (relief under 10 m); the full
+  law set with the solve's own erosion drowns the old plains (land 6.8 % of the globe), with the joint law it keeps them
+  (land 17.5–19 %, the land over 1 000 m 20–21 % against Earth's 20.8 %, the mountains 15 % against Earth's 2.4 %), and
+  its gate nearly passes (214 → 414 passes: mountains 15.2 → 14.6 %, land over 1 000 m 19.9 → 21.1 %).
+- 2026-10-03 — RULING B43: the base cure goes into the game's solve in phase 2 with the new laws (never alone); F49
+  RULED — the joint law (Adams et al. 2020) is phase 2's erosion; next the three defect cures on the cured base, then
+  how Earth's old continents keep their height. Runs 14–15 and the cure committed.

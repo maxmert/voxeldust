@@ -107,6 +107,76 @@ pub struct Laws {
     /// would, while the climate, the rebound and the talus keep the pass's cadence. If routed sub-sweeps cut as the finer
     /// axis cuts, the routing's cadence is the gate's cause.
     pub sub_route: bool,
+    /// ★ RULING B42 ITEM 2, THE ICE STEPPED IN TIME (a defect's cure, in the copy only): `false` runs the solve's own
+    /// ice, whose cut per call stops at the ice's own thickness — a cap standing in for a missing law, so its total grows
+    /// with the number of calls; `true` runs [`ice_stepped`]: the same law with no cap, the call's years taken in steps,
+    /// each the longest that lowers no warm bed by more than its own ice, the balance, the flux, the thickness and the
+    /// speed found again from the bed at every step — so a glacier shrinks as its bed falls under its line.
+    pub ice_stepped: bool,
+    /// ★ RULING B42 ITEM 2, THE ICE'S CUT FEEDS THE REBOUND: `true` books every ice cut as a removal the rebound answers,
+    /// as the rivers' cut is booked (with [`Laws::ice_stepped`] only).
+    pub ice_rebound: bool,
+    /// ★ RULING B42 ITEM 2, THE REBOUND BY TIME: `false` runs the rebound every `isostasy_every` passes (its spacing in
+    /// years changes with the axis: 625 Myr at 40 passes, 125 Myr on the mixed axis); `true` runs it after every pass, the
+    /// finest spacing the axis has — the crust answers a lost load in about ten thousand years, far under any pass.
+    pub rebound_every_pass: bool,
+    /// ★ RULING B42 ITEM 1, THE SWEEP'S BASE CURED (the gate's mechanism, MEASURED in runs 11–14): the solve's own base
+    /// rule (`routing_base`) reads a receiver as a LAKE wherever its flood level stands over its ground — and the routing
+    /// sets the flood level of every ordinary node to its ground, so a node the sweep has just cut stands under its stale
+    /// flood level and is read as a lake: its upstream neighbour cuts toward the receiver's height AT THE ROUTING, not its
+    /// new height, and a lowered node's news climbs one node per routing (the implicit scheme of Braun & Willett 2013 needs
+    /// the new height). `true` reads a receiver as a lake only where the routing found one (its pit word), so every other
+    /// receiver gives its new height ([`sweep_base`]); the solve's own sweep and the joint law's both take it.
+    pub base_cure: bool,
+}
+
+/// ★ THE SWEEP'S BASE, CURED (see [`Laws::base_cure`]): a lake the routing found stands at its flood level (its spill),
+/// the connected ocean at the sea's level, every other node at its ground as it stands NOW — never under the ground.
+fn sweep_base(state: &MacroSolve, node: u32) -> i32 {
+    let i = node as usize;
+    let level = if state.pit[i] > 0 {
+        state.z_flood[i]
+    } else if state.ocean[i] {
+        state.sea_z
+    } else {
+        vd_terrain::solve::DRY
+    };
+    state.z[i].max(level)
+}
+
+/// ★ THE SOLVE'S OWN SWEEP with the cured base ([`Laws::base_cure`]): `vd_terrain::solve::MacroSolve::sweep`, line for
+/// line, its base read by [`sweep_base`].
+fn sweep_cured(state: &mut MacroSolve, gain: u64, pass: u32, passes: u32) {
+    use vd_terrain::macro_lattice::NO_NODE;
+    use vd_terrain::solve::GAIN_BITS;
+    let one = 1i128 << GAIN_BITS;
+    for i in 0..state.node_count() {
+        state.z[i] += MacroSolve::uplift_step(state.uplift[i], pass, passes);
+        state.cut_now[i] = 0;
+    }
+    for k in (0..state.order.len()).rev() {
+        let node = state.order[k];
+        let i = node as usize;
+        let r = state.receiver[i];
+        if r == NO_NODE || state.pit[i] > 0 {
+            continue;
+        }
+        let base = sweep_base(state, r);
+        let c = ((u128::from(gain) * u128::from(state.erodibility_q8[i])) >> 8)
+            * u128::from(vd_recipe::root::isqrt(state.discharge[i]))
+            / u128::from(state.chord[i].max(1));
+        let c = c as i128;
+        let numerator = (i128::from(state.z[i]) << GAIN_BITS) + c * i128::from(base);
+        let cut = i128::from(state.z[i]) - numerator.div_euclid(one + c);
+        let cut = cut as i32;
+        if cut > 0 {
+            state.z[i] -= cut;
+            state.removed[i] = state.removed[i].saturating_add(cut as u32);
+            state.pending[i] = state.pending[i].saturating_add(cut);
+            state.cut_now[i] = cut as u32;
+        }
+    }
+    let _ = state.deposit();
 }
 
 /// ★ P2's calibration (Replumaz et al. 2010): the thickness of India's crust stored in the collision (in the thickened
@@ -609,7 +679,7 @@ fn peak_law(state: &mut MacroSolve, cap: i32) -> (usize, i32) {
 /// first, a lake node skipped; then the deposit), with the joint law's implicit cut: a node `x` over its base `b` after
 /// the uplift, `x₀`, settles where `x − x₀ + Δt · K_lp · share · Q^m · (x/L)^n = 0` (heights in metres), the root found by
 /// Newton from `x₀` (the function is convex and rising, so the steps fall to the root without passing it).
-fn joint_sweep(state: &mut MacroSolve, dt_yr: f64, pass: u32, passes: u32) {
+fn joint_sweep(state: &mut MacroSolve, dt_yr: f64, pass: u32, passes: u32, cured: bool) {
     let steps_m = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
     let basement = f64::from(vd_terrain::strata::Province::CrystallineBasement.erodibility_q8());
     for i in 0..state.node_count() {
@@ -623,7 +693,11 @@ fn joint_sweep(state: &mut MacroSolve, dt_yr: f64, pass: u32, passes: u32) {
         if r == vd_terrain::macro_lattice::NO_NODE || state.pit[i] > 0 {
             continue;
         }
-        let base = crate::router_variants::routing_base(state, r);
+        let base = if cured {
+            sweep_base(state, r)
+        } else {
+            crate::router_variants::routing_base(state, r)
+        };
         let z0 = state.z[i];
         if z0 <= base {
             continue;
@@ -722,6 +796,78 @@ pub struct PassLedger {
     pub land_mean_m: f64,
     pub land_over_1km: f64,
     pub land_share: f64,
+    /// ★ THE CUT'S ANATOMY (ruling B42 item 1): the pass's cut on the land, m³, by each node's source class at the routing
+    /// its sweep read — [`SOURCE_LAKE`], [`SOURCE_HELD`], [`SOURCE_REROUTED`], [`SOURCE_REST`] — and the land nodes in
+    /// each class, summed over the pass's routings.
+    pub cut_by_source_m3: [f64; 4],
+    pub nodes_by_source: [u64; 4],
+    /// The stepped ice's steps in the pass ([`Laws::ice_stepped`]; zero for the solve's own ice).
+    pub ice_steps: u32,
+}
+
+/// A source class of the cut's anatomy: a lake node (the sweep skips it).
+pub const SOURCE_LAKE: usize = 0;
+/// A source class: HELD BY A LAKE — the node's path to its outlet passes a lake node, so the lake's level (the flood's,
+/// found only at a routing) holds the node's base until the next routing.
+pub const SOURCE_HELD: usize = 1;
+/// A source class: REROUTED — the node's drain changed since the previous routing (a side capture).
+pub const SOURCE_REROUTED: usize = 2;
+/// A source class: every other node.
+pub const SOURCE_REST: usize = 3;
+
+/// Each node's source class at the routing that stands (see [`PassLedger::cut_by_source_m3`]); `prev_receiver` is the
+/// previous routing's drains (empty before the first).
+fn source_classes(state: &MacroSolve, prev_receiver: &[u32]) -> Vec<u8> {
+    use vd_terrain::macro_lattice::NO_NODE;
+    let n = state.node_count();
+    let mut held = vec![false; n];
+    for k in (0..state.order.len()).rev() {
+        let i = state.order[k] as usize;
+        let r = state.receiver[i];
+        if r != NO_NODE {
+            let r = r as usize;
+            held[i] = state.pit[r] > 0 || held[r];
+        }
+    }
+    (0..n)
+        .map(|i| {
+            if state.pit[i] > 0 {
+                SOURCE_LAKE as u8
+            } else if held[i] {
+                SOURCE_HELD as u8
+            } else if !prev_receiver.is_empty() && prev_receiver[i] != state.receiver[i] {
+                SOURCE_REROUTED as u8
+            } else {
+                SOURCE_REST as u8
+            }
+        })
+        .collect()
+}
+
+/// The land nodes in each source class.
+fn count_sources(classes: &[u8], z: &[i32], sea_z: i32, count: &mut [u64; 4]) {
+    for (&c, &zz) in classes.iter().zip(z) {
+        if zz > sea_z {
+            count[usize::from(c)] += 1;
+        }
+    }
+}
+
+/// A sweep's cut on the land, m³, added to its source classes (the side read from `z`, the heights before the sweep).
+fn attribute_cut(
+    classes: &[u8],
+    cut: &[u32],
+    z: &[i32],
+    area: &[u64],
+    sea_z: i32,
+    vol: &mut [f64; 4],
+) {
+    let steps = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+    for (((&c, &k), &zz), &a) in classes.iter().zip(cut).zip(z).zip(area) {
+        if zz > sea_z && k > 0 {
+            vol[usize::from(c)] += f64::from(k) * a as f64 / steps;
+        }
+    }
 }
 
 /// The change of volume from `before` to `after`, m³, `[land, sea floor]` by each node's side before.
@@ -768,6 +914,146 @@ fn land_readings(z: &[i32], area: &[u64], sea_z: i32) -> (f64, f64, f64) {
     )
 }
 
+/// ★ THE ICE STEPPED IN TIME (ruling B42 item 2; see [`Laws::ice_stepped`]): `vd_terrain::solve::MacroSolve::ice`, line
+/// for line — the balance and its flux down the water's tree, the distance to the margin, the thickness as the lesser of
+/// the two plastic readings, the bed's melting point, the speed `u = q/(width·H)`, the cut `kₑ·u` — with two changes: the
+/// cut is NOT stopped at the ice's thickness, and the call's `years` run as steps, each the longest that lowers no warm
+/// bed by more than its own ice (a resolution, never a limit on the cut). With `book`, each cut is booked in `pending`
+/// for the rebound. Returns the last step's ice mask, the cut summed over the steps (sixteenths × nodes), and the steps.
+fn ice_stepped(
+    state: &mut MacroSolve,
+    ela_z: &[i32],
+    temperature_dk: &[i16],
+    lapse_mk_km: u32,
+    gravity_mm_s2: u32,
+    years: u64,
+    book: bool,
+) -> (Vec<bool>, i64, u32) {
+    use vd_terrain::Gf;
+    use vd_terrain::macro_lattice::NO_NODE;
+    use vd_terrain::solve::{
+        GEOTHERMAL_FLUX_W_M2, GLACIAL_EROSION_K, ICE_CONDUCTIVITY_W_M_K, ICE_DENSITY_KGM3,
+        ICE_PRESSURE_MELT_K_PER_M, ICE_YIELD_STRESS_PA, Z_STEPS_PER_M, celsius, ice_balance_m_yr,
+    };
+    let n = state.node_count();
+    let g = Gf::from_i64(i64::from(gravity_mm_s2)) / Gf::from_i64(1_000);
+    let steps_m = f64::from(Z_STEPS_PER_M);
+    let lapse = Gf::from_i64(i64::from(lapse_mk_km)) / Gf::from_i64(1_000_000);
+    let rho_g = Gf::from_f64(ICE_DENSITY_KGM3) * g;
+    let tau = Gf::from_f64(ICE_YIELD_STRESS_PA);
+    let mut remaining = years as f64;
+    let mut mask = vec![false; n];
+    let (mut total, mut taken) = (0i64, 0u32);
+    let mut carry = vec![0.0f64; n];
+    while remaining > 0.0 {
+        // 1. THE BALANCE, and the flux down the water's tree.
+        mask.iter_mut().for_each(|m| *m = false);
+        let mut flux: Vec<Gf> = Vec::with_capacity(n);
+        for i in 0..n {
+            let dry = !state.ocean[i] & (state.z_flood[i] <= state.z[i]);
+            let b = if dry {
+                ice_balance_m_yr(state.z[i], ela_z[i], lapse, celsius(temperature_dk[i]))
+            } else {
+                Gf::ZERO
+            };
+            flux.push(b * Gf::from_i64(state.area[i] as i64));
+        }
+        for k in 0..state.order.len() {
+            let node = state.order[k] as usize;
+            let dry = !state.ocean[node] & (state.z_flood[node] <= state.z[node]);
+            if !dry || flux[node] <= Gf::ZERO {
+                flux[node] = Gf::ZERO;
+                continue;
+            }
+            mask[node] = true;
+            let r = state.receiver[node];
+            if r != NO_NODE {
+                flux[r as usize] = flux[r as usize] + flux[node];
+            }
+        }
+        // 2. THE DISTANCE TO THE MARGIN, outlets first.
+        let mut margin_m = vec![0u32; n];
+        for k in (0..state.order.len()).rev() {
+            let node = state.order[k] as usize;
+            let r = state.receiver[node];
+            if mask[node] {
+                let carried = if r != NO_NODE && mask[r as usize] {
+                    margin_m[r as usize]
+                } else {
+                    0
+                };
+                margin_m[node] = carried.saturating_add(state.chord[node].max(1));
+            }
+        }
+        // 3. THE THICKNESS AND THE SPEED of every warm bed, then the step: the longest that lowers no bed by more than
+        //    its own ice.
+        let mut rate = vec![0.0f64; n];
+        let mut step = remaining;
+        for node in 0..n as u32 {
+            let i = node as usize;
+            if !mask[i] {
+                continue;
+            }
+            let r = state.receiver[i];
+            if r == NO_NODE {
+                continue;
+            }
+            let drop = Gf::from_i64(i64::from(state.z[i]) - i64::from(state.z[r as usize]))
+                / Gf::from_f64(steps_m);
+            if drop <= Gf::ZERO {
+                continue;
+            }
+            let slope = drop / Gf::from_i64(i64::from(state.chord[i].max(1)));
+            let plastic = tau / (rho_g * slope);
+            let sheet = (Gf::TWO * tau * Gf::from_i64(i64::from(margin_m[i])) / rho_g).sqrt();
+            let thickness = plastic.lesser(sheet);
+            if thickness <= Gf::ZERO {
+                continue;
+            }
+            let bed_c = celsius(temperature_dk[i])
+                + Gf::from_f64(GEOTHERMAL_FLUX_W_M2) * thickness
+                    / Gf::from_f64(ICE_CONDUCTIVITY_W_M_K);
+            let melt_c = -Gf::from_f64(ICE_PRESSURE_MELT_K_PER_M) * thickness;
+            if bed_c < melt_c {
+                continue;
+            }
+            let width = Gf::from_i64(state.area[i].max(1) as i64).sqrt();
+            let speed = flux[i] / (width * thickness);
+            let r_m_yr = (Gf::from_f64(GLACIAL_EROSION_K) * speed).to_f64();
+            if r_m_yr > 0.0 {
+                rate[i] = r_m_yr;
+                step = step.min(thickness.to_f64() / r_m_yr);
+            }
+        }
+        let step = step.max(1.0).min(remaining);
+        // 4. THE CUT over the step, the fraction of a sixteenth carried to the next step.
+        let mut any = false;
+        for i in 0..n {
+            if rate[i] <= 0.0 {
+                continue;
+            }
+            let exact = rate[i] * step * steps_m + carry[i];
+            let cut = exact.floor();
+            carry[i] = exact - cut;
+            let cut = cut as i32;
+            if cut > 0 {
+                any = true;
+                state.z[i] -= cut;
+                total += i64::from(cut);
+                if book {
+                    state.pending[i] = state.pending[i].saturating_add(cut);
+                }
+            }
+        }
+        remaining -= step;
+        taken += 1;
+        if !any && rate.iter().all(|&r| r <= 0.0) {
+            break;
+        }
+    }
+    (mask, total, taken)
+}
+
 /// What the copy leaves: the final state, the facies, and the routes the lakes' fixed point read.
 pub struct Solved {
     pub state: MacroSolve,
@@ -802,6 +1088,9 @@ pub fn solve_copy(
     ledger_on: bool,
 ) -> Option<Solved> {
     let mut ledger: Vec<PassLedger> = Vec::new();
+    // The cut's anatomy (ruling B42 item 1): the previous routing's drains and each node's source class now.
+    let mut prev_receiver: Vec<u32> = Vec::new();
+    let mut classes: Vec<u8> = Vec::new();
     let lattice = body.macro_lattice()?;
     let mut land = vd_terrain::land::initial_land(body, &lattice, &words.land());
     // LAW (L1, L2, L4): the belts by their influx replace the room's belts; their nodes read the folded belt's rock.
@@ -974,6 +1263,9 @@ pub fn solve_copy(
         }
         since_climate += 1;
         if since_route >= schedule.flood_every {
+            if ledger_on {
+                prev_receiver.clone_from(&state.receiver);
+            }
             routes.push(state.route());
             // VARIANT 1 AND 2: the drains after the routing, and the accumulation over them.
             match v {
@@ -1003,6 +1295,10 @@ pub fn solve_copy(
                 }
             }
             since_route = 0;
+            if ledger_on {
+                classes = source_classes(&state, &prev_receiver);
+                count_sources(&classes, &state.z, state.sea_z, &mut entry.nodes_by_source);
+            }
         }
         since_route += 1;
         if let Some(c) = climate.as_ref() {
@@ -1023,7 +1319,23 @@ pub fn solve_copy(
                 &c.ela_z
             };
             let before = ledger_on.then(|| state.z.clone());
-            let _ = state.ice(line, &c.temperature_dk, c.lapse_mk_km, gravity, epoch_step);
+            // LAW (B42 item 2): the ice stepped in time with no cap, its cut booked for the rebound where asked.
+            if laws.ice_stepped {
+                if epoch_step > 0 {
+                    let (_, _, taken) = ice_stepped(
+                        &mut state,
+                        line,
+                        &c.temperature_dk,
+                        c.lapse_mk_km,
+                        gravity,
+                        epoch_step,
+                        laws.ice_rebound,
+                    );
+                    entry.ice_steps += taken;
+                }
+            } else {
+                let _ = state.ice(line, &c.temperature_dk, c.lapse_mk_km, gravity, epoch_step);
+            }
             if let Some(b) = before {
                 entry.ice_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);
             }
@@ -1215,6 +1527,7 @@ pub fn solve_copy(
                         (times[pass as usize + 1] - times[pass as usize]) as f64,
                         pass,
                         schedule.passes,
+                        laws.base_cure,
                     );
                 } else if laws.sub_sweeps > 1 {
                     // RESOLUTION (the gate's cause): k sweeps on this pass's routing, each a k-th of the gain.
@@ -1228,16 +1541,45 @@ pub fn solve_copy(
                             vec![0; uplift.len()]
                         };
                         if sub > 0 && laws.sub_route {
+                            if ledger_on {
+                                prev_receiver.clone_from(&state.receiver);
+                            }
                             routes.push(state.route());
                             state.accumulate();
+                            if ledger_on {
+                                classes = source_classes(&state, &prev_receiver);
+                                count_sources(
+                                    &classes,
+                                    &state.z,
+                                    state.sea_z,
+                                    &mut entry.nodes_by_source,
+                                );
+                            }
                         }
-                        let _ = state.sweep(gain / u64::from(k), pass, schedule.passes);
+                        let z_before = ledger_on.then(|| state.z.clone());
+                        if laws.base_cure {
+                            sweep_cured(&mut state, gain / u64::from(k), pass, schedule.passes);
+                        } else {
+                            let _ = state.sweep(gain / u64::from(k), pass, schedule.passes);
+                        }
+                        if let Some(zb) = z_before {
+                            attribute_cut(
+                                &classes,
+                                &state.cut_now,
+                                &zb,
+                                &state.area,
+                                state.sea_z,
+                                &mut entry.cut_by_source_m3,
+                            );
+                        }
                         for (sum, &c) in cut_sum.iter_mut().zip(&state.cut_now) {
                             *sum = sum.saturating_add(c);
                         }
                     }
                     state.uplift = uplift;
                     state.cut_now = cut_sum;
+                } else if laws.base_cure {
+                    sweep_cured(&mut state, gain, pass, schedule.passes);
                 } else {
                     let _ = state.sweep(gain, pass, schedule.passes);
                 }
@@ -1251,9 +1593,21 @@ pub fn solve_copy(
                 &state.area,
                 state.sea_z,
             );
+            let sub_swept = laws.sub_sweeps > 1 && !laws.joint_law && v == Router::D8;
+            if !sub_swept && !classes.is_empty() {
+                attribute_cut(
+                    &classes,
+                    &state.cut_now,
+                    &b,
+                    &state.area,
+                    state.sea_z,
+                    &mut entry.cut_by_source_m3,
+                );
+            }
         }
         since_rebound += 1;
-        if since_rebound >= schedule.isostasy_every {
+        // LAW (B42 item 2): the rebound after every pass where asked.
+        if since_rebound >= schedule.isostasy_every || laws.rebound_every_pass {
             let before = ledger_on.then(|| state.z.clone());
             let _ = state.rebound(alpha_m);
             since_rebound = 0;

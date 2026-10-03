@@ -11854,7 +11854,14 @@ updated in the same change as the work, deleted when done). The interims named h
     Owed with the cure: a routing cheap enough to converge (a routing costs about 1.2–3 s today), and three defects found
     on the way — the ice's per-call thickness cap (a cap standing in for a law), the ice's cut missing from the rebound,
     the rebound counted in passes instead of time (ruling B42 item 2: cured in the copy first). The HISTORY does not
-    settle even at 8 routings a pass (ruling B42 item 1: the mechanism next).
+    settle even at 8 routings a pass (ruling B42 item 1: the mechanism next). ★ THE MECHANISM, FOUND (runs 14–15, the
+    design §14): THE SWEEP'S BASE RULE (`vd_terrain::solve::MacroSolve::routing_base`, `solve.rs:870`) reads every node
+    the sweep has just cut as a lake (its ground under its stale flood level), so the game's implicit sweep climbs one
+    node per routing — A DEFECT IN THE SHIPPED SOLVE. Cured in the copy (`+base`: a lake only where the routing found
+    one): the routing converges at first order; today's laws then grade the planet flat; the cure lands in the game with
+    phase 2's macro change and its laws (ruling B39; RULED by B43 item 1). F49 RULED (B43 item 2): phase 2's erosion is
+    the joint law (Adams et al. 2020). OWED NEXT (B43 item 3): the three defect cures measured on the cured base; then
+    how Earth's old continents keep their height (the old plains sink to about 110 m with a correct sweep).
   - 🟨 THE ANDEAN MARGINS' SHARE, A REGISTERED INTERIM (ruling B42 item 3): every ocean-under-continent margin shortens
     by Norabuena et al. 1998's share (12.5/70 of the convergence) for its whole window — 81 % of the belts' rock in run
     10, about four times Earth's Andean high land. No published rate law exists (Lallemand's line is a sign rule); the

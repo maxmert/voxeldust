@@ -1187,3 +1187,31 @@ owner ruled:
 **Example.** A pilot over the home planet's plains sees them stand 874 m over the sea on average when the solve looks
 for the rivers' paths once a pass, and 101 m when it looks eight times. After the mechanism is found and cured, a
 second solve with twice the looks shows the pilot the same plains.
+
+## B43. THE BASE CURE AND THE JOINT LAW GO INTO PHASE 2; THE DEFECTS, THEN THE OLD PLAINS (2026-10-03)
+
+The mechanism, FOUND (runs 14–15; `docs/investigation/2026-10-02/belts_and_time_design.md` §14): the game's sweep reads
+a receiver as a lake wherever its flood level stands over its ground (`vd_terrain::solve::MacroSolve::routing_base`) —
+true of every node the sweep has just cut — so the implicit sweep cuts toward the receivers' heights at the routing, and
+a lowered node's news climbs one node per routing. Cured in the copy (a receiver is a lake only where the routing found
+one), the routing converges at first order; today's laws then grade the planet flat; the full law set with the solve's
+own erosion drowns the old plains (land 6.8 % of the globe), with the joint law it keeps them (land 17.5–19 %, the land
+over 1 000 m 20–21 % against Earth's 20.8 %, the mountains about six times Earth's), and its gate nearly passes. The
+owner ruled:
+
+1. **THE BASE CURE GOES INTO THE GAME'S SOLVE IN PHASE 2** (*"Yes, in phase 2"*): the sweep reads a receiver as a lake
+   only where the routing found one — a defect's cure with no knob; it lands with phase 2's new laws (ruling B39),
+   never alone, because alone it grades the home planet flat.
+2. **F49 RULED: THE JOINT LAW** (*"The joint law, F2"*): phase 2's erosion is Adams et al. 2020's joint calibration,
+   `E = K_lp · Q · S^2.2` (`K_lp = 2.2 × 10⁻⁹ m⁻²`, `m = 1`, `n = 2.2`; calibration body: 142 basins of Bhutan and
+   central-eastern Nepal), its rock shares read against the crystalline basement; its authors' caveat (n not universal)
+   is stated with it.
+3. **NEXT** (*"Defects, then old plains"*): the three defect cures (the ice with no per-call cap, the ice's cut in the
+   rebound, the rebound by time) measured on the cured base with the joint law; then the research on how Earth's old
+   continents keep their height over billions of years (ruling B37's landscape time), because with a correct sweep the
+   old plains still sink to about 110 m.
+4. One commit now, on `game`, no push.
+
+**Example.** A pilot crossing the home planet's oldest plain sees, after phase 2, the height its rivers can really leave
+it: the joint law cuts a steep valley fast and a gentle plain slowly, and the sweep sees each lowered valley floor at once,
+so a second solve with twice the steps shows the pilot the same plain.

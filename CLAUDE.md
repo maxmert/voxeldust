@@ -208,6 +208,12 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     lakes drained, flats with a new outlet), then the cure with its numbers; THE THREE DEFECTS CURED IN THE COPY (the
     ice's per-call thickness cap, the ice's cut missing from the rebound, the rebound by pass count); THE ANDEAN MARGINS
     PARKED (today's share a registered interim); one commit, no push.
+    ★ B43 (2026-10-03, THE MECHANISM FOUND: the game's sweep reads every node it has just cut as a lake — its ground
+    under its stale flood level, `routing_base` — so the implicit sweep climbs one node per routing; cured in the copy,
+    the routing converges and today's laws grade the planet flat): THE BASE CURE GOES INTO THE GAME'S SOLVE IN PHASE 2
+    with the new laws, never alone; F49 RULED — THE JOINT LAW (Adams et al. 2020, `E = K_lp·Q·S^2.2`) keeps the plains
+    (land 17.5–19 % of the globe, land over 1 km 20–21 %); NEXT the three defect cures on the cured base, then how Earth's
+    old continents keep their height (B37's landscape time); one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION
