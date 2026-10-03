@@ -218,6 +218,11 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     fixed — water only where the routing found a lake; uncapped it cuts 4.8 against 3.5 × 10¹⁵ m³ and keeps the gate;
     THE REBOUND'S SPACING HAS NOT CONVERGED, the land over 1 km ~20 / 25.6 / 28.8 % at 125 / 25 / 12.5 Myr): THE ICE CURE
     GOES INTO PHASE 2'S SOLVE; NEXT the old-plains research with the rebound's convergence measured beside it; one commit.
+    ★ B45 (2026-10-03, the rebound's spacing MEASURED — without its four floors it settles from 12.5 Myr and the gate
+    passes; the old plains RESEARCHED — Earth's 485 m against the home planet's ~110 m, low because nothing raises them
+    again for 4.8 Gyr): THE EXACT REBOUND (no floors, fractions carried, ≤ 12.5 Myr) GOES INTO PHASE 2; BENCH THE
+    LANDSCAPE'S TIME (B37: a plate's plains erode only since its ground was last raised; the raise time from a reworking law
+    calibrated on Earth's continental ages, Artemieva 2006); one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

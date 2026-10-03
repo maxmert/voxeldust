@@ -1236,3 +1236,24 @@ it; and THE REBOUND'S SPACING HAS NOT CONVERGED (the land over 1 000 m about 20 
 **Example.** A glacier on a young range of the home planet now cuts its valley for the whole glacial epoch, step by step,
 and stops when its catchment falls under the snow line — never at its own thickness each call; the crust under the cut
 valley floats back as the rivers' cuts do.
+
+## B45. THE EXACT REBOUND GOES INTO PHASE 2; THE LANDSCAPE'S TIME BENCHED NEXT (2026-10-03)
+
+The rebound's spacing, MEASURED (run 19; the belts' design §14): the game's rebound floors four times (−0.125 m a node per
+rebound); without the floors the land over 1 000 m settles from a spacing of 12.5 Myr (28.7–30.0 % down to 1.6 Myr) and
+the gate passes with a matched rebound (29.09 / 29.06 %). The old plains, RESEARCHED (§15): Earth's old plains stand at a
+mean of 485 m, the home planet's at 105–114 m before its belts rise; they do not erode too fast, they are low because
+nothing raises them again for 4.8 Gyr (30 % of Earth's continental area was last raised under 0.35 Ga ago, Artemieva
+2006). The owner ruled:
+
+1. **THE EXACT REBOUND GOES INTO PHASE 2'S SOLVE** (*"Yes: exact, ≤ 12.5 Myr"*): the rebound without its floors, each
+   node's fraction of a sixteenth carried, at a spacing of 12.5 Myr or finer — a resolution cure with no knob.
+2. **BENCH THE LANDSCAPE'S TIME** (*"Bench the landscape's time"*; ruling B37 item 1): each plate's plains erode only since
+   its ground was last raised; a reworking law gives each plate its raise time, with Earth's measured continental ages
+   (Artemieva 2006) as the calibration body, replacing the plates' uniform age share (a lawful one-time draw of an
+   unrecoverable history, ruling T9); read the old plains against Earth's 485 m.
+3. One commit now, on `game`, no push.
+
+**Example.** A plate of the home planet whose ground was last raised 300 Myr ago keeps young, high plains; a plate last
+raised 2 Gyr ago has worn its plains low; a pilot crossing from one to the other sees the step in their ages, as on Earth
+between a young platform and an old shield.

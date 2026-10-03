@@ -1505,3 +1505,17 @@ AWAY from the reference, the step's report says so (ruling B6).
   it cuts 4.8 against 3.5 × 10¹⁵ m³, deepens the deepest valleys, keeps the gate, and goes into phase 2; the rebound's
   spacing has NOT converged (the land over 1 000 m ~20 / 25.6 / 28.8 % at 125 / 25 / 12.5 Myr); next the old-plains
   research with the rebound's convergence measured beside it.
+- 2026-10-03 — THE REBOUND'S SPACING CONVERGES (run 19; ruling B44 item 2): with the exact rebound (the solve's own floors
+  four times, −0.125 m a node per rebound), the rebound after each of K sweeps reads the land over 1 000 m 26.4 / 29.1 /
+  28.7 / 28.9 / 30.0 % at 25 / 12.5 / 6.25 / 3.1 / 1.6 Myr — settled from 12.5 Myr; the gate passes with a matched
+  rebound (214 and 414 passes: 29.09 / 29.06 %). The converged world: land over 1 000 m ~29 %, mountains ~19–20 % (Earth
+  20.8 % and 2.39 %).
+- 2026-10-03 — THE OLD PLAINS RESEARCHED (ruling B44 item 2; the belts' design §15): Earth's old plains stand at a mean of
+  485 m (median 349 m; 17 % of the globe); the home planet's at 105–114 m before its belts rise. They do not erode too fast
+  (0.2–0.8 m/Myr against cratons' 2–20); they are low because NOTHING RAISES THEM AGAIN for 4.8 Gyr — 30 % of Earth's
+  continental area was last raised under 0.35 Ga ago, 54 % under 0.75 Ga (Artemieva 2006). The strongest law the world
+  can state: ruling B37's LANDSCAPE'S TIME (each plate's plains erode only since its ground was last raised; with Earth's
+  ages, ARITH 477–581 m); its full form, a generated plate history.
+- 2026-10-03 — RULING B45: the exact rebound (no floors, ≤ 12.5 Myr) goes into phase 2; the landscape's time (B37) is
+  benched next, its raise times from a reworking law calibrated on Earth's continental ages (Artemieva 2006). Runs 18–19
+  and both research records committed.

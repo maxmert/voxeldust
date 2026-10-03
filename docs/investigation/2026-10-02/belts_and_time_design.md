@@ -812,3 +812,82 @@ the routing's lakes (run 17):
 3. **THE REBOUND'S SPACING HAS NOT CONVERGED**: the land over 1 000 m reads about 20 % with a rebound every 125 Myr, 25.6 %
    every 25 Myr and 28.8 % every 12.5 Myr, so the rebound is a resolution of its own, and "every pass" ties it to the pass
    count — the gate fails with it (+3.1 points). Its limit (the crust answers within ~10 kyr) needs its own measurement.
+
+**THE REBOUND'S SPACING CONVERGES (run 19; ruling B44 item 2).** The solve's own rebound floors four times — about
+−0.125 m a node per rebound, negligible over 40–214 rebounds but some 430 m over 3 400 — so the series runs with the exact
+rebound (`+rebx`: the same lift without the floors, each node's fraction carried). The joint law, the cured base, the ice
+cure, the mixed axis, the rebound after each of K sweeps:
+
+| The rebound every | land over 1 000 m | mountains | relief 50 / 90 / 99 % |
+|---|---|---|---|
+| 125 Myr (every five passes) | ~20 % | ~14–15 % | 78 / 1 384 / 3 692 m |
+| 25 Myr (every pass) | 26.40 % | 17.40 % | 105 / 1 593 / 4 035 m |
+| 12.5 Myr | 29.09 % | 19.86 % | 119 / 1 840 / 4 758 m |
+| 6.25 Myr | 28.65 % | 19.27 % | 123 / 1 772 / 4 719 m |
+| 3.1 Myr | 28.86 % | 19.02 % | 130 / 1 734 / 4 668 m |
+| 1.6 Myr | 30.01 % | 19.76 % | 150 / 1 768 / 4 689 m |
+| the 414-pass axis, every pass (12.5 Myr) | 29.06 % | 19.05 % | 110 / 1 552 / 4 522 m |
+
+1. **From 12.5 Myr down the shares stay within about 1.4 points**: the rebound settles at a spacing of 12.5 Myr or finer
+   when it carries its fractions; the crust's own ~10 kyr answer is the limit it approaches.
+2. **The gate passes with a matched rebound**: 214 passes with two sweeps each and 414 passes, both rebounding every
+   12.5 Myr, read 29.09 / 29.06 % over 1 000 m and 19.9 / 19.1 % mountains.
+3. **The sweeps' own step** (K = 8 sweeps, the rebound every five passes): the land over 1 000 m 19.5 → 21.2 %, the
+   mountains 14.1 → 15.4 % — a smaller resolution of its own, settled by the same sub-sweeps.
+4. **The converged world**: the land over 1 000 m about 29 % (Earth 20.8 %), mountains about 19–20 % of the land (Earth
+   2.39 %), the relief at 50 / 90 / 99 % about 120–150 / 1 750 / 4 700 m (Earth 83 / 550 / 1 383 m). A prompt rebound
+   keeps worn ranges high; the excess has three named causes left — the belts' plateaus (the Andean margins, parked),
+   the craters, and the old plains' own time (the research).
+
+---
+
+## 15. The old plains: how Earth's old continents keep their height (2026-10-03; ruling B44 item 2; a read-only agent,
+its sources and scripts in the scratchpad's `sources4/`, its index `sources4/INDEX.txt`)
+
+[V] read in full; [A] abstract only; [R] recalled; ARITH the agent's own arithmetic.
+
+**Earth's old plains (ARITH, ETOPO 2022 averaged into 7.4–9.3 km blocks; CRUST 2.0's Archean, Proterozoic and platform
+types; Antarctica and the ice types left out; the stands' relief rule).** 86.7 million km² — 65 % of the land counted,
+17.0 % of the globe; the mean height 485 m, the median 349 m (outside Africa–Arabia 408 / 262 m); 13 % over 1 000 m; the
+relief at 50 / 90 % 56–62 / 299–325 m; by region: the Canadian Shield 305 m, the Baltic Shield 257 m, the Siberian
+platform 448 m, the West African craton 304 m, Yilgarn–Pilbara 363 m, the Amazonian craton 210 m, the East European
+platform 153 m, Congo 597 m, Kalahari 1 106 m. (Control: all counted land 655 m against the repository's own Earth
+instrument's 661 m.)
+
+**The home planet before its belts rise (ARITH, from run 15's ledgers):** the mean land 105–114 m over the sea, under
+0.01 % of it over 1 000 m. **Its plains do not erode too fast**: they lose 0.2–0.8 m/Myr of rock in the solve's last
+2.8 Gyr, against cratons' 2–20 m/Myr in the Cenozoic (Beauvais & Chardon 2013 [V]) and ≤ 2.5 m/Myr over 1.7 Gyr on the
+western Canadian Shield (Flowers et al. 2006 [A]). **They are low because nothing raises them again for 4.8 Gyr**: the
+solve's mean falls under Earth's 485 m at 1.5–1.7 Gyr, so Earth's old plains look like 1.5–1.7 Gyr of this solve; the
+land loses 1.3 × 10¹⁸ m³ (0.27 km³/yr) and nothing returns it.
+
+**Why Earth's old continents keep their height (each with its size):**
+- the decay of ranges with isostasy and thresholds keeps relief for hundreds of Myr (Baldwin et al. 2003 [A]; Egholm
+  et al. 2013 [A]); Ahnert's law `d = 0.0001535·h − 0.01088` m/kyr (`h` the mean relief in 20 km squares) stops at
+  `h` ≈ 71 m [V], where Earth's plains read 56–62 m (ARITH);
+- the freeboard stays within ~200 m through the Phanerozoic: the sea follows the ocean basins' volume (Korenaga et al.
+  2017, Eq. 3.1 [V]; Parsons 1982 [A]); the Late Cretaceous sea stood 170 (85–270) m above today's (Müller et al.
+  2008 [A]);
+- the rock cycle balances: arcs add 2.7 km³/yr, subduction and sutures remove 3.2 km³/yr (Scholl & von Huene 2009 [A]);
+- **RE-THICKENING**: 30.0 % of the continental area has a tectono-thermal age under 0.35 Ga, 53.7 % under 0.75 Ga,
+  88.8 % under 2.95 Ga (Artemieva 2006, Table 4 [V]) — most continents were last raised far more recently than the
+  planet's age;
+- dynamic topography ±500 m at 10⁴ km (Hoggard et al. 2016 [V]) — the Kalahari's 1.1 km against 153–448 m elsewhere;
+- a craton's depleted root does not lift it: the cold root sinks the column more than depletion lifts it (Lee et al.
+  2017, Eq. 2 [V], ARITH: +1.52 km against a fertile root, −1.43 km against no root; Mooney & Vidale 2003 [A]).
+
+**The candidate laws (each the owner's):**
+
+| Law | Needs from the world | Calibration | Effect on the old plains (ARITH) | Weakness |
+|---|---|---|---|---|
+| **The landscape's time** (ruling B37): a plain erodes only since its ground was last raised | a raise age per plate or province (an unrecoverable history, T9's lawful draw) from a reworking law; the height after a raise | Earth's tectono-thermal ages (Artemieva 2006) | 477 m (414 passes) / 581 m (214 passes) for the 70 % older than 0.35 Ga, against 105–114 m today | Earth's ages carry a preservation bias; the height after a raise is assumed |
+| a generated plate history (Wilson cycles) | past layouts, collisions, rifts | Earth's assembly intervals [R]; Artemieva as the check | as above, plus old ranges | the largest build; ends "today's plates for the whole age" |
+| the rock cycle (a marine deposit, subduction's return, the arcs) | a deposit; the margins' lengths and speeds (has) | Scholl & von Huene 2009 | ~0 on the plains; without a return the sea would rise ~1.5 km | must not count the freeboard law's effect twice |
+| the sea from the ocean basins' volume | the sea floor's ages through time | Earth's area–age and depth–age | 0 with fixed plates | needs the plate history |
+| a low-relief threshold (Ahnert) | the relief in ~20 km windows (has) | 20 mid-latitude basins | decay stops near 71 m of relief | extrapolated; may repeat `n = 2.2`'s effect |
+| dynamic topography, thermal isostasy | a mantle flow field; root thickness | Earth | ±0.5 km by region; not a cure | no mantle model; a drawn field is not lawful |
+
+**The research's reading:** the plains' low height is a missing history, not a fast erosion; the landscape's time is the
+strongest law that the world can state today (each plate's raise age from a reworking law calibrated on Earth's
+tectono-thermal ages; the plates already carry a uniform age share, whose median of 2.5 Gyr is far older than Earth's
+~0.7 Gyr, so the share needs its own law), and a generated plate history is its full form.

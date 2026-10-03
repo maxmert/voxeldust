@@ -128,6 +128,62 @@ pub struct Laws {
     /// the new height). `true` reads a receiver as a lake only where the routing found one (its pit word), so every other
     /// receiver gives its new height ([`sweep_base`]); the solve's own sweep and the joint law's both take it.
     pub base_cure: bool,
+    /// ★ A RESOLUTION, NOT A LAW (the rebound's spacing; ruling B44 item 2): the solve's own rebound floors four times
+    /// (the block mean, two smoothing means, the lift), about −0.125 m a node per rebound — 27 m over 214 rebounds but some
+    /// 430 m over 3 400 — so a finer spacing reads lower by its rounding alone. `true` runs [`rebound_exact`]: the same
+    /// lift, `ρ_c/ρ_m` of the smoothed removal, without the floors, each node's fraction of a sixteenth carried.
+    pub rebound_exact: bool,
+}
+
+/// ★ THE REBOUND WITHOUT ITS FLOORS (see [`Laws::rebound_exact`]): `vd_terrain::solve::MacroSolve::rebound` line for line —
+/// the removal since the last rebound restricted to the level nearest the flexural parameter, smoothed there by
+/// `SMOOTH_PASSES` nine-node means through the seam table, prolonged to each node's parent, `ρ_c/ρ_m` of it lifted — in
+/// real numbers, each node's fraction of a sixteenth carried in `carry` to its next rebound, so the lifts sum exactly.
+fn rebound_exact(state: &mut MacroSolve, alpha_m: f64, carry: &mut Vec<f64>) {
+    use vd_terrain::macro_lattice::NO_NODE;
+    let n = state.node_count();
+    if carry.len() != n {
+        *carry = vec![0.0; n];
+    }
+    let k = state.coarse_level(alpha_m);
+    let coarse = state.lattice.coarser(k).unwrap_or(state.lattice);
+    let m = coarse.node_count();
+    let mut field = vec![0.0f64; m];
+    let mut parent = Vec::with_capacity(n);
+    for node in 0..n as u32 {
+        let (face, i, j) = state.lattice.split(node);
+        let c = coarse.index(face, i >> k, j >> k);
+        parent.push(c);
+        field[c as usize] += f64::from(state.pending[node as usize]);
+        state.pending[node as usize] = 0;
+    }
+    let block = f64::from(1u32 << (2 * k));
+    for f in &mut field {
+        *f /= block;
+    }
+    for _ in 0..vd_terrain::solve::SMOOTH_PASSES {
+        let mut next = vec![0.0f64; m];
+        for c in 0..m as u32 {
+            let mut sum = field[c as usize];
+            let mut count = 1.0f64;
+            for nb in coarse.neighbours(c) {
+                if nb != NO_NODE {
+                    sum += field[nb as usize];
+                    count += 1.0;
+                }
+            }
+            next[c as usize] = sum / count;
+        }
+        field = next;
+    }
+    let share =
+        vd_terrain::land::CONTINENTAL_CRUST_DENSITY_KGM3 / vd_terrain::land::MANTLE_DENSITY_KGM3;
+    for node in 0..n {
+        let exact = field[parent[node] as usize] * share + carry[node];
+        let lift = exact.floor();
+        carry[node] = exact - lift;
+        state.z[node] += lift as i32;
+    }
 }
 
 /// ★ THE SWEEP'S BASE, CURED (see [`Laws::base_cure`]): a lake the routing found stands at its flood level (its spill),
@@ -1165,6 +1221,8 @@ pub fn solve_copy(
     let mut since_route = schedule.flood_every;
     let mut since_climate = schedule.climate_every;
     let mut since_rebound = 0;
+    // The exact rebound's carried fractions of a sixteenth (a resolution; `Laws::rebound_exact`).
+    let mut rebound_carry: Vec<f64> = Vec::new();
     let mut climate = None;
     let no_ice: Vec<i32> = if words.water_km3 == 0 {
         vec![i32::MAX; state.node_count()]
@@ -1524,69 +1582,81 @@ pub fn solve_copy(
                 }
             }
             _ => {
-                // LAW (F2): the joint law's sweep, or the solve's own.
-                if laws.joint_law {
-                    joint_sweep(
-                        &mut state,
-                        (times[pass as usize + 1] - times[pass as usize]) as f64,
-                        pass,
-                        schedule.passes,
-                        laws.base_cure,
-                    );
-                } else if laws.sub_sweeps > 1 {
-                    // RESOLUTION (the gate's cause): k sweeps on this pass's routing, each a k-th of the gain.
-                    let k = laws.sub_sweeps;
-                    let uplift = std::mem::take(&mut state.uplift);
-                    let mut cut_sum = vec![0u32; state.node_count()];
-                    for sub in 0..k {
-                        state.uplift = if sub == 0 {
-                            uplift.clone()
-                        } else {
-                            vec![0; uplift.len()]
-                        };
-                        if sub > 0 && laws.sub_route {
-                            if ledger_on {
-                                prev_receiver.clone_from(&state.receiver);
-                            }
-                            routes.push(state.route());
-                            state.accumulate();
-                            if ledger_on {
-                                classes = source_classes(&state, &prev_receiver);
-                                count_sources(
-                                    &classes,
-                                    &state.z,
-                                    state.sea_z,
-                                    &mut entry.nodes_by_source,
-                                );
-                            }
+                // LAW (F2): the joint law's sweep, or the solve's own; RESOLUTION: k sweeps on this pass's routing, each a
+                // k-th of the pass's time (the drains found again before each where asked), and with the rebound by time
+                // a rebound after every sweep — so the rebound's spacing is a k-th of the pass while the routing stays.
+                let k = laws.sub_sweeps.max(1);
+                let dt_pass = (times[pass as usize + 1] - times[pass as usize]) as f64;
+                let uplift = std::mem::take(&mut state.uplift);
+                let mut cut_sum = vec![0u32; state.node_count()];
+                for sub in 0..k {
+                    state.uplift = if sub == 0 {
+                        uplift.clone()
+                    } else {
+                        vec![0; uplift.len()]
+                    };
+                    if sub > 0 && laws.sub_route {
+                        if ledger_on {
+                            prev_receiver.clone_from(&state.receiver);
                         }
-                        let z_before = ledger_on.then(|| state.z.clone());
-                        if laws.base_cure {
-                            sweep_cured(&mut state, gain / u64::from(k), pass, schedule.passes);
-                        } else {
-                            let _ = state.sweep(gain / u64::from(k), pass, schedule.passes);
-                        }
-                        if let Some(zb) = z_before {
-                            attribute_cut(
+                        routes.push(state.route());
+                        state.accumulate();
+                        if ledger_on {
+                            classes = source_classes(&state, &prev_receiver);
+                            count_sources(
                                 &classes,
-                                &state.cut_now,
-                                &zb,
-                                &state.area,
+                                &state.z,
                                 state.sea_z,
-                                &mut entry.cut_by_source_m3,
+                                &mut entry.nodes_by_source,
                             );
                         }
-                        for (sum, &c) in cut_sum.iter_mut().zip(&state.cut_now) {
-                            *sum = sum.saturating_add(c);
+                    }
+                    let z_before = ledger_on.then(|| state.z.clone());
+                    if laws.joint_law {
+                        joint_sweep(
+                            &mut state,
+                            dt_pass / f64::from(k),
+                            pass,
+                            schedule.passes,
+                            laws.base_cure,
+                        );
+                    } else if laws.base_cure {
+                        sweep_cured(&mut state, gain / u64::from(k), pass, schedule.passes);
+                    } else {
+                        let _ = state.sweep(gain / u64::from(k), pass, schedule.passes);
+                    }
+                    if let Some(zb) = z_before
+                        && !classes.is_empty()
+                    {
+                        attribute_cut(
+                            &classes,
+                            &state.cut_now,
+                            &zb,
+                            &state.area,
+                            state.sea_z,
+                            &mut entry.cut_by_source_m3,
+                        );
+                    }
+                    for (sum, &c) in cut_sum.iter_mut().zip(&state.cut_now) {
+                        *sum = sum.saturating_add(c);
+                    }
+                    // LAW (B42 item 2): with the rebound by time and k sweeps, a rebound after each sweep.
+                    if laws.rebound_every_pass && k > 1 {
+                        let before_reb = ledger_on.then(|| state.z.clone());
+                        if laws.rebound_exact {
+                            rebound_exact(&mut state, alpha_m, &mut rebound_carry);
+                        } else {
+                            let _ = state.rebound(alpha_m);
+                        }
+                        if let Some(b) = before_reb {
+                            let v = volume_change(&b, &state.z, &state.area, state.sea_z);
+                            entry.rebound_m3[0] += v[0];
+                            entry.rebound_m3[1] += v[1];
                         }
                     }
-                    state.uplift = uplift;
-                    state.cut_now = cut_sum;
-                } else if laws.base_cure {
-                    sweep_cured(&mut state, gain, pass, schedule.passes);
-                } else {
-                    let _ = state.sweep(gain, pass, schedule.passes);
                 }
+                state.uplift = uplift;
+                state.cut_now = cut_sum;
             }
         }
         if let Some(b) = before {
@@ -1597,23 +1667,18 @@ pub fn solve_copy(
                 &state.area,
                 state.sea_z,
             );
-            let sub_swept = laws.sub_sweeps > 1 && !laws.joint_law && v == Router::D8;
-            if !sub_swept && !classes.is_empty() {
-                attribute_cut(
-                    &classes,
-                    &state.cut_now,
-                    &b,
-                    &state.area,
-                    state.sea_z,
-                    &mut entry.cut_by_source_m3,
-                );
-            }
+            // (the sweeps of the D8 arm attribute their own cut, sweep by sweep)
         }
         since_rebound += 1;
-        // LAW (B42 item 2): the rebound after every pass where asked.
-        if since_rebound >= schedule.isostasy_every || laws.rebound_every_pass {
+        // LAW (B42 item 2): the rebound after every pass where asked (after every sweep already, with k sweeps).
+        let swept_rebound = laws.rebound_every_pass && laws.sub_sweeps > 1;
+        if !swept_rebound && (since_rebound >= schedule.isostasy_every || laws.rebound_every_pass) {
             let before = ledger_on.then(|| state.z.clone());
-            let _ = state.rebound(alpha_m);
+            if laws.rebound_exact {
+                rebound_exact(&mut state, alpha_m, &mut rebound_carry);
+            } else {
+                let _ = state.rebound(alpha_m);
+            }
             since_rebound = 0;
             if let Some(b) = before {
                 entry.rebound_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);

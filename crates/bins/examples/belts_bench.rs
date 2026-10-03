@@ -30,7 +30,8 @@
 //!   `%Kr`: the same with the drains found again before each sub-sweep.
 //! - any case `+ice`, `+icereb`, `+reb` (before the axis): ruling B42 item 2's cures — the ice stepped in time with no
 //!   per-call cap; the same with its cut booked for the rebound; the rebound after every pass. `+base`: ruling B42 item
-//!   1's mechanism cured — the sweep reads a receiver as a lake only where the routing found one.
+//!   1's mechanism cured — the sweep reads a receiver as a lake only where the routing found one. `+rebx`: the rebound
+//!   without its floors (each node's fraction carried), so a finer rebound spacing is not read low by rounding.
 //! - `--ledger=DIR`: each case also writes its PASS LEDGER to `DIR/<case>.csv` — each process's change of volume on the
 //!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause).
 //!
@@ -452,6 +453,7 @@ fn main() {
         let name = cures.next().expect("a case name");
         let (mut ice_stepped, mut ice_rebound, mut rebound_every_pass, mut base_cure) =
             (false, false, false, false);
+        let mut rebound_exact = false;
         for cure in cures {
             match cure {
                 "ice" => ice_stepped = true,
@@ -461,7 +463,8 @@ fn main() {
                 }
                 "reb" => rebound_every_pass = true,
                 "base" => base_cure = true,
-                other => panic!("a cure is ice, icereb, reb or base, not {other}"),
+                "rebx" => rebound_exact = true,
+                other => panic!("a cure is ice, icereb, reb, rebx or base, not {other}"),
             }
         }
         let standard = Schedule::standard(words.age_yr);
@@ -608,6 +611,7 @@ fn main() {
             ice_rebound,
             rebound_every_pass,
             base_cure,
+            rebound_exact,
             ..laws
         };
         let case = &if sub_sweeps > 1 {
