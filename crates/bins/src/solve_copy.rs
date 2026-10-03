@@ -96,6 +96,17 @@ pub struct Laws {
     /// into Eurasia "has decreased exponentially since their collision"; `τ` = 45.1 Myr) — calibration body Tibet;
     /// `v_n` reads as the speed when the collision began. An Andean margin keeps its own law.
     pub collision_slowing: bool,
+    /// ★ A RESOLUTION, NOT A LAW (ruling B41 item 1, the gate's cause): `k > 1` runs the solve's own sweep `k` times in
+    /// each pass on the pass's ONE routing, each with a `k`-th of the pass's gain, the uplift in the first only and the
+    /// cut summed — so a pass's cut is stepped finer while the drains, the flood, the climate and the rebound keep their
+    /// own cadence. If `k` sweeps in a 25 Myr pass cut as the 12.5 Myr axis cuts, the sweep's own step is the cause; if
+    /// they cut as one sweep does, the routing every pass is. `0` and `1` are the solve's one sweep.
+    pub sub_sweeps: u32,
+    /// ★ A RESOLUTION, NOT A LAW (ruling B41 item 1): with `sub_sweeps > 1`, `true` finds the drains again (the flood,
+    /// the receivers and the discharge) before every sub-sweep after the first, as a pass of a `k` times finer axis
+    /// would, while the climate, the rebound and the talus keep the pass's cadence. If routed sub-sweeps cut as the finer
+    /// axis cuts, the routing's cadence is the gate's cause.
+    pub sub_route: bool,
 }
 
 /// ★ P2's calibration (Replumaz et al. 2010): the thickness of India's crust stored in the collision (in the thickened
@@ -682,6 +693,81 @@ impl Router {
     }
 }
 
+/// ★ THE PASS LEDGER (ruling B41 item 1, the gate's cause): what each process did to the heights in one pass, as a change
+/// of volume over the land and over the sea floor (m³, a lowering negative; a node's side is read before the process:
+/// land where it stands over the sea's level), and the land's readings after the pass. A readout only: no law reads it.
+///
+/// **Example.** If the land over 1 000 m parts between the 214- and the 414-pass axes only in the last 2.6 Myr, and the
+/// ice's column carries the difference, the ice's cut is the cause; if it parts over the whole age in the cut's column,
+/// the rivers' time step is.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PassLedger {
+    /// The pass's start and end, years from the solve's start.
+    pub t0_yr: u64,
+    pub t1_yr: u64,
+    /// Each process's change of volume, `[land, sea floor]`, m³.
+    pub craters_m3: [f64; 2],
+    pub talus_m3: [f64; 2],
+    pub ice_m3: [f64; 2],
+    /// The sweep's net change: the uplift, less the cut, plus the deposit's fill.
+    pub sweep_m3: [f64; 2],
+    /// The sweep's two known parts: the uplift it adds and the cut it removes (a positive volume).
+    pub uplift_m3: [f64; 2],
+    pub cut_m3: [f64; 2],
+    pub rebound_m3: [f64; 2],
+    pub peak_m3: [f64; 2],
+    /// After the pass: the sea's level (sixteenths), the land's mean height over it (m, by area), the land's share over
+    /// 1 000 m (by area), and the land's share of the globe.
+    pub sea_z: i32,
+    pub land_mean_m: f64,
+    pub land_over_1km: f64,
+    pub land_share: f64,
+}
+
+/// The change of volume from `before` to `after`, m³, `[land, sea floor]` by each node's side before.
+fn volume_change(before: &[i32], after: &[i32], area: &[u64], sea_z: i32) -> [f64; 2] {
+    let mut v = [0.0f64; 2];
+    for ((&b, &a), &ar) in before.iter().zip(after).zip(area) {
+        v[usize::from(b <= sea_z)] += f64::from(a - b) * ar as f64;
+    }
+    let steps = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+    [v[0] / steps, v[1] / steps]
+}
+
+/// A per-node volume in sixteenths times the area, m³, `[land, sea floor]` by each node's side.
+fn volume_of(per_node: impl Iterator<Item = i64>, z: &[i32], area: &[u64], sea_z: i32) -> [f64; 2] {
+    let mut v = [0.0f64; 2];
+    for ((d, &zz), &ar) in per_node.zip(z).zip(area) {
+        v[usize::from(zz <= sea_z)] += d as f64 * ar as f64;
+    }
+    let steps = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+    [v[0] / steps, v[1] / steps]
+}
+
+/// The land's readings over the sea's level: its mean height (m, by area), its share over 1 000 m, its share of the globe.
+fn land_readings(z: &[i32], area: &[u64], sea_z: i32) -> (f64, f64, f64) {
+    let steps = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+    let over = i64::from(1_000 * vd_terrain::solve::Z_STEPS_PER_M);
+    let (mut land, mut all, mut sum, mut high) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for (&z, &a) in z.iter().zip(area) {
+        let a = a as f64;
+        all += a;
+        let h = i64::from(z) - i64::from(sea_z);
+        if h > 0 {
+            land += a;
+            sum += h as f64 / steps * a;
+            if h > over {
+                high += a;
+            }
+        }
+    }
+    (
+        sum / land.max(1.0),
+        high / land.max(1.0),
+        land / all.max(1.0),
+    )
+}
+
 /// What the copy leaves: the final state, the facies, and the routes the lakes' fixed point read.
 pub struct Solved {
     pub state: MacroSolve,
@@ -697,6 +783,8 @@ pub struct Solved {
     pub peak_left: i32,
     /// The belts' excess rock that found no room by the end, m³ (B40 item 1; zero: every metre placed).
     pub carry_left_m3: f64,
+    /// The pass ledger, one entry a pass, where the caller asked for it (empty otherwise).
+    pub ledger: Vec<PassLedger>,
 }
 
 /// ★ THE COPY of `vd_terrain::solve::solve_full` (generator 22), line for line, with the routing variant's
@@ -711,7 +799,9 @@ pub fn solve_copy(
     v: Router,
     laws: &Laws,
     trace: Option<Shot<'_>>,
+    ledger_on: bool,
 ) -> Option<Solved> {
+    let mut ledger: Vec<PassLedger> = Vec::new();
     let lattice = body.macro_lattice()?;
     let mut land = vd_terrain::land::initial_land(body, &lattice, &words.land());
     // LAW (L1, L2, L4): the belts by their influx replace the room's belts; their nodes read the folded belt's rock.
@@ -835,8 +925,14 @@ pub fn solve_copy(
         } else {
             epoch_step
         };
+        let mut entry = PassLedger {
+            t0_yr: times[pass as usize],
+            t1_yr: times[pass as usize + 1],
+            ..PassLedger::default()
+        };
         // LAW (B37, the craters' own time): the craters whose impact falls in this pass are stamped now.
         if laws.craters_at_own_age {
+            let before = ledger_on.then(|| state.z.clone());
             let (t0, t1) = (times[pass as usize], times[pass as usize + 1]);
             let due: Vec<vd_terrain::craters::Crater> = crater_record
                 .iter()
@@ -848,6 +944,9 @@ pub fn solve_copy(
                 .collect();
             if !due.is_empty() {
                 vd_terrain::craters::apply_craters(&mut state.z, &lattice, &due, gravity);
+            }
+            if let Some(b) = before {
+                entry.craters_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);
             }
         }
         if since_climate >= schedule.climate_every {
@@ -910,16 +1009,24 @@ pub fn solve_copy(
             if (pass + 1) * schedule.talus_passes / schedule.passes.max(1)
                 > pass * schedule.talus_passes / schedule.passes.max(1)
             {
+                let before = ledger_on.then(|| state.z.clone());
                 let tan: Vec<u32> = c.aridity_q8.iter().map(|&a| tan_repose_q16(a)).collect();
                 let _ = state.talus(&tan);
                 talus_done += 1;
+                if let Some(b) = before {
+                    entry.talus_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);
+                }
             }
             let line: &[i32] = if words.water_km3 == 0 {
                 &no_ice
             } else {
                 &c.ela_z
             };
+            let before = ledger_on.then(|| state.z.clone());
             let _ = state.ice(line, &c.temperature_dk, c.lapse_mk_km, gravity, epoch_step);
+            if let Some(b) = before {
+                entry.ice_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);
+            }
         }
         // LAW (L1, L2, L4): each node's uplift for THIS pass, handed to the shipped sweep through its own word — the
         // sweep adds `uplift_step(total, pass, passes)`, so a total of `step · passes` adds exactly `step` (ARITH: the
@@ -999,6 +1106,19 @@ pub fn solve_copy(
                     .expect("a pass's uplift times the pass count fits a 32-bit word");
             }
         }
+        // The ledger: the uplift the sweep adds this pass, on each node's side before the sweep.
+        let before = ledger_on.then(|| {
+            entry.uplift_m3 = volume_of(
+                state
+                    .uplift
+                    .iter()
+                    .map(|&u| i64::from(MacroSolve::uplift_step(u, pass, schedule.passes))),
+                &state.z,
+                &state.area,
+                state.sea_z,
+            );
+            state.z.clone()
+        });
         // VARIANT 3: D∞'s cut and deposit over both links; the others cut with the solve's own sweep.
         match (v, links.as_ref()) {
             (Router::Dinf, Some(d)) => {
@@ -1096,21 +1216,68 @@ pub fn solve_copy(
                         pass,
                         schedule.passes,
                     );
+                } else if laws.sub_sweeps > 1 {
+                    // RESOLUTION (the gate's cause): k sweeps on this pass's routing, each a k-th of the gain.
+                    let k = laws.sub_sweeps;
+                    let uplift = std::mem::take(&mut state.uplift);
+                    let mut cut_sum = vec![0u32; state.node_count()];
+                    for sub in 0..k {
+                        state.uplift = if sub == 0 {
+                            uplift.clone()
+                        } else {
+                            vec![0; uplift.len()]
+                        };
+                        if sub > 0 && laws.sub_route {
+                            routes.push(state.route());
+                            state.accumulate();
+                        }
+                        let _ = state.sweep(gain / u64::from(k), pass, schedule.passes);
+                        for (sum, &c) in cut_sum.iter_mut().zip(&state.cut_now) {
+                            *sum = sum.saturating_add(c);
+                        }
+                    }
+                    state.uplift = uplift;
+                    state.cut_now = cut_sum;
                 } else {
                     let _ = state.sweep(gain, pass, schedule.passes);
                 }
             }
         }
+        if let Some(b) = before {
+            entry.sweep_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);
+            entry.cut_m3 = volume_of(
+                state.cut_now.iter().map(|&c| i64::from(c)),
+                &b,
+                &state.area,
+                state.sea_z,
+            );
+        }
         since_rebound += 1;
         if since_rebound >= schedule.isostasy_every {
+            let before = ledger_on.then(|| state.z.clone());
             let _ = state.rebound(alpha_m);
             since_rebound = 0;
+            if let Some(b) = before {
+                entry.rebound_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);
+            }
         }
         // LAW (L0): the peak law after every pass, on the height that stands.
         if laws.limits_as_law {
+            let before = ledger_on.then(|| state.z.clone());
             let (c, left) = peak_law(&mut state, peak_cap);
             collapsed += c;
             peak_left = peak_left.max(left);
+            if let Some(b) = before {
+                entry.peak_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);
+            }
+        }
+        if ledger_on {
+            let (mean, high, share) = land_readings(&state.z, &state.area, state.sea_z);
+            entry.sea_z = state.sea_z;
+            entry.land_mean_m = mean;
+            entry.land_over_1km = high;
+            entry.land_share = share;
+            ledger.push(entry);
         }
         if let Some(shot) = trace
             && [0u32, 1, 4, 9, 19, schedule.passes - 1].contains(&pass)
@@ -1215,6 +1382,7 @@ pub fn solve_copy(
         peak_left,
         carry_left_m3: carry.iter().sum::<i128>() as f64
             / f64::from(vd_terrain::solve::Z_STEPS_PER_M),
+        ledger,
     })
 }
 

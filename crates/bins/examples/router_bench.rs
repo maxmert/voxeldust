@@ -391,6 +391,7 @@ fn planet_stage(
         v,
         &Laws::default(),
         shot.as_ref().map(|f| f as &dyn Fn(&str, &[i32])),
+        false,
     )
     .expect("the home planet solves");
     println!("the copy solved in {:.1} s", t.elapsed().as_secs_f64());

@@ -1473,3 +1473,18 @@ AWAY from the reference, the step's report says so (ruling B6).
   beside it; the erosion law (F49) waits; proper laws, never Earth — an Earth place only fixes a constant a law cannot
   compute yet (India's decoupling depth, Tibet's slowing time, until a heat law per body); the owner's word owed on
   that answer before the two belt laws are recorded as adopted. Runs 8–10 and the two law switches committed.
+- 2026-10-03 — THE GATE'S CAUSE, MEASURED (ruling B41 item 1; the belts' design §14; the census's runs 11–13): the
+  copy's pass ledger shows the rivers' cut is the term that moves; the ice is not the cause; the sweep's own step is not
+  (eight sweeps a pass on one routing move the cut 5 %); THE NUMBER OF ROUTINGS IS (two sweeps a pass with the drains
+  found again between them give the twice-as-fine axis's numbers within 1 %). Today's laws: 1 / 2 / 4 routings a pass
+  cut 588 / 802 / 991 × 10¹⁵ m³ and leave 35.7 / 21.0 / 8.4 % of the land (away from closed basins) over 1 000 m — the
+  converged laws grade the planet flat, as ruling B39 said. Found on the way: the ice's cut stops at the ice's own
+  thickness each call (a cap standing in for a law), the ice's cut is never rebounded, and the rebound runs every five
+  passes, not by time. THE ANDEAN RESEARCH (the design §13): no published rate law (Lallemand's line is a sign rule, with
+  a sign error in the design's §12 form); the megathrust's force law fits Earth's margins but needs three facts the
+  world does not have; no window law (the slab's entry into the lower mantle).
+- 2026-10-03 — RULING B42: the routing's mechanism first (split each pass's cut: drains changed, lakes drained, flats
+  with a new outlet); the three defects cured in the bench copy (the ice's thickness cap, the ice's cut missing from the
+  rebound, the rebound by pass count); the Andean margins parked (today's share a registered interim). The history does
+  not settle even at 8 routings a pass (run 13): at 1 Gyr the land over 1 km reads 64.9 / 57.7 / 48.9 / 39.3 % at 1 / 2
+  / 4 / 8 routings. Runs 11–13 and the pass ledger committed.

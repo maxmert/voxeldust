@@ -11848,7 +11848,19 @@ updated in the same change as the work, deleted when done). The interims named h
     crust's partition at a collision, Replumaz et al. 2010; S2 the collision's slowing, Clark 2012; the design §12):
     the collisions' rock to a fifth, the plateau land almost halved, the Andean margins now 81 % of the belts' rock;
     ★ THE GATE FAILS ON THE LAND'S HEIGHT (214 → 414 passes: the land over 1 000 m falls 8–10 points under both erosion
-    laws, the mountains move 0.3–1.0 point) — its cause is owed before the erosion-law decision (F49).
+    laws, the mountains move 0.3–1.0 point) — its cause is owed before the erosion-law decision (F49). ★ THE CAUSE,
+    MEASURED (runs 11–13, the design §14): THE NUMBER OF ROUTINGS sets the rivers' cut (1 / 2 / 4 routings a pass: cut
+    588 / 802 / 991 × 10¹⁵ m³ on the land, land over 1 000 m 35.7 / 21.0 / 8.4 %); the sweep's own step does not (5 %).
+    Owed with the cure: a routing cheap enough to converge (a routing costs about 1.2–3 s today), and three defects found
+    on the way — the ice's per-call thickness cap (a cap standing in for a law), the ice's cut missing from the rebound,
+    the rebound counted in passes instead of time (ruling B42 item 2: cured in the copy first). The HISTORY does not
+    settle even at 8 routings a pass (ruling B42 item 1: the mechanism next).
+  - 🟨 THE ANDEAN MARGINS' SHARE, A REGISTERED INTERIM (ruling B42 item 3): every ocean-under-continent margin shortens
+    by Norabuena et al. 1998's share (12.5/70 of the convergence) for its whole window — 81 % of the belts' rock in run
+    10, about four times Earth's Andean high land. No published rate law exists (Lallemand's line is a sign rule); the
+    megathrust's force law (Dielforder & Hampel 2021) fits Earth's margins but needs the fault's friction, the depth of
+    its frictional-viscous transition and the slab's dip, which the world does not state; the window waits for the slab's
+    entry into the lower mantle. Returns after the gate converges (the research: the belts' design §13).
 - 🟥 **THE REST OF M0-4:** finer Earth data for the scales under a node (the hills, the valleys, the pits), the Moon and
   Mars, the spectra, the slopes by class and the ice line on Earth's real climate.
 - 🟥 **STEPS 2, 3 AND 5 OWED:** the "before" record on every pinned stand (numbers and pictures, no window); the corrected

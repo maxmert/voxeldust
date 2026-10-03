@@ -1159,3 +1159,31 @@ move the mountains by 0.3–1.0 point but the land over 1 000 m by 8–10 points
 decoupling level — 20 km down in the home planet's own lithosphere — and the rest sinks into its mantle; the pilot sees
 the home planet's own plateau, its width set by its own plates' speeds. India's only role is the one measured number
 behind the 20 km.
+
+## B42. THE ROUTING'S MECHANISM FIRST; THE THREE DEFECTS CURED IN THE COPY; THE ANDEAN MARGINS PARKED (2026-10-03)
+
+The gate's cause, MEASURED (runs 11–13; `docs/investigation/2026-10-02/belts_and_time_design.md` §14): the pass ledger
+shows the rivers' cut is the term that moves; the sweep's own step is not the cause (eight sweeps a pass on one routing
+move the cut 5 %); THE NUMBER OF ROUTINGS IS (1 / 2 / 4 / 8 routings a pass: the cut 588 / 802 / 991 / 1 103 × 10¹⁵ m³,
+the land over 1 000 m 35.7 / 21.0 / 8.4 / 0.9 %, the land's mean height 874 / 540 / 269 / 101 m — today's laws, routed
+often, grade the planet flat, as B39 said); and the HISTORY does not settle even at one routing every 3 Myr, so each
+routing seems to unlock about the same cut whatever the time between routings. The Andean research (§13): no published
+rate law; the megathrust's force law fits Earth's margins but needs three facts the world lacks; no window law. The
+owner ruled:
+
+1. **FIND THE MECHANISM** (*"Find the mechanism"*): split each pass's cut by its source — the nodes whose drain changed,
+   the lakes that drained, the flats that got a new outlet — so the measurement names which candidate unlocks the cut
+   at each routing; then the cure is designed with its numbers and brought to the owner.
+2. **THE THREE DEFECTS CURED IN THE COPY** (*"Cure them in the copy"*): the ice's cut stepped in time so a glacier
+   shrinks as its bed falls, with no per-call thickness cap (ruling B23: a cap standing in for a law goes); the ice's cut
+   booked for the rebound; the rebound run by time, not by pass count. Each cure measured against its control; the game
+   changes only in phase 2.
+3. **THE ANDEAN MARGINS PARKED** (*"Park, keep the share"*): today's shortening share (Norabuena et al. 1998) stays as a
+   REGISTERED INTERIM (D-TERRAIN-10) until the gate converges, because the erosion decides how high these belts stand;
+   the research (§13) is kept for the return.
+4. One commit now, on `game`, no push. (B41 item 2's answer — proper laws, never Earth — still waits for the owner's
+   word.)
+
+**Example.** A pilot over the home planet's plains sees them stand 874 m over the sea on average when the solve looks
+for the rivers' paths once a pass, and 101 m when it looks eight times. After the mechanism is found and cured, a
+second solve with twice the looks shows the pilot the same plains.

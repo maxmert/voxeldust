@@ -640,3 +640,98 @@ on the oldest windows (133 Myr) and 0.90 on the youngest (10 Myr).
 4. **The craters**: 42 % of the land lies within one diameter of a crater, and the crater cause takes 23–48 % of all
    mountains. The cause order counts a mountain near a crater as the crater's before the belt's, so this share holds
    belt mountains too; G-CRATER (ruling B3, about 190 structures on Earth) is the reading to check.
+
+---
+
+## 13. The Andean margins' law: the research (2026-10-03; ruling B41 item 1; a read-only agent, its sources in the
+scratchpad's `sources3/`, its index `sources3/INDEX.txt`)
+
+[V] read in full; [A] abstract only; ARITH the agent's own arithmetic.
+
+**A1, the rate (Lallemand et al. 2008 [V], 166 oceanic transects).** The neutral line in the HS3 frame is
+`Vup = 0.5·Vsub − 2.3` cm/yr (slope fitted 0.46, R² 0.37); compression lies below it, extension above. Its signs: every
+speed "counted positive landward", `vd = Vup − Vt` positive for EXTENSION, so the shortening rate is `Vt − Vup` — **the
+design's §12 form `s = max(0, V_up − V_t)/v_n` holds only in the older papers' signs (Lallemand 2005, Heuret & Lallemand
+2005) and gives `s = 0` at Peru with the 2008 numbers (ARITH); the 2008 form is `s = max(0, 0.5·Vsub − 2.3 − Vup)/vc`.**
+The line depends on the frame (NNR `Vup = 0.32·Vsub − 1.9`, R² 0.23; SB04 `0.24·Vsub − 1.4`). **It is a sign rule, not a
+rate law**: of 152 transects re-read (ARITH), all 36 compressional ones lie below the line, but so do 48 of the 76
+neutral ones — 58 % of the transects stand on the compressive side and 24 % compress; the distance from the line
+explains R² 0.15 of the geodetic rates; northern Chile's line gives 3.5–4.0 cm/yr against a measured 0.5–0.9. A bound,
+not a rate: `0 ≤ Vd ≤ Vup` at 60 % of 80 segments (Heuret & Lallemand 2005 [V]). Slab edges: ranges grow only at the
+centre of subduction zones about 4 000 km wide or more (Schellart 2008 [A]; Schellart et al. 2007 [A]).
+
+**A2, the height (Dielforder & Hampel 2021 [V], Eqs. 1a–9, after Dielforder et al. 2020 and Lamb 2006).** With one
+density the force balance reads `h = 2·(Fs − F_SMT)/(ρ̄·g·L·cosθ)` (ARITH from Eq. 1a), `Fs` the megathrust's
+integrated shear force, `L` ≈ 60–75 km the depth where it ends, `θ` the dip, `F_SMT` the part that holds the submarine
+slope (Eq. 9). It gives back the published heights (Andes 23°S 5.10 km against 5.12; the Himalaya 5.97 against 5.98),
+and ten margins' mean heights stand within ±10 MPa of it (Dielforder et al. 2020 [V], Extended Data, Fig. 3): of nine
+subduction margins only the three Andean ones exceed 2.5 km, only 23°S exceeds 4 km. **It is not the bench's form**:
+the bench's B40 column `ΔF = ρc·g·h·[L + h·ρm/(2Δρ)]` is quadratic in `h` with `L` the 35 km crust, Dielforder's is
+linear; the bench's Tibet force is 7.12 TN/m (ARITH) where Dielforder's Himalaya `Fs` is 4.80 ± 1.24 TN/m — each form is
+calibrated in its own terms, so neither number moves the other, but the two are not one law. **Its inputs have no law
+from the world's facts yet**: the effective friction `μ′` (0.02–0.13; set by the pore pressure, and by the trench's
+sediment, Lamb 2006 [A], Lamb & Davis 2003 [A] — no source gives `μ′` as a function of the fill), the depth of the
+frictional–viscous transition (a thermal law), and the dip.
+
+**The window.** No closed-form law. The central Andes began to shorten about 50–45 Ma, when the slab entered the lower
+mantle (Faccenna et al. 2017 [V]); in Schellart's 2017 model [V] the upper plate extends while the slab is in the upper
+mantle and shortens from the slab's entry into the lower mantle. The world does not track slabs.
+
+**Earth's readings (ARITH from ETOPO5, which is partly 1° coarse in the Andes).** The Altiplano–Puna 0.61 million km²
+over 3 km at a mean 4.0 km; the Andes 2.16 / 1.35 / 0.93 million km² over 1 / 2 / 3 km. The home planet's Andean belts in
+run 10: 5.37 / 4.84 / 4.16 million km² over 1 / 2 / 3 km.
+
+| Option | Needs from the world | Calibration | Effect on the home planet (ARITH) | Weakness |
+|---|---|---|---|---|
+| A1 alone (the line as a switch, today's share as the rate) | the drift vectors, the normal, the frame's net rotation, the margin's length | 166 transects | about 60 % of the margins pass, about 80 % of today's Andean rock stays | a sign rule, not a rate; frame-dependent |
+| A2 alone (each margin's force balance as its ceiling) | the trench depth, the dip, the crust, `L`, `μ′`, the transition depth | 10 margins within ±10 MPa | Earth's median 1.3 km against the bench's 4.3 km | `μ′`, the transition depth and the dip have no law yet; 2-D, says nothing of the width |
+| A1 + A2 | both | both | about 0.8 × A2's | both sets of gaps; still no rate law |
+| today's share | `v_c` only | the central Andes today (Norabuena et al. 1998) | 81 % of the belts' rock | one compressive margin's rate on every margin for 10–133 Myr |
+
+---
+
+## 14. The gate's cause (ruling B41 item 1; MEASURED, runs 11–13; the census's runs 11–13)
+
+**The instrument.** The copy's PASS LEDGER (`Laws`-free; `solve_copy(…, ledger_on)`): each process's change of volume on
+the land and on the sea floor in every pass (the craters, the talus, the ice, the sweep's uplift, cut and fill, the
+rebound, the peak law) and the land's readings after it; `--ledger=DIR` writes it as CSV, and two small scripts in the
+scratchpad (`ledger/summary.py`, `ledger/compare.py`) read it. THE CONTROL: `today` at 40 passes with the ledger on
+MATCHES the release gate's pinned digest, so the ledger changes nothing.
+
+**What it measured (today's laws; the land's volumes in 10¹⁵ m³ over the whole age):**
+
+| Case | routings | the rivers' cut | the rebound | the ice | land over 1 000 m (away from closed basins) |
+|---|---|---|---|---|---|
+| 40 even passes | 40 | 196 | 120 | −12.5 | (63 % of all land) |
+| the mixed axis, 214 passes | 214 | 588 | 425 | −0.4 | 35.7 % |
+| 214 passes, 2 / 4 / 8 sweeps each on one routing | 214 | 608 / 615 / 619 | 436 / 440 / 441 | ~0 | 33.2 / 34.3 / 34.1 % |
+| 214 passes, 2 sweeps each, the drains found again before the second | 428 | 802 | — | ~0 | 21.0 % |
+| the twice-as-fine axis, 414 passes | 428 | 797 | 585 | ~0 | 21.1 % |
+
+1. **The cut is the term that moves.** The ice is not the cause (under today's laws it removes almost nothing on the
+   mixed axes); the deposit, the talus and the uplift move by a few units.
+2. **The sweep's own step is NOT the cause.** Eight sweeps a pass on one routing change the cut by 5 % and the land
+   over 1 000 m by under 2 points, and the series settles (588, 608, 615, 619).
+3. **THE NUMBER OF ROUTINGS IS THE CAUSE.** Two sweeps a pass with the drains found again between them give the
+   twice-as-fine axis's numbers within 1 % (802 against 797; 21.0 % against 21.1 %). The rivers' cut, and so the land's
+   height, depends on how often the drains are found again, not on the laws. A pass cuts nearly the same volume whatever
+   its length (4.4 × 10¹⁵ m³ in 25 Myr, 3.7 × 10¹⁵ m³ in 12.5 Myr). THE MECHANISM, A READING NOT YET MEASURED: a node
+   beside a valley drains into it only after the next routing finds the deeper valley, so a valley widens into the plain
+   beside it by about one node per routing — the plains wear down at a speed the routing's cadence sets.
+4. **Three defects found on the way, separate from the cause:** (a) the ice's cut per call stops at the ice's own
+   thickness — a cap standing in for a missing law (the glacier shrinks as its bed falls under the line), so the ice's
+   total grows with the passes in the last 2.6 Myr and, on the even axis, with all passes; (b) the ice's cut is never
+   booked for the rebound, so the crust never rises under ice-cut valleys; (c) the rebound runs every five PASSES, so its
+   spacing in years changes with the pass count (625 Myr at 40 passes, 125 Myr on the mixed axis).
+5. **The cost:** a sweep costs about 0.1 s and a routing about 1.2–3 s (the priority flood over 8.9 million nodes; the
+   lower number on a quiet machine), so a converged solve needs either a faster routing or many more of them.
+6. **THE ROUTING DOES NOT CONVERGE EITHER (run 13, 8 routings a pass):** the cut on the land 588 / 802 / 991 / 1 103 ×
+   10¹⁵ m³ at 1 / 2 / 4 / 8 routings a pass; the land over 1 000 m (away from closed basins) 35.7 / 21.0 / 8.4 / 0.9 %;
+   the land's mean height at the end 874 / 540 / 269 / 101 m. The end settles only because the land runs out of height.
+   The HISTORY does not settle: at 1 Gyr the land over 1 000 m reads 64.9 / 57.7 / 48.9 / 39.3 % and the mean 1 729 /
+   1 510 / 1 273 / 1 036 m — the steps do not shrink. So each routing unlocks about the same cut whatever the time
+   between routings, even at one routing every 3 Myr: a defect in how the scheme carries a lowered node's news to its
+   neighbours between routings, not only a coarse cadence. The candidates, each a measurement: the flats (a level
+   stretch cuts nothing until a routing finds its new outlet), the lakes (a lake's level falls only once a routing, by
+   its spill's last cut), and lateral capture (a node drains into a deeper neighbour only after the next routing).
+   **With the routing converged, today's laws grade the home planet flat** (ruling B39's prediction, now measured).

@@ -202,6 +202,12 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     law (F49) waits; PROPER LAWS, NEVER EARTH (owner: "Are you trying to build Earth?") — a law reads the body's own
     facts, an Earth place only fixes a constant it cannot compute yet (India's decoupling depth, Tibet's slowing time,
     until a heat law per body); the owner's word on that answer owed; one commit, no push.
+    ★ B42 (2026-10-03, the gate's cause MEASURED: the NUMBER OF ROUTINGS sets the rivers' cut — 1 / 2 / 4 / 8 a pass
+    leave 35.7 / 21.0 / 8.4 / 0.9 % of the land over 1 km, routed often today's laws grade the planet flat — and the
+    history does not settle even at one routing every 3 Myr): FIND THE MECHANISM (split each pass's cut: drains changed,
+    lakes drained, flats with a new outlet), then the cure with its numbers; THE THREE DEFECTS CURED IN THE COPY (the
+    ice's per-call thickness cap, the ice's cut missing from the rebound, the rebound by pass count); THE ANDEAN MARGINS
+    PARKED (today's share a registered interim); one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

@@ -25,6 +25,11 @@
 //!   to 12.5 Myr, about twice the passes, the climate and the rebound every twice as many passes so their spacing in
 //!   years stays the mixed axis's (as `@N` keeps the even axis's, M-TIME-1).
 //! - any case `@N`: on N passes, the pass-counted cadences scaled to keep their spacing in years (M-TIME-1).
+//! - any case `%K` (last): K sweeps in each pass on the pass's one routing, each a K-th of the pass's time — a
+//!   resolution, not a law (ruling B41 item 1: does the sweep's own step or the routing every pass carry the gate's cause);
+//!   `%Kr`: the same with the drains found again before each sub-sweep.
+//! - `--ledger=DIR`: each case also writes its PASS LEDGER to `DIR/<case>.csv` — each process's change of volume on the
+//!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause).
 //!
 //! **THE CAUSES**, exclusive, in this order: a CLOSED BASIN'S WALL (the relief window reaches the sea level or under
 //! it); a CRATER (within one diameter of a crater's centre, by the summed chord); a BELT (the folded belt's rock: the
@@ -338,8 +343,48 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
     }
 }
 
+/// The pass ledger as CSV, one line a pass (ruling B41 item 1, the gate's cause).
+fn write_ledger(path: &str, ledger: &[vd_bins::solve_copy::PassLedger]) {
+    use std::fmt::Write as _;
+    let mut out = String::from(
+        "t0_yr,t1_yr,craters_land,craters_sea,talus_land,talus_sea,ice_land,ice_sea,sweep_land,sweep_sea,\
+         uplift_land,uplift_sea,cut_land,cut_sea,rebound_land,rebound_sea,peak_land,peak_sea,sea_z,land_mean_m,\
+         land_over_1km,land_share\n",
+    );
+    for e in ledger {
+        let _ = write!(out, "{},{}", e.t0_yr, e.t1_yr);
+        for pair in [
+            e.craters_m3,
+            e.talus_m3,
+            e.ice_m3,
+            e.sweep_m3,
+            e.uplift_m3,
+            e.cut_m3,
+            e.rebound_m3,
+            e.peak_m3,
+        ] {
+            let _ = write!(out, ",{:.6e},{:.6e}", pair[0], pair[1]);
+        }
+        let _ = writeln!(
+            out,
+            ",{},{:.3},{:.6},{:.6}",
+            e.sea_z, e.land_mean_m, e.land_over_1km, e.land_share
+        );
+    }
+    std::fs::write(path, out).expect("the ledger writes");
+    println!(
+        "  THE PASS LEDGER: {} passes written to {path}",
+        ledger.len()
+    );
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--ledger=DIR`: each case writes its pass ledger to `DIR/<case>.csv` (ruling B41 item 1, the gate's cause).
+    let ledger_dir: Option<String> = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--ledger=").map(str::to_string));
+    args.retain(|a| !a.starts_with("--ledger="));
     let cases: Vec<String> = if args.is_empty() {
         ["today", "belts-today-limits", "limits", "belts"]
             .map(str::to_string)
@@ -362,6 +407,23 @@ fn main() {
         // spacing in YEARS stays the solve's own; the talus keeps its total count (the convergence test, M-TIME-1).
         // `name~mixed`: the case on the mixed axis (ruling B39's gate): its own pass count, the solve's cadence counts.
         // `name~fine`: the convergence gate's twice-as-fine mixed axis.
+        // `name%K`: K sweeps in each pass on the pass's one routing (a resolution; ruling B41 item 1, the gate's cause).
+        // `name%Kr`: the same, the drains found again before each sub-sweep.
+        let (case, sub_sweeps, sub_route) = match case.split_once('%') {
+            Some((c, k)) => {
+                let (k, routed) = match k.strip_suffix('r') {
+                    Some(k) => (k, true),
+                    None => (k, false),
+                };
+                (
+                    c.to_string(),
+                    k.parse::<u32>().expect("a sweep count after %"),
+                    routed,
+                )
+            }
+            None => (case.clone(), 1, false),
+        };
+        let case = &case;
         let (case_name, axis) = if let Some(name) = case.strip_suffix("~mixed") {
             (name, Some((MIXED_T_MIN_YR, MIXED_T_MAX_YR, 1)))
         } else if let Some(name) = case.strip_suffix("~fine") {
@@ -510,13 +572,34 @@ fn main() {
         } else {
             (laws, schedule)
         };
+        let laws = Laws {
+            sub_sweeps,
+            sub_route,
+            ..laws
+        };
+        let case = &if sub_sweeps > 1 {
+            format!("{case}%{sub_sweeps}{}", if sub_route { "r" } else { "" })
+        } else {
+            case.clone()
+        };
         let started = Instant::now();
-        let solved = solve_copy(&body, &words, schedule, Router::D8, &laws, None)
-            .expect("the home planet solves");
+        let solved = solve_copy(
+            &body,
+            &words,
+            schedule,
+            Router::D8,
+            &laws,
+            None,
+            ledger_dir.is_some(),
+        )
+        .expect("the home planet solves");
         println!(
             "\n== CASE {case} ({laws:?}): solved in {:.1} s",
             started.elapsed().as_secs_f64()
         );
+        if let Some(dir) = &ledger_dir {
+            write_ledger(&format!("{dir}/{case}.csv"), &solved.ledger);
+        }
         if case == "today" && passes == standard.passes {
             let digest = artifact_of(&body, &words, &solved).digest();
             println!(
