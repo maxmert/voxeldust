@@ -1519,3 +1519,10 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-10-03 — RULING B45: the exact rebound (no floors, ≤ 12.5 Myr) goes into phase 2; the landscape's time (B37) is
   benched next, its raise times from a reworking law calibrated on Earth's continental ages (Artemieva 2006). Runs 18–19
   and both research records committed.
+- 2026-10-04 — THE LANDSCAPE'S TIME BENCHED (ruling B45 item 2; runs 20–21; the belts' design §15): the old plains rise
+  from 310 m (median 93 m) to 586–680 m (median 392–467 m) against Earth's 485 m (349 m); the mountains fall from 19.9 to
+  11.6 % (Earth 2.39 %); the land turns to tablelands (66–69 % against Earth's 45.5 %). THE GATE FAILS BY THE LAKES:
+  1 → 2 routings a pass move the land over 1 000 m 28.7 → 32.8 %, all in the nodes held by a lake (a lake's level is set at
+  a routing and fixed while the sweeps cut around it).
+- 2026-10-04 — RULING B46: the landscape's time goes into phase 2 with the lakes' cure; next cure the lakes (a lake's level
+  follows its outlet inside the sweep), then the gate again. Runs 20–21 committed.

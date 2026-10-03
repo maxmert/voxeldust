@@ -223,6 +223,10 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     again for 4.8 Gyr): THE EXACT REBOUND (no floors, fractions carried, ≤ 12.5 Myr) GOES INTO PHASE 2; BENCH THE
     LANDSCAPE'S TIME (B37: a plate's plains erode only since its ground was last raised; the raise time from a reworking law
     calibrated on Earth's continental ages, Artemieva 2006); one commit, no push.
+    ★ B46 (2026-10-04, the landscape's time BENCHED: the old plains 586–680 m against Earth's 485 m (310 m without it),
+    the mountains 19.9 → 11.6 %, the land turned to tablelands; the gate fails by the lakes — a lake's level is fixed
+    between routings): THE LANDSCAPE'S TIME GOES INTO PHASE 2 WITH THE LAKES' CURE; NEXT CURE THE LAKES (a lake's level
+    follows its outlet inside the sweep), then the gate again; one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

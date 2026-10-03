@@ -11868,7 +11868,10 @@ updated in the same change as the work, deleted when done). The interims named h
     floors (each node's fraction carried) the land over 1 000 m reads 26.4 / 29.1 / 28.7 / 28.9 / 30.0 % at 25 / 12.5 /
     6.25 / 3.1 / 1.6 Myr — settled from 12.5 Myr; the gate passes with a matched rebound. Owed for phase 2 (RULED by
     B45 item 1): the rebound without its floors, at a spacing of 12.5 Myr or finer. THE OLD PLAINS (B45 item 2): Earth's
-    485 m against the home planet's ~110 m before its belts — the landscape's time is benched next.
+    485 m against the home planet's ~110 m before its belts — the landscape's time is benched next. BENCHED (runs
+    20–21): the old plains 586–680 m (median 392–467 m) against Earth's 485 m (349 m); RULED into phase 2 with the lakes'
+    cure (B46); owed: the lakes' cure (a lake's level follows its outlet inside the sweep) and the gate again; the height a
+    plate stands at after its raise (today the freeboard law's starting height, an assumption) and the tablelands' excess.
   - 🟨 THE ANDEAN MARGINS' SHARE, A REGISTERED INTERIM (ruling B42 item 3): every ocean-under-continent margin shortens
     by Norabuena et al. 1998's share (12.5/70 of the convergence) for its whole window — 81 % of the belts' rock in run
     10, about four times Earth's Andean high land. No published rate law exists (Lallemand's line is a sign rule); the

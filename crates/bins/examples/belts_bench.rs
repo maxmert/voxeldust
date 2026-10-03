@@ -31,13 +31,15 @@
 //! - any case `+ice`, `+icereb`, `+reb` (before the axis): ruling B42 item 2's cures — the ice stepped in time with no
 //!   per-call cap; the same with its cut booked for the rebound; the rebound after every pass. `+base`: ruling B42 item
 //!   1's mechanism cured — the sweep reads a receiver as a lake only where the routing found one. `+rebx`: the rebound
-//!   without its floors (each node's fraction carried), so a finer rebound spacing is not read low by rounding.
+//!   without its floors (each node's fraction carried), so a finer rebound spacing is not read low by rounding. `+lt`:
+//!   ruling B45 item 2's landscape's time — each plate's ground erodes only since its raise under the reworking law.
 //! - `--ledger=DIR`: each case also writes its PASS LEDGER to `DIR/<case>.csv` — each process's change of volume on the
 //!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause).
 //!
 //! **THE CAUSES**, exclusive, in this order: a CLOSED BASIN'S WALL (the relief window reaches the sea level or under
 //! it); a CRATER (within one diameter of a crater's centre, by the summed chord); a BELT (the folded belt's rock: the
-//! nodes a belt raised); the PLATFORM (all other land).
+//! nodes a belt raised) — by a collision, at an Andean margin, or by the room; a WIDENED PLATEAU (a node the force
+//! balance's widening raised, B40); the OLD PLAINS (all other land).
 //!
 //! **Example.** If the `belts` case reads two per cent of the land as mountains and most of them as BELT, the influx law
 //! put the ranges where the plates close; if they read as CRATER, the law did not, and the craters' rims made them.
@@ -239,12 +241,15 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
             _ => 2,
         }
     };
+    // The widened plateaus (B40's widening) read as their own cause, apart from the old plains (B45 item 2).
+    let widened = |v: usize| solved.widened.get(v).copied().unwrap_or(false);
     let cause = |v: usize| -> usize {
         match readings[v] {
             Some(r) if r.lo_m <= 0 => 0,
             _ if craters[v] => 1,
             _ if state.province[v] == belt_code => 2 + belt_kind(v),
-            _ => 5,
+            _ if widened(v) => 5,
+            _ => 6,
         }
     };
     let names = [
@@ -253,9 +258,10 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
         "collision belt",
         "Andean belt",
         "belt by the room",
-        "platform",
+        "widened plateau",
+        "old plains",
     ];
-    let (mut land_a, mut mount_a) = ([0u128; 6], [0u128; 6]);
+    let (mut land_a, mut mount_a) = ([0u128; 7], [0u128; 7]);
     let (mut all_land, mut all_mount) = (0u128, 0u128);
     let mut belt_over: [Vec<(i32, u64)>; 4] = Default::default();
     for v in 0..n {
@@ -277,7 +283,7 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
     println!(
         "  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):"
     );
-    for c in 0..6 {
+    for c in 0..7 {
         println!(
             "    {:<20} land {:>6.2} % | mountains {:>6.2} % of it | {:>6.2} % of all mountains",
             names[c],
@@ -285,6 +291,89 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
             pct(mount_a[c], land_a[c]),
             pct(mount_a[c], all_mount)
         );
+    }
+    // B45 item 2: the land's height by cause; the OLD PLAINS are the land no wall, crater, belt or widened plateau
+    // claims (Earth's: a mean of 485 m, a median of 349 m, 13 % over 1 000 m — the belts' design §15, ETOPO 2022 on CRUST
+    // 2.0's old types).
+    let mut by_cause: [Vec<(i32, u64)>; 7] = Default::default();
+    for v in 0..n {
+        if readings[v].is_some() {
+            by_cause[cause(v)].push((over[v], area[v]));
+        }
+    }
+    println!(
+        "  THE LAND'S HEIGHT BY CAUSE (over the sea: mean / median; the share over 1 000 m; Earth's old plains 485 / 349 m, 13 %):"
+    );
+    for (c, list) in by_cause.iter_mut().enumerate() {
+        if list.is_empty() {
+            continue;
+        }
+        list.sort_unstable();
+        let a_all: u128 = list.iter().map(|&(_, a)| u128::from(a)).sum();
+        let mean = list
+            .iter()
+            .map(|&(h, a)| f64::from(h) * a as f64)
+            .sum::<f64>()
+            / a_all as f64;
+        let mut acc = 0u128;
+        let mut median = 0;
+        for &(h, a) in list.iter() {
+            acc += u128::from(a);
+            if acc * 2 >= a_all {
+                median = h;
+                break;
+            }
+        }
+        let high: u128 = list
+            .iter()
+            .filter(|&&(h, _)| h > 1_000)
+            .map(|&(_, a)| u128::from(a))
+            .sum();
+        println!(
+            "    {:<20} {:>6.0} / {:>6} m | {:>6.2} % over 1 000 m",
+            names[c],
+            mean,
+            median,
+            pct(high, a_all)
+        );
+    }
+    // B45 item 2: each plate's raise time and its land's height (the landscape's time).
+    if !solved.raise_yr.is_empty() {
+        let plates = solved.raise_yr.len();
+        let (mut a_land, mut h_sum, mut a_plat, mut hp_sum) = (
+            vec![0u128; plates],
+            vec![0.0f64; plates],
+            vec![0u128; plates],
+            vec![0.0f64; plates],
+        );
+        for v in 0..n {
+            if readings[v].is_none() {
+                continue;
+            }
+            let p = usize::from(solved.plate_of[v]);
+            a_land[p] += u128::from(area[v]);
+            h_sum[p] += f64::from(over[v]) * area[v] as f64;
+            if cause(v) == 6 {
+                a_plat[p] += u128::from(area[v]);
+                hp_sum[p] += f64::from(over[v]) * area[v] as f64;
+            }
+        }
+        let mut order: Vec<usize> = (0..plates).filter(|&p| a_land[p] > 0).collect();
+        order.sort_by_key(|&p| solved.raise_yr[p]);
+        println!(
+            "  THE LANDSCAPE'S TIME (B45): each plate with land — its raise, Myr ago; its land, million km²; the land's mean height; the old plains' mean height:"
+        );
+        for p in order {
+            println!(
+                "    plate {:>2}: raised {:>5.0} Myr ago | land {:>6.2} million km² | mean {:>5.0} m | old plains {:>5.0} m on {:>5.2} million km²",
+                p,
+                solved.raise_yr[p] as f64 / 1e6,
+                a_land[p] as f64 / 1e12,
+                h_sum[p] / a_land[p].max(1) as f64,
+                hp_sum[p] / a_plat[p].max(1) as f64,
+                a_plat[p] as f64 / 1e12
+            );
+        }
     }
     // B40 item 1: each pair's plateau — the nodes within 100 m of their ceiling — and its half-width.
     if let Some(b) = &solved.belts
@@ -454,6 +543,7 @@ fn main() {
         let (mut ice_stepped, mut ice_rebound, mut rebound_every_pass, mut base_cure) =
             (false, false, false, false);
         let mut rebound_exact = false;
+        let mut landscape_time = false;
         for cure in cures {
             match cure {
                 "ice" => ice_stepped = true,
@@ -464,7 +554,8 @@ fn main() {
                 "reb" => rebound_every_pass = true,
                 "base" => base_cure = true,
                 "rebx" => rebound_exact = true,
-                other => panic!("a cure is ice, icereb, reb, rebx or base, not {other}"),
+                "lt" => landscape_time = true,
+                other => panic!("a cure is ice, icereb, reb, rebx, base or lt, not {other}"),
             }
         }
         let standard = Schedule::standard(words.age_yr);
@@ -612,6 +703,7 @@ fn main() {
             rebound_every_pass,
             base_cure,
             rebound_exact,
+            landscape_time,
             ..laws
         };
         let case = &if sub_sweeps > 1 {

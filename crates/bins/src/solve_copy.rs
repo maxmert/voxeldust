@@ -133,7 +133,25 @@ pub struct Laws {
     /// 430 m over 3 400 — so a finer spacing reads lower by its rounding alone. `true` runs [`rebound_exact`]: the same
     /// lift, `ρ_c/ρ_m` of the smoothed removal, without the floors, each node's fraction of a sixteenth carried.
     pub rebound_exact: bool,
+    /// ★ RULING B45 ITEM 2, THE LANDSCAPE'S TIME (ruling B37 item 1; the belts' design §15): `true` lets each plate's
+    /// ground erode only since it was last raised — its raise time `T = −ln(1 − u)/λ` from the plate's own age share `u`
+    /// (the one-time draw of an unrecoverable history, ruling T9) under THE REWORKING LAW, continental ground raised again
+    /// at the constant rate [`REWORK_RATE_PER_GYR`] (the share younger than `t` is `1 − e^(−λt)`); before its raise a
+    /// plate's nodes do not erode. A belt node erodes from its window's start at the latest (the belt raises it); a crater
+    /// older than its node's raise is not stamped (the raise erased it). Reads the cured sweeps ([`Laws::base_cure`]) and
+    /// the craters' own time.
+    pub landscape_time: bool,
 }
+
+/// ★ THE REWORKING LAW's rate, per Gyr (ruling B45 item 2): 30.0 % of Earth's continental area is younger than 0.35 Ga
+/// (Artemieva 2006, Tectonophysics 416, Table 4), so `λ = −ln(0.700)/0.35 Gyr` = 1.019 per Gyr; the law then gives 53.4 %
+/// younger than 0.75 Ga against the measured 53.7 %, and 95.1 % younger than 2.95 Ga against 88.8 % (the old cratons
+/// survive longer — a stated limit). Carried to a body by its plates' turnover over Earth's; the home planet's (225 Myr)
+/// is Earth's own, so the bench reads Earth's rate (a stated interim for other bodies).
+pub const REWORK_RATE_PER_GYR: f64 = 1.019;
+
+/// A node's erosion share of a pass under the landscape's time, in 1/65 536 (a whole pass is `ACTIVE_FULL`).
+pub const ACTIVE_FULL: u32 = 1 << 16;
 
 /// ★ THE REBOUND WITHOUT ITS FLOORS (see [`Laws::rebound_exact`]): `vd_terrain::solve::MacroSolve::rebound` line for line —
 /// the removal since the last rebound restricted to the level nearest the flexural parameter, smoothed there by
@@ -202,7 +220,7 @@ fn sweep_base(state: &MacroSolve, node: u32) -> i32 {
 
 /// ★ THE SOLVE'S OWN SWEEP with the cured base ([`Laws::base_cure`]): `vd_terrain::solve::MacroSolve::sweep`, line for
 /// line, its base read by [`sweep_base`].
-fn sweep_cured(state: &mut MacroSolve, gain: u64, pass: u32, passes: u32) {
+fn sweep_cured(state: &mut MacroSolve, gain: u64, pass: u32, passes: u32, active: Option<&[u32]>) {
     use vd_terrain::macro_lattice::NO_NODE;
     use vd_terrain::solve::GAIN_BITS;
     let one = 1i128 << GAIN_BITS;
@@ -217,11 +235,16 @@ fn sweep_cured(state: &mut MacroSolve, gain: u64, pass: u32, passes: u32) {
         if r == NO_NODE || state.pit[i] > 0 {
             continue;
         }
+        // LAW (B45 item 2): a node erodes only for its share of the pass after its ground was raised.
+        let share = active.map_or(ACTIVE_FULL, |a| a[i]);
+        if share == 0 {
+            continue;
+        }
         let base = sweep_base(state, r);
         let c = ((u128::from(gain) * u128::from(state.erodibility_q8[i])) >> 8)
             * u128::from(vd_recipe::root::isqrt(state.discharge[i]))
             / u128::from(state.chord[i].max(1));
-        let c = c as i128;
+        let c = ((c * u128::from(share)) >> 16) as i128;
         let numerator = (i128::from(state.z[i]) << GAIN_BITS) + c * i128::from(base);
         let cut = i128::from(state.z[i]) - numerator.div_euclid(one + c);
         let cut = cut as i32;
@@ -735,7 +758,14 @@ fn peak_law(state: &mut MacroSolve, cap: i32) -> (usize, i32) {
 /// first, a lake node skipped; then the deposit), with the joint law's implicit cut: a node `x` over its base `b` after
 /// the uplift, `x₀`, settles where `x − x₀ + Δt · K_lp · share · Q^m · (x/L)^n = 0` (heights in metres), the root found by
 /// Newton from `x₀` (the function is convex and rising, so the steps fall to the root without passing it).
-fn joint_sweep(state: &mut MacroSolve, dt_yr: f64, pass: u32, passes: u32, cured: bool) {
+fn joint_sweep(
+    state: &mut MacroSolve,
+    dt_yr: f64,
+    pass: u32,
+    passes: u32,
+    cured: bool,
+    active: Option<&[u32]>,
+) {
     let steps_m = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
     let basement = f64::from(vd_terrain::strata::Province::CrystallineBasement.erodibility_q8());
     for i in 0..state.node_count() {
@@ -747,6 +777,11 @@ fn joint_sweep(state: &mut MacroSolve, dt_yr: f64, pass: u32, passes: u32, cured
         let i = node as usize;
         let r = state.receiver[i];
         if r == vd_terrain::macro_lattice::NO_NODE || state.pit[i] > 0 {
+            continue;
+        }
+        // LAW (B45 item 2): a node erodes only for its share of the pass after its ground was raised.
+        let active_share = active.map_or(ACTIVE_FULL, |a| a[i]);
+        if active_share == 0 {
             continue;
         }
         let base = if cured {
@@ -762,7 +797,10 @@ fn joint_sweep(state: &mut MacroSolve, dt_yr: f64, pass: u32, passes: u32, cured
         let length = f64::from(state.chord[i].max(1));
         let discharge_m3_yr = state.discharge[i] as f64 / 1_000.0;
         let share = f64::from(state.erodibility_q8[i]) / basement;
-        let c = dt_yr * JOINT_K_LP * share * discharge_m3_yr.powf(JOINT_M);
+        let c = dt_yr * f64::from(active_share) / f64::from(ACTIVE_FULL)
+            * JOINT_K_LP
+            * share
+            * discharge_m3_yr.powf(JOINT_M);
         let mut x = x0;
         for _ in 0..JOINT_NEWTON {
             let s = x / length;
@@ -1131,6 +1169,12 @@ pub struct Solved {
     pub carry_left_m3: f64,
     /// The pass ledger, one entry a pass, where the caller asked for it (empty otherwise).
     pub ledger: Vec<PassLedger>,
+    /// The landscape's time (B45 item 2): each plate's raise time, years before the present (empty without the law),
+    /// and each node's plate.
+    pub raise_yr: Vec<u64>,
+    pub plate_of: Vec<u8>,
+    /// Every node the force balance's widening ever raised (B40 item 1; empty where it raised none).
+    pub widened: Vec<bool>,
 }
 
 /// ★ THE COPY of `vd_terrain::solve::solve_full` (generator 22), line for line, with the routing variant's
@@ -1166,6 +1210,34 @@ pub fn solve_copy(
             }
         }
     }
+    // LAW (B45 item 2): each plate's raise time under the reworking law, and each node's erosion start (years from the
+    // solve's start); a belt node starts at its window's start at the latest.
+    let raise_yr: Vec<u64> = if laws.landscape_time {
+        land.plates
+            .iter()
+            .map(|p| {
+                let u = p.age.to_f64().clamp(0.0, 1.0 - 1e-12);
+                let t_gyr = -(1.0 - u).ln() / REWORK_RATE_PER_GYR;
+                ((t_gyr * 1e9) as u64).min(schedule.age_yr)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let erosion_start: Option<Vec<u64>> = laws.landscape_time.then(|| {
+        (0..land.z.len())
+            .map(|k| {
+                let mut start = schedule.age_yr - raise_yr[usize::from(land.plate[k])];
+                if let Some(b) = &belts
+                    && b.total[k] > 0
+                {
+                    start = start.min(b.start_yr[k]);
+                }
+                start
+            })
+            .collect()
+    });
+    let plate_of = land.plate.clone();
     if let Some(shot) = trace {
         shot("00_land", &land.z);
     }
@@ -1212,6 +1284,8 @@ pub fn solve_copy(
     let mut peak_left = 0i32;
     // LAW (B40 item 1): each pair's excess rock with no room yet, volume in sixteenths × m², carried pass to pass.
     let mut carry: Vec<i128> = Vec::new();
+    // A readout (B45 item 2): every node the widening ever raised — the belts' plateaus, apart from the old plains.
+    let mut widened: Vec<bool> = Vec::new();
     state.z_flood.clone_from(&state.z);
     if let Some(shot) = trace {
         shot("01_craters", &state.z);
@@ -1223,6 +1297,8 @@ pub fn solve_copy(
     let mut since_rebound = 0;
     // The exact rebound's carried fractions of a sixteenth (a resolution; `Laws::rebound_exact`).
     let mut rebound_carry: Vec<f64> = Vec::new();
+    // The ledger: a pass's rebounds run between its sweeps (kept apart from the sweeps' net change).
+    let mut inloop_rebound = [0.0f64; 2];
     let mut climate = None;
     let no_ice: Vec<i32> = if words.water_km3 == 0 {
         vec![i32::MAX; state.node_count()]
@@ -1290,7 +1366,11 @@ pub fn solve_copy(
                 .copied()
                 .filter(|c| {
                     let at = schedule.age_yr.saturating_sub(c.age_yr);
-                    at >= t0 && (at < t1 || (pass + 1 == schedule.passes && at <= t1))
+                    // LAW (B45 item 2): the raise erased a crater older than it.
+                    let raised = erosion_start
+                        .as_ref()
+                        .is_none_or(|e| at >= e[c.node as usize]);
+                    raised && at >= t0 && (at < t1 || (pass + 1 == schedule.passes && at <= t1))
                 })
                 .collect();
             if !due.is_empty() {
@@ -1467,6 +1547,12 @@ pub fn solve_copy(
                         let raise = i64::try_from((remaining / area).min(i128::from(need)))
                             .expect("a raise fits a 64-bit word");
                         steps[j] += raise;
+                        if raise > 0 {
+                            if widened.is_empty() {
+                                widened = vec![false; steps.len()];
+                            }
+                            widened[j] = true;
+                        }
                         remaining -= i128::from(raise) * area;
                         if raise < need {
                             break;
@@ -1586,6 +1672,24 @@ pub fn solve_copy(
                 // k-th of the pass's time (the drains found again before each where asked), and with the rebound by time
                 // a rebound after every sweep — so the rebound's spacing is a k-th of the pass while the routing stays.
                 let k = laws.sub_sweeps.max(1);
+                // The ledger: the rebounds run between this pass's sweeps, kept apart from the sweeps' own change.
+                inloop_rebound = [0.0; 2];
+                // LAW (B45 item 2): each node's share of this pass after its erosion start.
+                let active: Option<Vec<u32>> = erosion_start.as_ref().map(|e| {
+                    let (t0, t1) = (times[pass as usize], times[pass as usize + 1]);
+                    e.iter()
+                        .map(|&st| {
+                            if st >= t1 {
+                                0
+                            } else if st <= t0 {
+                                ACTIVE_FULL
+                            } else {
+                                ((t1 - st) as f64 / (t1 - t0) as f64 * f64::from(ACTIVE_FULL))
+                                    as u32
+                            }
+                        })
+                        .collect()
+                });
                 let dt_pass = (times[pass as usize + 1] - times[pass as usize]) as f64;
                 let uplift = std::mem::take(&mut state.uplift);
                 let mut cut_sum = vec![0u32; state.node_count()];
@@ -1619,9 +1723,16 @@ pub fn solve_copy(
                             pass,
                             schedule.passes,
                             laws.base_cure,
+                            active.as_deref(),
                         );
                     } else if laws.base_cure {
-                        sweep_cured(&mut state, gain / u64::from(k), pass, schedule.passes);
+                        sweep_cured(
+                            &mut state,
+                            gain / u64::from(k),
+                            pass,
+                            schedule.passes,
+                            active.as_deref(),
+                        );
                     } else {
                         let _ = state.sweep(gain / u64::from(k), pass, schedule.passes);
                     }
@@ -1652,6 +1763,9 @@ pub fn solve_copy(
                             let v = volume_change(&b, &state.z, &state.area, state.sea_z);
                             entry.rebound_m3[0] += v[0];
                             entry.rebound_m3[1] += v[1];
+                            // The ledger: these rebounds are not the sweep's own change.
+                            inloop_rebound[0] += v[0];
+                            inloop_rebound[1] += v[1];
                         }
                     }
                 }
@@ -1660,7 +1774,8 @@ pub fn solve_copy(
             }
         }
         if let Some(b) = before {
-            entry.sweep_m3 = volume_change(&b, &state.z, &state.area, state.sea_z);
+            let v = volume_change(&b, &state.z, &state.area, state.sea_z);
+            entry.sweep_m3 = [v[0] - inloop_rebound[0], v[1] - inloop_rebound[1]];
             entry.cut_m3 = volume_of(
                 state.cut_now.iter().map(|&c| i64::from(c)),
                 &b,
@@ -1806,6 +1921,9 @@ pub fn solve_copy(
         carry_left_m3: carry.iter().sum::<i128>() as f64
             / f64::from(vd_terrain::solve::Z_STEPS_PER_M),
         ledger,
+        raise_yr,
+        plate_of,
+        widened,
     })
 }
 

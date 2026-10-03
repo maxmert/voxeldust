@@ -891,3 +891,30 @@ land loses 1.3 × 10¹⁸ m³ (0.27 km³/yr) and nothing returns it.
 strongest law that the world can state today (each plate's raise age from a reworking law calibrated on Earth's
 tectono-thermal ages; the plates already carry a uniform age share, whose median of 2.5 Gyr is far older than Earth's
 ~0.7 Gyr, so the share needs its own law), and a generated plate history is its full form.
+
+**THE LANDSCAPE'S TIME BENCHED (runs 20–21; ruling B45 item 2).** Each plate's ground erodes only since its raise,
+`T = −ln(1 − u)/λ` from the plate's own age share `u`, `λ` = 1.019 per Gyr (Artemieva 2006's 30.0 % under 0.35 Ga; the
+law gives 53.4 % under 0.75 Ga against the measured 53.7 %); a belt node from its window's start at the latest; a crater
+older than its node's raise is not stamped. The home planet's plates come out raised 9 Myr to 2.8 Gyr ago; nothing erodes
+in the first 2.2 Gyr. The readout now splits the WIDENED PLATEAU (the nodes the force balance's widening raised) from the
+OLD PLAINS (the land no wall, crater, belt or plateau claims). The joint law, the cured base, the ice cure, the exact
+rebound every 12.5 Myr:
+
+| Case | old plains mean / median | old plains over 1 000 m | land over 1 000 m | mountains | plains / tablelands |
+|---|---|---|---|---|---|
+| without the law (214 passes, 2 sweeps) | 310 / 93 m | 8.6 % | 29.09 % | 19.86 % | 43.3 / 36.8 % |
+| the law, 1 routing a pass (2 sweeps) | 586 / 392 m | 22.1 % | 28.67 % | 11.62 % | 19.5 / 68.9 % |
+| the law, 2 routings a pass | 651 / 437 m | 26.4 % | 32.83 % | 10.90 % | 20.9 / 68.2 % |
+| the law, 414 passes | 680 / 467 m | 28.7 % | 34.70 % | 11.63 % | 22.1 / 66.3 % |
+| Earth | 485 / 349 m | 13 % | 20.8 % | 2.39 % | 52.1 / 45.5 % |
+
+1. **The law brings the old plains to Earth's scale**: 586–680 m (median 392–467 m) against Earth's 485 m (349 m), where
+   without it they read 310 m (93 m). The plates differ by age as on Earth (a plate raised 1.8 Gyr ago has worn its
+   plains to about 40 m; one raised 223 Myr ago keeps them near 870 m).
+2. **The mountains fall from 19.9 to 11.6 %** (Earth 2.39 %); the land turns to TABLELANDS (66–69 % against Earth's 45.5 %):
+   the young plates stand high and flat at the height the freeboard law gave them, eroding only since their raise.
+3. **THE GATE FAILS BY THE LAKES**: from 1 to 2 routings a pass the land over 1 000 m moves 28.7 → 32.8 % (the 414-pass
+   axis 34.7 %); the cut's anatomy puts the difference in the nodes HELD BY A LAKE (397 against 214 × 10¹⁵ m³; the other
+   classes barely move). A lake's level is set at a routing and stays fixed while the sweeps cut around it, and the law
+   releases plates that stood frozen for billions of years full of hollows — so the lakes' handling is the remaining
+   routing dependence.

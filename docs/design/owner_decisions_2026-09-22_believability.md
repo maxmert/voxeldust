@@ -1257,3 +1257,23 @@ nothing raises them again for 4.8 Gyr (30 % of Earth's continental area was last
 **Example.** A plate of the home planet whose ground was last raised 300 Myr ago keeps young, high plains; a plate last
 raised 2 Gyr ago has worn its plains low; a pilot crossing from one to the other sees the step in their ages, as on Earth
 between a young platform and an old shield.
+
+## B46. THE LANDSCAPE'S TIME GOES INTO PHASE 2 WITH THE LAKES' CURE; THE LAKES NEXT (2026-10-04)
+
+The landscape's time, BENCHED (runs 20–21; the belts' design §15): each plate's ground erodes only since its raise under
+the reworking law (`λ` = 1.019 per Gyr, Artemieva 2006); the old plains rise from 310 m (median 93 m) to 586–680 m (median
+392–467 m) against Earth's 485 m (349 m); the mountains fall from 19.9 to 11.6 %; the land turns to tablelands (66–69 %
+against Earth's 45.5 %); and the gate fails by the lakes (1 → 2 routings a pass move the land over 1 000 m 28.7 → 32.8 %,
+all in the nodes held by a lake: a lake's level is set at a routing and fixed while the sweeps cut around it). The owner
+ruled:
+
+1. **THE LANDSCAPE'S TIME GOES INTO PHASE 2** (*"Yes, with the lakes' cure"*), together with the lakes' cure, because the
+   gate must pass first.
+2. **CURE THE LAKES** (*"Cure the lakes"*): a lake's level follows its outlet inside the sweep — when the sweep cuts the
+   outlet, the lake's level falls with it — so the result stops depending on how often the solve routes; then the gate
+   is measured again with the landscape's time.
+3. One commit now, on `game`, no push.
+
+**Example.** A river cuts the rim of an old crater lake on the home planet; in the same step the lake's surface falls
+with its outlet, and the streams that feed the lake cut down to the new shore, instead of waiting for the next routing to
+learn that the lake is lower.
