@@ -235,6 +235,10 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     49–68 % mountains inside against Earth's orogens' 8–12 %, 1–1.8 km higher; the old plains match Earth's 516 / 318 m
     against 485 / 349 m; the craters minor): RESEARCH THE BELTS' SHAPE (the critical taper, a plateau's low inner relief,
     the forelands, the Andean height law), then bench the laws found; one commit, no push.
+    ★ B49 (2026-10-04, the belts' slopes MEASURED: 7.7–10.8 % at the median against Earth's young belts' 3.2 %, the joint
+    law's steady state under a bump that lifts the whole belt at once): BENCH THE BELT AS A CRITICAL WEDGE WITH A PLATEAU
+    (Roe et al. 2008; the taper of Davis, Suppe & Dahlen 1983 calibrated on Taiwan; the crest to the force ceiling, then a
+    plateau) and read where the plateaus' rivers end; one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

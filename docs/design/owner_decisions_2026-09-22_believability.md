@@ -1318,3 +1318,22 @@ earlier "43 % of the land near a crater" counted craters a raise had erased, a r
 **Example.** On Earth a pilot crossing the Himalaya and Tibet flies over a steep front, then a high plateau whose inside
 reads as tablelands at 8 km; on the home planet the same crossing reads mountains across half the belt. The research
 asks which law makes a belt's inside a plateau or a foreland rather than a field of peaks.
+
+## B49. THE BELT AS A CRITICAL WEDGE WITH A PLATEAU, BENCHED NEXT (2026-10-04)
+
+The belts' shape, RESEARCHED and their slopes MEASURED (the belts' design §17; run 24): Earth's young belts read a median
+steepest slope of 3.2 % at 8 km, their mountains in one narrow steep band a flank, their insides plateaus (Tibet's interior
+96.5 % tablelands); the home belts read 7.7–10.8 %, about 3.4 times steeper in every height band; the joint law's steady
+state explains the size (a node draining its own 67 km² under ~1 mm/yr of uplift stands near 10 %) — the ±240 km bump lifts
+the whole belt at once, and the widened plateaus are cut by rivers that reach the sea. The owner ruled:
+
+1. **BENCH THE WEDGE AND THE PLATEAU** (*"Wedge and plateau"*): replace the ±240 km bump with a belt that grows like a
+   critical wedge (Roe et al. 2008) — the front moves out as the belt takes in rock, its surface slope set by the critical
+   taper (Davis, Suppe & Dahlen 1983, calibrated on Taiwan), its crest rising to the force-balance ceiling, and a plateau
+   beyond — so the uplift sits at the front, as on Earth; in the same run, read where the plateaus' rivers end (the sea or
+   a closed basin).
+2. One commit now, on `game`, no push.
+
+**Example.** A collision on the home planet grows a ramp of about 2° toward the incoming plate and a steeper flank toward
+the other; when its crest reaches the force balance's height, the extra rock widens a flat plateau behind it, and a pilot
+crossing it climbs one front, flies over the plateau, and descends one flank.

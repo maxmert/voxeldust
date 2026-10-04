@@ -1541,3 +1541,12 @@ AWAY from the reference, the step's report says so (ruling B6).
   orogens' 8–12 % and stand 1–1.8 km higher.
 - 2026-10-04 — RULING B48: research the belts' shape (why Earth's orogens at 8 km are ~12 % mountains and 1.8 km high),
   then bench the laws found. Run 23, Earth's crust-type split and the corrected crater readout committed.
+- 2026-10-04 — THE BELTS' SHAPE RESEARCHED AND THEIR SLOPES MEASURED (ruling B48; the belts' design §17; run 24): Earth's
+  young belts read a median steepest slope of 3.2 % at 8 km (mountains only in one narrow steep band a flank; Tibet's
+  interior 96.5 % tablelands); the home belts read 7.7–10.8 % — about 3.4 times steeper in every height band. The joint
+  law's steady state explains it (a node draining its own 67 km² under ~1 mm/yr of uplift stands near 10 %): the bump lifts
+  the whole belt at once, and the plateaus are cut by rivers that reach the sea. Candidate laws: the critical taper, the
+  brittle–ductile plateau, self-similar wedge growth (Roe et al. 2008), arid inward drainage, the flexural foreland, the
+  megathrust-force ceiling (Dielforder & Hampel 2021).
+- 2026-10-04 — RULING B49: bench the belt as a critical wedge with a plateau (Roe et al. 2008; Davis, Suppe & Dahlen 1983's
+  taper calibrated on Taiwan) and read where the plateaus' rivers end. Run 24 and the belts' shape research committed.

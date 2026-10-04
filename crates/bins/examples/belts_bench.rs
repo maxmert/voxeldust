@@ -356,6 +356,93 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
             pct(high, a_all)
         );
     }
+    // B48: each cause's steepest slope to a land neighbour (the relief rule's own slope) at 50 / 90 % of its area, and
+    // the belts' mountain share by height band — Earth's young belts read 3.2 / 9.4 % and, at 0–1 / 1–2 / 2–3 / 3–4 / over
+    // 4 km, mountains 2.7 / 10.8 / 33.1 / 36.0 / 14.4 % (the belts' shape research, the design §17).
+    let slope: Vec<f64> = (0..n as u32)
+        .map(|v| {
+            if !land[v as usize] {
+                return 0.0;
+            }
+            lattice
+                .neighbours(v)
+                .iter()
+                .filter(|&&m| m != NO_NODE && land[m as usize])
+                .map(|&m| {
+                    f64::from((over[v as usize] - over[m as usize]).abs())
+                        / f64::from(lattice.chord_m(v, m).max(1))
+                })
+                .fold(0.0, f64::max)
+        })
+        .collect();
+    println!(
+        "  THE SLOPES BY CAUSE (the steepest slope to a land neighbour at 50 / 90 % of the cause's land; Earth's young belts 3.2 / 9.4 %):"
+    );
+    for (c, name) in names.iter().enumerate() {
+        let mut list: Vec<(f64, u64)> = (0..n)
+            .filter(|&v| readings[v].is_some() && cause(v) == c)
+            .map(|v| (slope[v], area[v]))
+            .collect();
+        if list.is_empty() {
+            continue;
+        }
+        list.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let total: u128 = list.iter().map(|&(_, a)| u128::from(a)).sum();
+        let at = |q: f64| -> f64 {
+            let mut acc = 0u128;
+            for &(sl, a) in &list {
+                acc += u128::from(a);
+                if acc as f64 >= q * total as f64 {
+                    return sl;
+                }
+            }
+            0.0
+        };
+        println!(
+            "    {name:<20} {:>5.1} / {:>5.1} %",
+            at(0.5) * 100.0,
+            at(0.9) * 100.0
+        );
+    }
+    let bands = [
+        (0, 1_000),
+        (1_000, 2_000),
+        (2_000, 3_000),
+        (3_000, 4_000),
+        (4_000, i32::MAX),
+    ];
+    let (mut band_land, mut band_mount) = ([0u128; 5], [0u128; 5]);
+    for v in 0..n {
+        let Some(r) = readings[v] else { continue };
+        if !matches!(cause(v), 2 | 3 | 5) {
+            continue;
+        }
+        let Some(b) = bands
+            .iter()
+            .position(|&(lo, hi)| over[v] >= lo && over[v] < hi)
+        else {
+            continue;
+        };
+        band_land[b] += u128::from(area[v]);
+        if merged(r.class(false)) == MOUNTAINS {
+            band_mount[b] += u128::from(area[v]);
+        }
+    }
+    println!(
+        "  THE BELTS' MOUNTAINS BY HEIGHT (collision, Andean, widened plateau) at 0–1 / 1–2 / 2–3 / 3–4 / over 4 km: \
+         {:.1} / {:.1} / {:.1} / {:.1} / {:.1} % of each band (Earth's young belts 2.7 / 10.8 / 33.1 / 36.0 / 14.4 %); \
+         the bands' share of the belts' land {:.1} / {:.1} / {:.1} / {:.1} / {:.1} %",
+        pct(band_mount[0], band_land[0]),
+        pct(band_mount[1], band_land[1]),
+        pct(band_mount[2], band_land[2]),
+        pct(band_mount[3], band_land[3]),
+        pct(band_mount[4], band_land[4]),
+        pct(band_land[0], band_land.iter().sum()),
+        pct(band_land[1], band_land.iter().sum()),
+        pct(band_land[2], band_land.iter().sum()),
+        pct(band_land[3], band_land.iter().sum()),
+        pct(band_land[4], band_land.iter().sum())
+    );
     // B45 item 2: each plate's raise time and its land's height (the landscape's time).
     if !solved.raise_yr.is_empty() {
         let plates = solved.raise_yr.len();

@@ -969,3 +969,72 @@ time, the lakes' cure; the crater readout now counts only the craters the solve 
    Earth's orogens' 1.8 km). The excess is the belts' ROUGHNESS and HEIGHT, not their area.
 3. The craters are a small cause; their count (398 against Earth's ~190 known) and their largest (677 km) are G-CRATER's
    own reading, for the craters' law.
+
+---
+
+## 17. The belts' shape: the research (2026-10-04; ruling B48; a read-only agent, its sources, scripts and outputs in the
+scratchpad's `sources5/`, its index `sources5/INDEX.txt`)
+
+[V] read in full; [A] abstract only; [R] recalled; ARITH the agent's own arithmetic or measurement (latitude–longitude
+blocks of ~7.6 km with the stands' rule copied; its control reads CRUST 2.0's orogens 12.14 % of the land, 11.1 %
+mountains, 1 838 m, against the repository instrument's 12.16 %, 11.8 %, 1 841 m).
+
+**Why Earth's belts read few mountains.** A node reads mountains only when most of its window steps 656 m or more to a
+neighbour (8 % over 8.2 km). Belts approximate critical wedges [V, Roe et al. 2008, p. 816], whose slopes are small (the
+Zagros 0.3–0.5° [V, Mouthereau et al. 2006, p. 349]; Taiwan's pro side 2° [V, Roe p. 823]); Earth's young belts' median
+steepest node slope is 3.2 %, the 90 % value 9.4 % (ARITH). Mountains fill one narrow steep band per flank (the High
+Himalaya, the Longmen Shan, the Andean Pacific flank: 7–19 %), 0.6–23 % of a belt's width (33 % at Tibet's incised eastern
+margin); plateaus are wide and gentle — Tibet's interior is 96.5 % tablelands, 1.7 % mountains (ARITH). CRUST 2.0's orogen
+class also holds old belts and basins (3.44 million km² at 630 m, 1.4 % mountains), which pulls the class to 1 838 m and
+11 %.
+
+**Earth's young belts (ARITH; the CRUST orogen types inside named boxes):**
+
+| Belt | million km² | mean | mountains / tablelands / plains | steepest slope 50 / 90 % |
+|---|---|---|---|---|
+| the Himalaya–Tibet | 4.74 | 3 247 m | 18.4 / 66.7 / 14.9 % | 3.7 / 10.5 % |
+| the central Andes | 0.93 | 3 180 m | 19.4 / 70.5 / 10.1 % | 4.5 / 10.7 % |
+| the Alps | 0.17 | 1 267 m | 23.7 / 74.4 / 2.0 % | 5.6 / 10.2 % |
+| the North American Cordillera (with arcs) | 2.55 | 1 351 m | 3.6 / 85.3 / 11.2 % | 2.7 / 6.7 % |
+| the Zagros–Iran | 1.18 | 1 285 m | 3.8 / 84.2 / 12.0 % | 2.5 / 6.3 % |
+| the Urals (old) | 0.38 | 315 m | 0 / 47.5 / 52.5 % | 0.6 / 2.4 % |
+| all young belts | 12.68 | 2 165 m | 13.8 / 69.6 / 16.7 % | 3.2 / 9.4 % |
+
+The young belts' mountain share by height: 0–1 km 2.7 %, 1–2 km 10.8 %, 2–3 km 33.1 %, 3–4 km 36.0 %, over 4 km 14.4 %.
+Tibet's interior: 1.10 million km² at 5 039 m (Fielding et al. 1994: 5 023 m), the span over a 23 km window 340 m at the
+median. The target cross-section (100 km swaths): a flat foreland (60–600 km), a ramp of 1–4.5 %, ONE steep band, a
+plateau at 1–6 %, a short back flank.
+
+**Against the home planet:** the home collision belts' mean (2.7 km) stands inside Earth's young-belt range (1.2–3.2 km),
+but at 2–3 km Earth's young belts are 33 % mountains where the home collision belt (median 2 392 m) is 68 %; the widened
+plateaus are 58 % mountains where Tibet over 4.5 km is 5.7 %; most of Earth's subduction margins crest under 2 km [V,
+Dielforder & Hampel 2021, p. 16].
+
+**The laws (each the owner's):**
+
+| Law | Needs from the world | Calibration | Expected effect on the home belts | Weakness |
+|---|---|---|---|---|
+| the frictional critical taper (Davis, Suppe & Dahlen 1983 [R]; Mouthereau et al. 2006, Eq. 1 [V]): `α + β = [β + μ_b(1 − λ_b)] / [1 + (1 − λ)·2 sin φ/(1 − sin φ)]` | `μ`, `μ_b`, the pore-pressure ratios `λ`, `β` from the flexure | Taiwan | the pro flank (2–3°) reads tablelands, a retro flank over 4.6° mountains; a lone wedge ≈ 25 % mountains, ≈ 5 % beside a wide plateau (ARITH) | needs the décollement's weakness; Byerlee friction with hydrostatic pressure gives slopes too steep |
+| the brittle–ductile taper and plateau (Williams et al. 1994 [A]; Mouthereau Eq. 8 [V]) | the geotherm (the bench decouples at ~19 km), a lower-crust flow law, the strain rate | the Zagros; the Andes and Venus [A] | the toe, the steep zone and the plateau from temperature; the plateau reads tablelands | flow constants per rock |
+| self-similar wedge growth (Roe et al. 2008, Eqs. 1, 26, 34, 35 [V]) | the influx, the erosion law and the rain (the bench has them), the tapers | Taiwan, Aconcagua, the Olympics | replaces the ±240 km bump: the front moves out as the wedge's area grows, the crest `L/(cot α_p + cot α_r)` up to the ceiling, then a plateau | its constant hides the erosion's |
+| arid inward drainage (Sobel et al. 2003 [A]; Garcia-Castellanos 2007 [A]) | the runoff from the climate; the solve's closed-basin fill | the Altiplano–Puna, Tibet | moves the widened plateaus from 58 % toward Earth's 2–6 % mountains (ARITH) | abstracts only; the river-defeat threshold needs its own constants |
+| the flexural foreland with fill (Wickert 2016, Eqs. 1, 3, 4 [V]) | `T_e`, the belt's load, the infill density, the sediment supply | the Ganges–Himalaya [R] | a 190–270 km plain at each belt's foot; a lower belt mean | needs a sediment budget |
+| the megathrust-force ceiling (Dielforder & Hampel 2021, Eqs. 1a, 1b [V]) | the friction `μ′`, the depth of 300–350 °C, the slab's dip, the trench's depth | 14 subduction margins, 11 collisions | an average collision (2.6 TN/m) crests near 2.5–3 km, not Tibet's 5 km; most Andean margins under 2 km; the belt mean falls by about 1 km (ARITH) | `μ′` is a fitted reading; the crest is not the mean |
+
+**The research's limit and advice:** none of these laws makes relief at the node scale — to read over 49 % mountains,
+most belt nodes need slopes over 8 %; so the bench prints its belts' slopes (50 / 90 %) and their mountain share by height
+band first, to show whether the rivers' relief or the peak law makes the excess (run 24).
+
+**The belts' slopes, MEASURED (run 24).** The steepest slope to a land neighbour at 50 / 90 % of each cause's land: the
+collision belt 10.8 / 24.5 %, the Andean belt 7.7 / 24.7 %, the widened plateau 9.9 / 31.6 %, the old plains 1.1 / 3.2 %
+(Earth's young belts 3.2 / 9.4 %). The belts' mountain share by height band (0–1 / 1–2 / 2–3 / 3–4 / over 4 km): 14.6 /
+47.8 / 75.1 / 92.4 / 76.1 % (Earth's young belts 2.7 / 10.8 / 33.1 / 36.0 / 14.4 %). The peak law collapses 373 432 nodes
+over the whole age, a small share; the node means (F3) barely move the share (11.68 → 12.06 %).
+
+**What it says.** The home belts' nodes are about 3.4 times steeper than Earth's at the median, in every height band. The
+joint law's steady state explains the size (ARITH): a node draining only its own 67 km² stands at
+`S = (U/(K_lp·Q))^(1/2.2)` to its receiver — 6.0 / 10.3 / 17.0 % at 1 m/yr of rain for 0.3 / 1 / 3 mm/yr of uplift (4.4–12.4 %
+at 2 m/yr, 8.2–23.3 % at 0.5 m/yr) — so wherever a belt rises by about 1 mm/yr and its rivers reach the sea, its nodes settle
+near the measured 8–11 %. Earth's belts differ in their shape, not their law: the insides are plateaus (drained inward or
+too dry to cut — Tibet's interior 96.5 % tablelands) and the steep rise sits in one narrow band at the front; the home
+planet's ±240 km bump lifts the whole belt at once, and its widened plateaus are cut by rivers that reach the sea.
