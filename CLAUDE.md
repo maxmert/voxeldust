@@ -239,6 +239,10 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     law's steady state under a bump that lifts the whole belt at once): BENCH THE BELT AS A CRITICAL WEDGE WITH A PLATEAU
     (Roe et al. 2008; the taper of Davis, Suppe & Dahlen 1983 calibrated on Taiwan; the crest to the force ceiling, then a
     plateau) and read where the plateaus' rivers end; one commit, no push.
+    ★ B50 (2026-10-04, the critical wedge BENCHED: mountains 11.7 → 5.4–6.2 % (Earth 2.39 %), the ramps near Earth's, the
+    gate passes; the plateaus carry ~64 % of the rest — each copies its old platform's tilt and drains to the sea): THE
+    WEDGE GOES INTO PHASE 2'S BELTS' LAW; NEXT A LEVEL PLATEAU (one level along its margin, the lower crust's flow, Clark &
+    Royden 2000) and whether dry plateaus' lakes close under the solve's own water budget; one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

@@ -1337,3 +1337,23 @@ the whole belt at once, and the widened plateaus are cut by rivers that reach th
 **Example.** A collision on the home planet grows a ramp of about 2° toward the incoming plate and a steeper flank toward
 the other; when its crest reaches the force balance's height, the extra rock widens a flat plateau behind it, and a pilot
 crossing it climbs one front, flies over the plateau, and descends one flank.
+
+## B50. THE CRITICAL WEDGE GOES INTO PHASE 2; A LEVEL PLATEAU NEXT (2026-10-04)
+
+The belt as a critical wedge, BENCHED (run 25; the belts' design §17): each margin's cross-section a taper wedge sized by its
+rock (Roe et al. 2008; Davis, Suppe & Dahlen 1983's taper calibrated on Taiwan), its crest to the force-balance height, a
+plateau behind it — the mountains fall 11.7 → 5.4–6.2 % (Earth 2.39 %), the ramps near Earth's (the collision belts 20–30 %
+mountains, the Andean 13–16 %), and the gate passes; the plateaus carry about 64 % of the mountains left, because each
+plateau node stands at its old platform's height plus the force height, so the plateau copies the platform's tilt and
+about 90 % of its land drains to the sea. The owner ruled:
+
+1. **THE CRITICAL WEDGE GOES INTO PHASE 2'S BELTS' LAW** (*"Yes, in phase 2"*), replacing the ±240 km bump and the
+   force balance's widening.
+2. **NEXT: A LEVEL PLATEAU** (*"A level plateau"*): the plateau's surface stands at one level along its margin — the lower
+   crust flows until the plateau is level (Clark & Royden 2000) — never copying each node's old platform; then read whether
+   the dry plateaus' lakes close under the solve's own water budget, so inward drainage follows from the existing lake law
+   with no new constant.
+3. One commit now, on `game`, no push.
+
+**Example.** The plateau behind a home-planet collision stands at one height from end to end, as Tibet does; where the air
+over it is dry, its streams end in closed lakes instead of cutting to the sea, and a pilot flies over a flat high plain.

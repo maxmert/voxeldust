@@ -1550,3 +1550,11 @@ AWAY from the reference, the step's report says so (ruling B6).
   megathrust-force ceiling (Dielforder & Hampel 2021).
 - 2026-10-04 — RULING B49: bench the belt as a critical wedge with a plateau (Roe et al. 2008; Davis, Suppe & Dahlen 1983's
   taper calibrated on Taiwan) and read where the plateaus' rivers end. Run 24 and the belts' shape research committed.
+- 2026-10-04 — THE BELT AS A CRITICAL WEDGE BENCHED (ruling B49; run 25): the mountains fall 11.7 → 6.2 % (5.4 % at 414
+  passes; Earth 2.39 %), the ramps near Earth's (collision belts 20–30 % mountains, Andean 13–16 %), the gate passes
+  (mountains −0.8 points, land over 1 000 m +0.2). The plateaus are the largest cause left (63–65 % of the mountains):
+  their surface is each node's platform plus the force height, so they copy the platform's tilt and ~90 % of their land
+  drains to the sea; Earth's plateaus are level (the lower crust flows) and dry ones drain inward.
+- 2026-10-04 — RULING B50: the critical wedge goes into phase 2's belts' law; next a level plateau (one level along its
+  margin, the lower crust's flow) and whether dry plateaus' lakes close under the solve's own water budget. Run 25
+  committed.

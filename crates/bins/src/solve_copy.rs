@@ -147,6 +147,115 @@ pub struct Laws {
     /// stands at now, never under its own floor, a node whose level falls to its floor is dry and cut in the same sweep,
     /// and the deposit fills each lake only up to its level now.
     pub lake_cure: bool,
+    /// ★ RULING B49, THE BELT AS A CRITICAL WEDGE (the belts' design §17): `false` spreads a belt's rock over the ±2
+    /// flexural parameters' bump and widens it at the force ceiling (B40); `true` gives each margin a critical-wedge
+    /// cross-section sized by the rock it has taken in (Roe et al. 2008, Eq. 35, the world's own densities): a front (pro)
+    /// flank at [`PRO_TAPER_RAD`] toward the incoming plate, a back (retro) flank at [`RETRO_TAPER_RAD`], the crest rising to
+    /// the force balance's height, then a PLATEAU widening behind the crest (on the back side; at an Andean margin the wedge
+    /// stands on the continent — the steep flank from the coast, the plateau, the gentle front ramp inland, as the Andes).
+    /// Each pass a wedge node rises by the wedge surface's own rise there; erosion works on it as before. The incoming plate
+    /// is the one whose drift carries it faster toward the other plate (a stated rule: the world draws no slab).
+    pub wedge: bool,
+}
+
+/// ★ THE CRITICAL TAPER's calibration body, TAIWAN (Davis, Suppe & Dahlen 1983, JGR 88): the wedge's internal friction
+/// `μ`, its basal friction `μ_b`, the pore-pressure ratio `λ = λ_b`, and the basal dip `β` (rad).
+pub const TAPER_MU: f64 = 1.03;
+pub const TAPER_MU_B: f64 = 0.85;
+pub const TAPER_LAMBDA: f64 = 0.7;
+pub const TAPER_BETA_RAD: f64 = 6.0 * std::f64::consts::PI / 180.0;
+/// ★ THE FRONT (PRO) FLANK's slope, rad: the subaerial Coulomb wedge's critical taper (Davis, Suppe & Dahlen 1983; in the
+/// form of Mouthereau et al. 2006, Eq. 1) `α + β = [β + μ_b(1 − λ_b)] / [1 + (1 − λ)·2 sin φ/(1 − sin φ)]`, `φ = atan μ`, at
+/// Taiwan's numbers: α = 2.17° (ARITH; Taiwan's measured pro flank is about 2°, Roe et al. 2008, p. 823).
+/// (The value is the formula's at Taiwan's numbers; the unit test `the_critical_taper_at_taiwan` checks it.)
+pub const PRO_TAPER_RAD: f64 = 0.037_815;
+/// ★ THE BACK (RETRO) FLANK's slope, rad: Taiwan's measured retro flank, 6° (Roe et al. 2008, p. 823).
+pub const RETRO_TAPER_RAD: f64 = 6.0 * std::f64::consts::PI / 180.0;
+
+/// The critical taper's front slope from its frictions (see [`PRO_TAPER_RAD`]), rad.
+#[must_use]
+pub fn critical_taper_rad(mu: f64, mu_b: f64, lambda: f64, beta: f64) -> f64 {
+    let sin_phi = mu.atan().sin();
+    (beta + mu_b * (1.0 - lambda)) / (1.0 + (1.0 - lambda) * 2.0 * sin_phi / (1.0 - sin_phi)) - beta
+}
+
+/// ★ A WEDGE NODE (ruling B49): what the critical wedge reads at one belt node.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WedgeNode {
+    pub node: u32,
+    /// [`SIDE_PRO`], [`SIDE_RETRO`] or [`SIDE_ANDEAN`].
+    pub side: u8,
+    /// The node's distance to the boundary, m.
+    pub dist_m: f64,
+    /// The rock the margin takes in when its window opens, m² a year a metre of margin.
+    pub f0_m2_yr: f64,
+    /// The window's start, years from the solve's start.
+    pub start_yr: u64,
+    /// The force balance's height over the node's platform, m — the crest's ceiling.
+    pub ceil_m: f64,
+    /// S2's e-folding time, years, at a slowing collision.
+    pub tau_yr: Option<f64>,
+}
+
+/// A wedge node on the incoming plate's side of a collision (the front flank).
+pub const SIDE_PRO: u8 = 0;
+/// A wedge node on the other side of a collision (the plateau and the back flank).
+pub const SIDE_RETRO: u8 = 1;
+/// A wedge node on the continent of an Andean margin (the back flank from the coast, the plateau, the front ramp inland).
+pub const SIDE_ANDEAN: u8 = 2;
+
+/// The rock a wedge node's margin has taken in by `t_yr` (years from the solve's start), m² a metre of margin.
+#[must_use]
+pub fn wedge_area_m2(w: &WedgeNode, t_yr: u64) -> f64 {
+    if t_yr <= w.start_yr {
+        return 0.0;
+    }
+    let dt = (t_yr - w.start_yr) as f64;
+    match w.tau_yr {
+        Some(tau) => w.f0_m2_yr * tau * -(-dt / tau).exp_m1(),
+        None => w.f0_m2_yr * dt,
+    }
+}
+
+/// ★ THE WEDGE'S SURFACE over the platform at a wedge node, m, for the rock taken in `a_m2` (Roe et al. 2008, Eq. 35: the
+/// surface's cross-section is `(1 − ρ_c/ρ_m)` of the rock's, a triangle of the two tapers; past the ceiling a trapezoid whose
+/// plateau widens behind the crest). Returns the height and whether the node stands on the plateau.
+#[must_use]
+pub fn wedge_height_m(w: &WedgeNode, a_m2: f64) -> (f64, bool) {
+    use vd_terrain::land::{CONTINENTAL_CRUST_DENSITY_KGM3 as RC, MANTLE_DENSITY_KGM3 as RM};
+    let (tp, tr) = (PRO_TAPER_RAD.tan(), RETRO_TAPER_RAD.tan());
+    let cot_sum = 1.0 / tp + 1.0 / tr;
+    let surface = a_m2 * (RM - RC) / RM;
+    let h_tri = (2.0 * surface / cot_sum).sqrt();
+    let (h, plateau) = if h_tri <= w.ceil_m {
+        (h_tri, 0.0)
+    } else {
+        (
+            w.ceil_m,
+            (surface - w.ceil_m * w.ceil_m * cot_sum / 2.0) / w.ceil_m,
+        )
+    };
+    let d = w.dist_m;
+    match w.side {
+        SIDE_PRO => ((h - d * tp).max(0.0), false),
+        SIDE_RETRO => {
+            if d <= plateau {
+                (h, plateau > 0.0)
+            } else {
+                ((h - (d - plateau) * tr).max(0.0), false)
+            }
+        }
+        _ => {
+            let rise = h / tr;
+            if d < rise {
+                (d * tr, false)
+            } else if d < rise + plateau {
+                (h, true)
+            } else {
+                ((h - (d - rise - plateau) * tp).max(0.0), false)
+            }
+        }
+    }
 }
 
 /// ★ THE LAKES' CURE at one lake node (see [`Laws::lake_cure`]): its level becomes its receiver's level as it stands now
@@ -460,6 +569,8 @@ pub struct Belts {
     pub kind: Vec<u8>,
     /// S2's e-folding time in years, where the slowing law acts (`None`: every window closes at a constant speed).
     pub tau_yr: Option<f64>,
+    /// The critical wedge's nodes (ruling B49; empty without [`Laws::wedge`]).
+    pub wedge: Vec<WedgeNode>,
 }
 
 /// The force balance's height, metres: the root of `ρ_c·g·[L·h + h²·ρ_m/(2Δρ)] = F_b`.
@@ -689,6 +800,80 @@ pub fn belts_by_influx(
     report.rate_mm_yr = [quantile(&rates, 0.5), rates.last().copied().unwrap_or(0.0)];
     report.kept_share = [0.1, 0.5, 0.9].map(|q| quantile(&kept_shares, q));
     report.slowing_share = [0.1, 0.5, 0.9].map(|q| quantile(&slow_shares, q));
+    // LAW (B49): the critical wedge at every continental node whose nearest boundary closes, sized by its margin's rock.
+    let mut wedge: Vec<WedgeNode> = Vec::new();
+    if laws.wedge {
+        total.iter_mut().for_each(|t| *t = 0);
+        kind.iter_mut().for_each(|k| *k = BELT_NONE);
+        let f = |v: [Gf; 3]| [v[0].to_f64(), v[1].to_f64(), v[2].to_f64()];
+        for k in 0..n {
+            let b = bounds[k];
+            let Some(o) = b.other else { continue };
+            if b.kind != Kind::Convergent || land.crust[k] < 128 || t_m <= 0.0 {
+                continue;
+            }
+            let own = &land.plates[usize::from(b.plate)];
+            let other = &land.plates[usize::from(o)];
+            let v_n = b.convergence.to_f64() * speed_m_yr;
+            let collision = other.affinity >= Gf::ZERO;
+            // The boundary's normal from the own plate's site toward the other's (as `boundary_of` reads it), and each
+            // plate's drift toward the other: the faster one is the incoming plate.
+            let (so, st) = (f(own.site), f(other.site));
+            let nv = [st[0] - so[0], st[1] - so[1], st[2] - so[2]];
+            let len = (nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2])
+                .sqrt()
+                .max(1e-12);
+            let nn = [nv[0] / len, nv[1] / len, nv[2] / len];
+            let (dw, dt) = (f(own.drift), f(other.drift));
+            let own_toward = dw[0] * nn[0] + dw[1] * nn[1] + dw[2] * nn[2];
+            let other_toward = -(dt[0] * nn[0] + dt[1] * nn[1] + dt[2] * nn[2]);
+            let (side, f0) = if collision {
+                let pro = own_toward > other_toward;
+                let incoming = if pro { own } else { other };
+                let incoming_m = continental_m * incoming.crust_scatter.to_f64();
+                let kept_m = if laws.crust_partition {
+                    incoming_m.min(decoupling_m)
+                } else {
+                    incoming_m
+                };
+                (if pro { SIDE_PRO } else { SIDE_RETRO }, v_n * kept_m)
+            } else {
+                (
+                    SIDE_ANDEAN,
+                    ANDEAN_SHARE * v_n * continental_m * own.crust_scatter.to_f64(),
+                )
+            };
+            let (lo, hi) = (b.plate.min(o), b.plate.max(o));
+            let share = unit_of(vd_seed::rng::child_seed(
+                body.seed(),
+                WINDOW_SALT,
+                (u64::from(lo) << 8) | u64::from(hi),
+            ));
+            let window = share * t_m;
+            let crust = continental_m * own.crust_scatter.to_f64();
+            let w = WedgeNode {
+                node: k as u32,
+                side,
+                dist_m: radius * b.sine.to_f64(),
+                f0_m2_yr: f0,
+                start_yr: age_yr.saturating_sub(window as u64),
+                ceil_m: force_height_m(force_n_m, crust, g),
+                tau_yr: if collision { tau_yr } else { None },
+            };
+            let (h, _) = wedge_height_m(&w, wedge_area_m2(&w, age_yr));
+            if h <= 0.0 {
+                continue;
+            }
+            total[k] = (h * f64::from(vd_terrain::solve::Z_STEPS_PER_M)) as i64;
+            start_yr[k] = w.start_yr;
+            kind[k] = if collision {
+                BELT_COLLISION
+            } else {
+                BELT_ANDEAN
+            };
+            wedge.push(w);
+        }
+    }
     Belts {
         total,
         start_yr,
@@ -698,6 +883,7 @@ pub fn belts_by_influx(
         pairs,
         kind,
         tau_yr,
+        wedge,
     }
 }
 
@@ -1234,11 +1420,23 @@ pub fn solve_copy(
         .belts_by_influx
         .then(|| belts_by_influx(body, words, &land, schedule.age_yr, laws));
     let mut even_total = land.uplift.clone();
+    // LAW (B49): a wedge node on its plateau at the end keeps its province (as the widened plateau does) and reads as
+    // plateau; every other belt node reads the folded belt's rock.
+    let mut wedge_plateau: Vec<bool> = Vec::new();
     if let Some(b) = &belts {
+        if !b.wedge.is_empty() {
+            wedge_plateau = vec![false; b.total.len()];
+            for w in &b.wedge {
+                let (_, on) = wedge_height_m(w, wedge_area_m2(w, schedule.age_yr));
+                wedge_plateau[w.node as usize] = on;
+            }
+        }
         for (k, &t) in b.total.iter().enumerate() {
             if t > 0 {
                 even_total[k] = 0;
-                land.province[k] = vd_terrain::strata::Province::FoldedBelt.code();
+                if !wedge_plateau.get(k).copied().unwrap_or(false) {
+                    land.province[k] = vd_terrain::strata::Province::FoldedBelt.code();
+                }
             }
         }
     }
@@ -1323,7 +1521,7 @@ pub fn solve_copy(
     // LAW (B40 item 1): each pair's excess rock with no room yet, volume in sixteenths × m², carried pass to pass.
     let mut carry: Vec<i128> = Vec::new();
     // A readout (B45 item 2): every node the widening ever raised — the belts' plateaus, apart from the old plains.
-    let mut widened: Vec<bool> = Vec::new();
+    let mut widened: Vec<bool> = wedge_plateau.clone();
     state.z_flood.clone_from(&state.z);
     if let Some(shot) = trace {
         shot("01_craters", &state.z);
@@ -1554,8 +1752,19 @@ pub fn solve_copy(
                     }
                 })
                 .collect();
-            // LAW (B40 item 1): every belt node up to its ceiling; the refused rock widens its pair nearest first.
-            if let (true, Some(b)) = (laws.force_balance, belts.as_ref()) {
+            // LAW (B49): each wedge node rises by its wedge surface's own rise over the pass.
+            if let Some(b) = belts.as_ref() {
+                let steps_m = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+                for w in &b.wedge {
+                    let (h0, _) = wedge_height_m(w, wedge_area_m2(w, t0));
+                    let (h1, _) = wedge_height_m(w, wedge_area_m2(w, t1));
+                    steps[w.node as usize] =
+                        (h1 * steps_m).floor() as i64 - (h0 * steps_m).floor() as i64;
+                }
+            }
+            // LAW (B40 item 1): every belt node up to its ceiling; the refused rock widens its pair nearest first (not under
+            // the wedge, whose plateau is its own).
+            if let (true, false, Some(b)) = (laws.force_balance, laws.wedge, belts.as_ref()) {
                 if carry.len() != b.pairs.len() {
                     carry = vec![0i128; b.pairs.len()];
                 }
@@ -2004,6 +2213,45 @@ mod tests {
         assert_eq!((mixed.len() - 1, fine.len() - 1), (214, 414));
         assert_eq!(mixed[mixed.len() - 1] - mixed[mixed.len() - 2], 500_000);
         assert_eq!(fine[fine.len() - 1] - fine[fine.len() - 2], 250_000);
+    }
+
+    /// The front flank's constant is the critical taper's value at Taiwan's numbers.
+    #[test]
+    fn the_critical_taper_at_taiwan() {
+        let a = critical_taper_rad(TAPER_MU, TAPER_MU_B, TAPER_LAMBDA, TAPER_BETA_RAD);
+        assert_eq!((a * 1e6).round(), (PRO_TAPER_RAD * 1e6).round());
+    }
+
+    /// A wedge's surface: the crest grows as the root of its rock, a plateau widens behind it at the ceiling, and the
+    /// front flank falls at the front taper.
+    #[test]
+    fn a_wedge_grows_a_plateau_at_its_ceiling() {
+        let w = WedgeNode {
+            node: 0,
+            side: SIDE_RETRO,
+            dist_m: 0.0,
+            f0_m2_yr: 100.0,
+            start_yr: 0,
+            ceil_m: 5_000.0,
+            tau_yr: None,
+        };
+        let (small, on_small) = wedge_height_m(&w, 1.0e9);
+        assert!(small < 5_000.0);
+        assert!(!on_small);
+        let (big, on_big) = wedge_height_m(&w, 1.0e12);
+        assert_eq!(big, 5_000.0);
+        assert!(on_big);
+        let front = WedgeNode {
+            side: SIDE_PRO,
+            dist_m: 10_000.0,
+            ..w
+        };
+        let (h, _) = wedge_height_m(&front, 1.0e12);
+        assert_eq!(
+            (h * 10.0).round(),
+            ((5_000.0 - 10_000.0 * PRO_TAPER_RAD.tan()) * 10.0).round()
+        );
+        assert_eq!(wedge_area_m2(&w, 1_000), 100.0 * 1_000.0);
     }
 
     /// S2's time constant is Clark's 45.1 Myr, and a slowing collision's passes close its whole budget, the early

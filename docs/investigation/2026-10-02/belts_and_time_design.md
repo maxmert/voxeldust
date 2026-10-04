@@ -1038,3 +1038,31 @@ at 2 m/yr, 8.2–23.3 % at 0.5 m/yr) — so wherever a belt rises by about 1 mm/
 near the measured 8–11 %. Earth's belts differ in their shape, not their law: the insides are plateaus (drained inward or
 too dry to cut — Tibet's interior 96.5 % tablelands) and the steep rise sits in one narrow band at the front; the home
 planet's ±240 km bump lifts the whole belt at once, and its widened plateaus are cut by rivers that reach the sea.
+
+**THE BELT AS A CRITICAL WEDGE, BENCHED (run 25; ruling B49).** Each convergent margin takes a critical-wedge cross-section
+sized by the rock it has taken in (Roe et al. 2008, Eq. 35, the world's densities): the front flank at 2.17° (the critical
+taper of Davis, Suppe & Dahlen 1983 at Taiwan's frictions, μ = 1.03, μ_b = 0.85, λ = 0.7, β = 6°), the back flank at 6°
+(Taiwan), the crest rising to the force-balance height, then a plateau widening behind it; at a collision the incoming
+plate (the faster one toward the other) takes the front flank; at an Andean margin the wedge stands on the continent (the
+steep flank from the coast, the plateau, the front ramp inland). The bump and the force balance's widening are off under
+the wedge. With all the other cures and the landscape's time:
+
+| Reading | without the wedge (214 passes) | with the wedge (214) | with the wedge (414) | Earth |
+|---|---|---|---|---|
+| mountains | 11.68 % | 6.20 % | 5.40 % | 2.39 % |
+| relief 50 / 90 / 99 % | 197 / 1 208 / 4 279 m | 166 / 783 / 2 483 m | 170 / 747 / 2 288 m | 83 / 550 / 1 383 m |
+| land over 1 000 m | 27.83 % | 24.85 % | 25.01 % | 20.8 % |
+| collision belt: land, mountains in it, slope 50 / 90 % | 5.4 %, 68 %, 10.8 / 24.5 % | 3.4 %, 30 %, 6.1 / 13.0 % | 3.4 %, 20 %, 5.8 / 10.4 % | orogens 12.2 %, 11.8 %; young belts 3.2 / 9.4 % |
+| Andean belt | 6.6 %, 49 %, 7.7 / 24.7 % | 5.8 %, 13 %, 4.6 / 8.9 % | 5.8 %, 16 %, 4.3 / 9.7 % | arcs 3.9 %, 8.1 % |
+| plateau | 5.7 %, 58 %, 9.9 / 31.6 % | 10.1 %, 41 %, 6.7 / 17.6 % | 10.1 %, 36 %, 6.3 / 15.9 % | Tibet's interior 1.7 % mountains |
+| old plains mean / median | 516 / 318 m | 468 / 292 m | 463 / 276 m | 485 / 349 m |
+| the plateaus' land routed to the sea; their rain | 90.8 %; 253 mm/yr | 89.0 %; 316 mm/yr | 91.0 %; 355 mm/yr | Tibet's interior drains inward |
+
+1. **The wedge almost halves the mountains** (11.7 → 6.2 %) and brings the ramps near Earth's (the collision belts 20–30 %
+   mountains, the Andean 13–16 %; their median slopes 4.3–6.1 %).
+2. **The gate passes**: 214 → 414 passes move the mountains −0.8 points, the land over 1 000 m +0.2, the relief within 8 %.
+3. **THE PLATEAUS ARE THE LARGEST CAUSE LEFT** (63–65 % of the mountains; 36–41 % of their land mountains against Tibet's
+   interior 1.7 %; median slope 6.3–6.7 %). About 90 % of their land is routed to the sea under 250–355 mm/yr of rain.
+   THE CODE SAYS WHY: the wedge's ceiling is each node's own platform height plus the force height, so the plateau copies
+   the old platform's tilt and bumps and drains outward; on Earth the lower crust flows until a plateau's surface is level
+   (Clark & Royden 2000 [A]), and a level, dry plateau drains inward to closed basins (Sobel et al. 2003 [A]).

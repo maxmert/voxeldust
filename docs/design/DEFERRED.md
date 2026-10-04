@@ -11873,8 +11873,9 @@ updated in the same change as the work, deleted when done). The interims named h
     cure (B46); the lakes' cure MEASURED (run 22) and RULED into phase 2 (B47 item 1); THE GATE PASSES within the stated
     tolerance (B47 item 2: every share within 2 points, every height within 10 %). Owed: THE MOUNTAINS (11–13 % against
     Earth's 2.39 %; B47 item 3) — MEASURED (run 23): the belts and their plateaus carry 88 %, rough and high where Earth's
-    orogens are 8–12 % mountains; the belts' shape is researched next (B48) — the height a plate stands at after its
-    raise (today the freeboard law's starting height, an assumption) and the tablelands' excess (67 % against 45.5 %).
+    orogens are 8–12 % mountains; the belts' shape researched (B48); the CRITICAL WEDGE benched (run 25: mountains 5.4–6.2 %)
+    and RULED into phase 2 (B50 item 1); owed: A LEVEL PLATEAU (B50 item 2) — the height a plate stands at after its raise
+    (today the freeboard law's starting height, an assumption) and the tablelands' excess (67 % against 45.5 %).
   - 🟨 THE ANDEAN MARGINS' SHARE, A REGISTERED INTERIM (ruling B42 item 3): every ocean-under-continent margin shortens
     by Norabuena et al. 1998's share (12.5/70 of the convergence) for its whole window — 81 % of the belts' rock in run
     10, about four times Earth's Andean high land. No published rate law exists (Lallemand's line is a sign rule); the

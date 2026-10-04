@@ -33,7 +33,8 @@
 //!   1's mechanism cured — the sweep reads a receiver as a lake only where the routing found one. `+rebx`: the rebound
 //!   without its floors (each node's fraction carried), so a finer rebound spacing is not read low by rounding. `+lt`:
 //!   ruling B45 item 2's landscape's time — each plate's ground erodes only since its raise under the reworking law.
-//!   `+lake`: ruling B46 item 2's lakes' cure — a lake's level follows its outlet inside the sweep.
+//!   `+lake`: ruling B46 item 2's lakes' cure — a lake's level follows its outlet inside the sweep. `+wedge`: ruling
+//!   B49's critical wedge — each margin's cross-section a taper wedge sized by its rock, a plateau past the ceiling.
 //! - `--ledger=DIR`: each case also writes its PASS LEDGER to `DIR/<case>.csv` — each process's change of volume on the
 //!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause).
 //!
@@ -443,6 +444,55 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
         pct(band_land[3], band_land.iter().sum()),
         pct(band_land[4], band_land.iter().sum())
     );
+    // B49: where the belts' and the plateaus' water ends — straight to the sea, or through a standing lake (the budget's
+    // water) on its way — and their rain; read in the solve's own order, outlets first.
+    {
+        let lake_bit = vd_terrain::solve::FACIES_LAKE;
+        let mut through_lake = vec![false; n];
+        let mut to_sea = vec![false; n];
+        for k in (0..state.order.len()).rev() {
+            let i = state.order[k] as usize;
+            let r = state.receiver[i];
+            let here = solved.facies[i] & lake_bit != 0;
+            if r == NO_NODE {
+                through_lake[i] = here;
+                to_sea[i] = solved.facies[i] & FACIES_SEA != 0;
+            } else {
+                through_lake[i] = here || through_lake[r as usize];
+                to_sea[i] = to_sea[r as usize];
+            }
+        }
+        for (label, set) in [
+            ("the belts (collision and Andean)", [2usize, 3]),
+            ("the plateaus", [5usize, 5]),
+        ] {
+            let (mut a_all, mut a_lake, mut a_sea, mut rain) = (0u128, 0u128, 0u128, 0.0f64);
+            for v in 0..n {
+                if readings[v].is_none() || !set.contains(&cause(v)) {
+                    continue;
+                }
+                let a = u128::from(area[v]);
+                a_all += a;
+                if through_lake[v] {
+                    a_lake += a;
+                }
+                if to_sea[v] {
+                    a_sea += a;
+                }
+                rain += f64::from(state.rain[v]) * a as f64;
+            }
+            if a_all == 0 {
+                continue;
+            }
+            println!(
+                "  THE DRAINAGE of {label}: {:.1} % of the land drains to the sea, {:.1} % passes a standing lake on its way; \
+                 the mean rain {:.0} mm/yr",
+                pct(a_sea, a_all),
+                pct(a_lake, a_all),
+                rain / a_all as f64
+            );
+        }
+    }
     // B45 item 2: each plate's raise time and its land's height (the landscape's time).
     if !solved.raise_yr.is_empty() {
         let plates = solved.raise_yr.len();
@@ -651,6 +701,7 @@ fn main() {
         let mut rebound_exact = false;
         let mut landscape_time = false;
         let mut lake_cure = false;
+        let mut wedge = false;
         for cure in cures {
             match cure {
                 "ice" => ice_stepped = true,
@@ -663,7 +714,10 @@ fn main() {
                 "rebx" => rebound_exact = true,
                 "lt" => landscape_time = true,
                 "lake" => lake_cure = true,
-                other => panic!("a cure is ice, icereb, reb, rebx, base, lt or lake, not {other}"),
+                "wedge" => wedge = true,
+                other => {
+                    panic!("a cure is ice, icereb, reb, rebx, base, lt, lake or wedge, not {other}")
+                }
             }
         }
         let standard = Schedule::standard(words.age_yr);
@@ -813,6 +867,7 @@ fn main() {
             rebound_exact,
             landscape_time,
             lake_cure,
+            wedge,
             ..laws
         };
         let case = &if sub_sweeps > 1 {
