@@ -11874,14 +11874,22 @@ updated in the same change as the work, deleted when done). The interims named h
     tolerance (B47 item 2: every share within 2 points, every height within 10 %). Owed: THE MOUNTAINS (11–13 % against
     Earth's 2.39 %; B47 item 3) — MEASURED (run 23): the belts and their plateaus carry 88 %, rough and high where Earth's
     orogens are 8–12 % mountains; the belts' shape researched (B48); the CRITICAL WEDGE benched (run 25: mountains 5.4–6.2 %)
-    and RULED into phase 2 (B50 item 1); owed: A LEVEL PLATEAU (B50 item 2) — the height a plate stands at after its raise
-    (today the freeboard law's starting height, an assumption) and the tablelands' excess (67 % against 45.5 %).
+    and RULED into phase 2 (B50 item 1); A LEVEL PLATEAU and THE WATER'S OWN PATHS benched (B50 item 2; runs 26–28, the
+    design §17): the level plateau 6.20 → 5.45 % mountains (the gate passes); the joint law reads the rain (`Q = A·R`),
+    never the budget's runoff; the law's own rain on the water's paths with the budget's lakes and a closed-basin fill
+    changes the mountains little (5.6–5.8 %), raises the old plains (median 356 m against Earth's 349 m, mean 593 m against
+    485 m) and widens the closed basins under the sea (7–8 % of the land); 87 % of the plateau land is Andean. BOTH RULED
+    into phase 2 (B51 items 1–2). Owed: the Andean margins' law (B51 item 3, next); the height a plate stands at after its
+    raise (today the freeboard law's starting height, an assumption) and the tablelands' excess (63–67 % against 45.5 %).
   - 🟨 THE ANDEAN MARGINS' SHARE, A REGISTERED INTERIM (ruling B42 item 3): every ocean-under-continent margin shortens
     by Norabuena et al. 1998's share (12.5/70 of the convergence) for its whole window — 81 % of the belts' rock in run
     10, about four times Earth's Andean high land. No published rate law exists (Lallemand's line is a sign rule); the
     megathrust's force law (Dielforder & Hampel 2021) fits Earth's margins but needs the fault's friction, the depth of
     its frictional-viscous transition and the slab's dip, which the world does not state; the window waits for the slab's
-    entry into the lower mantle. Returns after the gate converges (the research: the belts' design §13).
+    entry into the lower mantle. Returns after the gate converges (the research: the belts' design §13). ★ THE GATE
+    CONVERGES NOW (B47 item 2), and under the wedge the interim builds 87 % of the plateau land (8.6–8.8 % of the land,
+    against the central Andes' ≈ 0.44 % of Earth's), about half of all the mountains left (runs 27–28, the design §17).
+    NEXT (ruling B51 item 3): the Andean margins' law, researched then benched.
 - 🟥 **THE REST OF M0-4:** finer Earth data for the scales under a node (the hills, the valleys, the pits), the Moon and
   Mars, the spectra, the slopes by class and the ice line on Earth's real climate.
 - 🟥 **STEPS 2, 3 AND 5 OWED:** the "before" record on every pinned stand (numbers and pictures, no window); the corrected

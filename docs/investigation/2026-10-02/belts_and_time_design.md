@@ -1066,3 +1066,70 @@ the wedge. With all the other cures and the landscape's time:
    THE CODE SAYS WHY: the wedge's ceiling is each node's own platform height plus the force height, so the plateau copies
    the old platform's tilt and bumps and drains outward; on Earth the lower crust flows until a plateau's surface is level
    (Clark & Royden 2000 [A]), and a level, dry plateau drains inward to closed basins (Sobel et al. 2003 [A]).
+
+**A LEVEL PLATEAU AND THE WATER'S OWN PATHS, BENCHED (runs 26–28; ruling B50 item 2).** Three switches in the copy, each on
+the wedge with every cure and the landscape's time:
+
+1. `+level` — ONE LEVEL A PAIR: the plateau's ceiling at each wedge node is the pair's level less the node's own platform;
+   the level is the area-weighted mean over the pair's wedge nodes of (platform + force height). The lower crust flows
+   until a plateau is level (Clark & Royden 2000 [A]). The wedge still rises by increments over the ground as it stands,
+   so the plateau keeps the valleys its platform had before the wedge came; only the platform's tilt goes.
+2. `+water` — THE BUDGET'S RUNOFF as the erosion's water (the solve's lakes' budget and water tree after every routing).
+   FOUND: the joint law's calibration reads the RAIN — "the product of drainage area and mean upstream rainfall"
+   (Adams et al. 2020, eq. 1b, `Q = A·R`, `R` the rain averaged over `A`; its `K_lp` holds the Himalayan basins' own share
+   of the rain that runs off). With the runoff and the same `K_lp` the cut falls by each node's runoff share: the old
+   plains stand at 1 132–1 181 m against Earth's 485 m, the land over 1 000 m at 51–54 %. A reading of the runoff's share,
+   never the law as stated; not a candidate.
+3. `+wrain` — THE LAW'S OWN RAIN ON THE WATER'S OWN PATHS: after every routing the budget's water tree gives the
+   receivers; each node's rain times its area is summed down them with no sink, so `A` is the area that truly drains to
+   the node — a CLOSED lake (its inflow under its evaporation) ends its rivers, and its basin's rain reaches no river below
+   its rim. The solve's lakes become the budget's standing water: the sweep skips only water and cuts a closed hollow's
+   dry rim down to its lake; the deposit fills a lake only up to its water; and the rock that reaches a closed hollow's
+   end stays in it — the hollow filled as one body from its floor to one level, never over its spill (run 28; run 27 ran
+   with the routing's lakes and is superseded: it raised a closed hollow's dry rim to the spill along every river into
+   it and lost the rock that reached the closed lake).
+
+| Reading (214 passes; 414 in brackets) | the wedge (run 25) | + level (26, 27) | + level + the water's paths (28) | Earth |
+|---|---|---|---|---|
+| mountains | 6.20 % (5.40) | 5.45 % (5.24) | 5.80 % (5.56) | 2.39 % |
+| relief 50 / 90 / 99 % | 166 / 783 / 2 483 m | 167 / 763 / 2 316 m | 183 / 780 / 2 353 m | 83 / 550 / 1 383 m |
+| land over 1 000 m | 24.85 % (25.01) | 25.26 % (25.23) | 32.15 % (31.45) | 20.8 % |
+| the plateau: land, mountains in it, slope 50 % | 10.1 %, 41 %, 6.7 % | 9.97 %, 33 %, 6.2 % | 10.05 %, 31 %, 5.5 % | Tibet's interior 1.7 % mountains |
+| the plateau by its margin: collision / Andean land | — | (414: 1.28 / 8.64 %) | 1.30 / 8.76 % | the central Andes' tablelands ≈ 0.44 % of the land |
+| the plateaus' land drained to the sea | 89.0 % | 87.0 % | 75.6 % (78.2) | Tibet's interior drains inward |
+| the old plains, mean / median | 468 / 292 m | 465 / 288 m | 593 / 356 m (571 / 318) | 485 / 349 m |
+| land in closed basins that reach under the sea | 3.27 % | 2.68 % | 8.16 % (7.34) | — |
+
+(Earth's central Andes: the young-belt table above, 0.93 million km² with 70.5 % tablelands, ARITH ≈ 0.66 million km²,
+0.44 % of Earth's land.)
+
+1. **The level plateau helps a little and the gate passes** (214 → 414 passes: mountains −0.21 points, the land over
+   1 000 m −0.03, the relief within 4 %): the plateau's mountains fall from 41 % to 33 %, the whole land's from 6.20 % to
+   5.45 %. The plateau's median slope stays 6.2 %: RIVERS CUT the plateau during the wedge's window; its old tilt was
+   the smaller part.
+2. **The water's own paths change the mountains little** (5.45 → 5.80 % at 214 passes, 5.24 → 5.56 % at 414): the plateaus
+   drain inward a little more (the share to the sea 87 → 76 %), their mountains fall from 33 % to 31 %. **Inward drainage
+   does not follow from the lake law on these plateaus**: the wedge raises a smooth surface, which holds few closed
+   hollows for the budget to close; Earth's internally drained plateau basins are CONTRACTIONAL basins — ranges rise
+   across the rivers' paths and, in a dry climate, the rivers cannot cut through (Sobel et al. 2003 [A]).
+3. **The water's own paths move the old plains and the basins.** A closed basin now keeps its rock (no water leaves it),
+   so the old plains stand higher (mean 465 → 593 m, median 288 → 356 m; Earth 485 / 349 m) and the land over 1 000 m
+   rises from 25 % to 32 %. A closed hollow's dry rim now wears down to its lake, so the closed basins that reach under
+   the sea widen (2.7 → 7–8 % of the land, mean −350 to −410 m) — the deep inland pockets the starting land holds (rulings
+   B7, B12: the basins parked until after R2) spread when their walls erode into them. The gate passes on every share
+   and on the relief (214 → 414: mountains −0.24, the land over 1 000 m −0.70, the relief within 8 %); the old plains'
+   median moves 10.7 %.
+4. **THE PLATEAUS ARE ANDEAN.** Of the plateau land, 87 % stands on Andean margins (8.6–8.8 % of the land, 26–33 %
+   mountains, mean 2.2 km); the collisions' plateaus are 1.3 % of the land (42–55 % mountains, mean 3.0 km). The Andean
+   plateaus alone carry about half of all the mountains left (at 414 passes 8.77 % × 28.8 % ≈ 2.5 of the whole land's 5.3
+   points). Earth's only large
+   Andean plateau, the central Andes', is about 0.44 % of the land. The Andean margins' influx is the REGISTERED INTERIM
+   (Norabuena et al. 1998's 12.5/70 of the convergence at every ocean-under-continent margin for its whole window,
+   ruling B42 item 3), and its ceiling is the collisions' force (Tibet's); the research (§13, §17) found the megathrust's
+   force crests most subduction margins under 2 km (Dielforder & Hampel 2021). The interim was to return after the gate
+   converges; the gate converges now.
+5. **The cost**: the budget after every routing makes the solve about 30 % slower (683 → 896 s at 214 passes, 925 →
+   1 287 s at 414, four processes side by side).
+6. **The whole land's drainage** (runs 29–30): today's game world drains 56.5 % of its land to the sea (its old plains
+   47.5 %); with the level plateau and the water's own paths, 66.5 % (the old plains 69.2 %). Earth's closed basins cover
+   roughly a fifth of its land [R].

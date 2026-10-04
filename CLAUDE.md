@@ -243,6 +243,12 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     gate passes; the plateaus carry ~64 % of the rest — each copies its old platform's tilt and drains to the sea): THE
     WEDGE GOES INTO PHASE 2'S BELTS' LAW; NEXT A LEVEL PLATEAU (one level along its margin, the lower crust's flow, Clark &
     Royden 2000) and whether dry plateaus' lakes close under the solve's own water budget; one commit, no push.
+    ★ B51 (2026-10-04, runs 26–30: the level plateau 6.20 → 5.45 % mountains, the gate passes; the joint law reads the RAIN,
+    `Q = A·R`; the water's own paths change the mountains little, raise the old plains (median 356 m, Earth 349 m) and widen
+    the closed basins under the sea (7–8 % of the land); 87 % of the plateau land is ANDEAN): THE LEVEL PLATEAU AND THE
+    WATER'S OWN PATHS (the law's own rain on the area that truly drains to a node; the budget's lakes in the passes; a
+    closed basin keeps its rock, filling from its floor) GO INTO PHASE 2; NEXT THE ANDEAN MARGINS' LAW (research, then
+    bench); one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

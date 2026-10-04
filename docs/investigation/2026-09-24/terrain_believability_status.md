@@ -1558,3 +1558,16 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-10-04 — RULING B50: the critical wedge goes into phase 2's belts' law; next a level plateau (one level along its
   margin, the lower crust's flow) and whether dry plateaus' lakes close under the solve's own water budget. Run 25
   committed.
+- 2026-10-04 — A LEVEL PLATEAU AND THE WATER'S OWN PATHS BENCHED (ruling B50 item 2; runs 26–28; the belts' design §17):
+  the level plateau takes the mountains 6.20 → 5.45 % (5.24 % at 414 passes; the gate passes; the plateau's mountains
+  41 → 33 %). The joint law reads the RAIN (Adams et al. 2020: `Q = A·R`), so the budget's runoff is not its water (the
+  old plains would stand at 1.1–1.2 km). The law's own rain on the water's own paths (closed lakes end their rivers, the
+  lakes the budget's, a closed basin keeps its rock and fills from its floor) changes the mountains little (5.80 %, 5.56 %
+  at 414; the plateaus drain inward 13 → 24 %): inward drainage does NOT follow from the lake law on the wedge's smooth
+  plateaus (Earth's are contractional basins). It raises the old plains (median 288 → 356 m, Earth 349 m; mean 465 →
+  593 m, Earth 485 m) and widens the closed basins reaching under the sea (2.7 → 7–8 % of the land). FOUND: 87 % of the
+  plateau land stands on Andean margins (8.8 % of the land, about half the mountains left; Earth's central Andes' plateau
+  ≈ 0.44 %) — the registered Andean interim, whose return waited for the gate's convergence.
+- 2026-10-04 — RULING B51: the level plateau and the water's own paths (the law's own rain on the area that truly drains to
+  a node, the budget's lakes in the passes, a closed basin keeps its rock) go into phase 2; next the Andean margins' law
+  (research, then bench). Runs 26–30 committed.

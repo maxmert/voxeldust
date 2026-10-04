@@ -35,6 +35,9 @@
 //!   ruling B45 item 2's landscape's time — each plate's ground erodes only since its raise under the reworking law.
 //!   `+lake`: ruling B46 item 2's lakes' cure — a lake's level follows its outlet inside the sweep. `+wedge`: ruling
 //!   B49's critical wedge — each margin's cross-section a taper wedge sized by its rock, a plateau past the ceiling.
+//!   `+level`: ruling B50's level plateau (one level a pair); `+wrain`: the erosion reads the joint law's own rain on the
+//!   WATER'S OWN PATHS (the solve's own lakes' budget and water tree after every routing; a closed lake ends its rivers);
+//!   `+water`: the same paths with the budget's runoff less the spilling lakes' evaporation (a reading: not the law's `Q`).
 //! - `--ledger=DIR`: each case also writes its PASS LEDGER to `DIR/<case>.csv` — each process's change of volume on the
 //!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause).
 //!
@@ -284,6 +287,8 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
     let (mut land_a, mut mount_a) = ([0u128; 7], [0u128; 7]);
     let (mut all_land, mut all_mount) = (0u128, 0u128);
     let mut belt_over: [Vec<(i32, u64)>; 4] = Default::default();
+    // The widened plateau split by the margin that built it (a collision's, an Andean margin's, the room's).
+    let (mut plat_land, mut plat_mount, mut plat_h) = ([0u128; 3], [0u128; 3], [0.0f64; 3]);
     for v in 0..n {
         let Some(r) = readings[v] else { continue };
         let a = u128::from(area[v]);
@@ -293,6 +298,14 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
         if merged(r.class(false)) == MOUNTAINS {
             mount_a[c] += a;
             all_mount += a;
+        }
+        if c == 5 {
+            let k = belt_kind(v);
+            plat_land[k] += a;
+            plat_h[k] += f64::from(over[v]) * a as f64;
+            if merged(r.class(false)) == MOUNTAINS {
+                plat_mount[k] += a;
+            }
         }
         if state.province[v] == belt_code {
             belt_over[0].push((over[v], area[v]));
@@ -312,6 +325,17 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
             pct(mount_a[c], all_mount)
         );
     }
+    println!(
+        "    the widened plateau by its margin — collision: land {:.2} %, mountains {:.2} % of it, mean {:.0} m | Andean: \
+         land {:.2} %, mountains {:.2} % of it, mean {:.0} m | the room's: land {:.2} %",
+        pct(plat_land[0], all_land),
+        pct(plat_mount[0], plat_land[0]),
+        plat_h[0] / plat_land[0].max(1) as f64,
+        pct(plat_land[1], all_land),
+        pct(plat_mount[1], plat_land[1]),
+        plat_h[1] / plat_land[1].max(1) as f64,
+        pct(plat_land[2], all_land)
+    );
     // B45 item 2: the land's height by cause; the OLD PLAINS are the land no wall, crater, belt or widened plateau
     // claims (Earth's: a mean of 485 m, a median of 349 m, 13 % over 1 000 m — the belts' design §15, ETOPO 2022 on CRUST
     // 2.0's old types).
@@ -465,10 +489,12 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
         for (label, set) in [
             ("the belts (collision and Andean)", [2usize, 3]),
             ("the plateaus", [5usize, 5]),
+            ("the old plains", [6usize, 6]),
+            ("all the land", [usize::MAX, usize::MAX]),
         ] {
             let (mut a_all, mut a_lake, mut a_sea, mut rain) = (0u128, 0u128, 0u128, 0.0f64);
             for v in 0..n {
-                if readings[v].is_none() || !set.contains(&cause(v)) {
+                if readings[v].is_none() || (set[0] != usize::MAX && !set.contains(&cause(v))) {
                     continue;
                 }
                 let a = u128::from(area[v]);
@@ -702,6 +728,8 @@ fn main() {
         let mut landscape_time = false;
         let mut lake_cure = false;
         let mut wedge = false;
+        let mut level_plateau = false;
+        let mut water = vd_bins::solve_copy::ErosionWater::Routing;
         for cure in cures {
             match cure {
                 "ice" => ice_stepped = true,
@@ -715,9 +743,12 @@ fn main() {
                 "lt" => landscape_time = true,
                 "lake" => lake_cure = true,
                 "wedge" => wedge = true,
-                other => {
-                    panic!("a cure is ice, icereb, reb, rebx, base, lt, lake or wedge, not {other}")
-                }
+                "level" => level_plateau = true,
+                "wrain" => water = vd_bins::solve_copy::ErosionWater::RainOnWaterTree,
+                "water" => water = vd_bins::solve_copy::ErosionWater::BudgetRunoff,
+                other => panic!(
+                    "a cure is ice, icereb, reb, rebx, base, lt, lake, wedge, level, wrain or water, not {other}"
+                ),
             }
         }
         let standard = Schedule::standard(words.age_yr);
@@ -868,6 +899,8 @@ fn main() {
             landscape_time,
             lake_cure,
             wedge,
+            level_plateau,
+            water,
             ..laws
         };
         let case = &if sub_sweeps > 1 {

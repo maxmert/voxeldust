@@ -1357,3 +1357,35 @@ about 90 % of its land drains to the sea. The owner ruled:
 
 **Example.** The plateau behind a home-planet collision stands at one height from end to end, as Tibet does; where the air
 over it is dry, its streams end in closed lakes instead of cutting to the sea, and a pilot flies over a flat high plain.
+
+## B51. THE LEVEL PLATEAU AND THE WATER'S OWN PATHS GO INTO PHASE 2; THE ANDEAN MARGINS' LAW NEXT (2026-10-04)
+
+A level plateau and the water's own paths, BENCHED (runs 26–30; the belts' design §17): one level a convergent pair takes
+the mountains 6.20 → 5.45 % (5.24 % at 414 passes) and the gate passes; the joint law reads the RAIN (Adams et al. 2020:
+`Q = A·R`, "the product of drainage area and mean upstream rainfall"), so the budget's runoff is not its water (the old
+plains would stand at 1.1–1.2 km); the law's own rain on the water's own paths — a closed lake ends its rivers, the lakes
+are the budget's standing water, a closed basin keeps its rock and fills from its floor — changes the mountains little
+(5.80 %; 5.56 % at 414), raises the old plains (median 356 m against Earth's 349 m, mean 593 m against 485 m) and the land
+over 1 000 m (25 → 32 %), widens the closed basins that reach under the sea (2.7 → 7–8 % of the land) and slows the solve
+by about 30 %; inward drainage does not follow from the lake law on the wedge's smooth plateaus (Earth's closed plateau
+basins are contractional: ranges rise across the rivers' paths in a dry climate, Sobel et al. 2003). FOUND: 87 % of the
+plateau land stands on Andean margins (8.8 % of the land, about half the mountains left; the central Andes' plateau is about
+0.44 % of Earth's land) — the registered Andean interim, whose return waited for the gate's convergence. The owner ruled:
+
+1. **THE LEVEL PLATEAU GOES INTO PHASE 2'S BELTS' LAW** (*"Yes, in phase 2"*), with the wedge: each convergent pair's
+   plateau stands at one level, the area-weighted mean of its wedge nodes' platform plus force height (Clark & Royden 2000).
+2. **PHASE 2'S EROSION FOLLOWS THE WATER'S OWN PATHS** (*"Yes, in phase 2"*): after every routing the solve's lakes' budget
+   and water tree give the receivers; the discharge is the joint law's own rain on the area that truly drains to each
+   node (a closed lake ends its rivers); the lakes in the passes are the budget's standing water (the sweep skips only
+   water and cuts a closed hollow's dry rim; the deposit fills a lake only up to its water); and the rock that reaches a
+   closed hollow stays in it, filling it from its floor to one level, never over its spill. Ruling B8 (the rivers follow
+   the water) now holds in the passes as at the solve's end.
+3. **NEXT: THE ANDEAN MARGINS' LAW** (*"The Andean margins' law"*): research, then bench, a law for the Andean margins'
+   rock and ceiling in place of the registered interim (Norabuena et al. 1998's share at every ocean-under-continent
+   margin for its whole window, the collisions' force as its ceiling).
+4. One commit now, on `game`, no push.
+
+**Example.** A home-planet river that runs off a dry range into a closed salt lake no longer cuts the gorge below the
+lake's rim as if its water went on; the rock it carries stays in the lake's basin and fills it. A pilot who flies inland
+from a coast where an ocean plate dives under the continent will cross the plateau the margin's own law builds — on most
+of Earth's such coasts, one range and no plateau.

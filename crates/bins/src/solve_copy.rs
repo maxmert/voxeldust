@@ -156,6 +156,33 @@ pub struct Laws {
     /// Each pass a wedge node rises by the wedge surface's own rise there; erosion works on it as before. The incoming plate
     /// is the one whose drift carries it faster toward the other plate (a stated rule: the world draws no slab).
     pub wedge: bool,
+    /// ★ RULING B50 ITEM 2, A LEVEL PLATEAU (with [`Laws::wedge`]): `true` stands each pair's plateau at ONE level — the
+    /// area-weighted mean over the pair's wedge nodes of (the node's platform + its force height), because the lower crust
+    /// flows until a plateau is level (Clark & Royden 2000) — so each node's ceiling is that level less its own platform
+    /// (zero where the platform stands higher); `false` lets each node's ceiling follow its own platform.
+    pub level_plateau: bool,
+    /// ★ RULING B50 ITEM 2, WHICH WATER THE EROSION READS (ruling B8: the rivers follow the water) — see [`ErosionWater`].
+    pub water: ErosionWater,
+}
+
+/// ★ RULING B50 ITEM 2, WHICH WATER THE EROSION READS. The joint law's calibration states its discharge: `Q = A·R`, `A`
+/// the drainage area and `R` the rain averaged over it (Adams et al. 2020, eq. 1b: "the product of drainage area and mean
+/// upstream rainfall"), so its `K_lp` holds the calibration basins' own share of the rain that runs off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ErosionWater {
+    /// The solve's own: each node's rain times its area, summed down the ROUTING's tree — the routing fills every hollow
+    /// to its spill, so every river crosses every hollow to the sea.
+    #[default]
+    Routing,
+    /// THE LAW'S OWN RAIN ON THE WATER'S OWN PATHS: after every routing the solve's own lakes' budget and water tree
+    /// (`vd_terrain::lakes::budget`, `water_tree`) give the receivers, and each node's rain times its area is summed down
+    /// them with no sink — so a CLOSED lake (its inflow under its evaporation) ends its rivers and its basin's rain reaches
+    /// no river below its rim, while a spilling lake passes its whole basin on (`A` is the area that drains to the node).
+    RainOnWaterTree,
+    /// THE BUDGET'S RUNOFF ON THE WATER'S OWN PATHS (`MacroSolve::follow_the_water`, as the solve's end runs it): the
+    /// climate's runoff on each node's area, less what each spilling lake hands the air. A DIFFERENT `Q` than the joint
+    /// law's calibration reads (runoff, not rain); a reading of the runoff's share, never a law with `K_lp` as stated.
+    BudgetRunoff,
 }
 
 /// ★ THE CRITICAL TAPER's calibration body, TAIWAN (Davis, Suppe & Dahlen 1983, JGR 88): the wedge's internal friction
@@ -203,6 +230,207 @@ pub const SIDE_PRO: u8 = 0;
 pub const SIDE_RETRO: u8 = 1;
 /// A wedge node on the continent of an Andean margin (the back flank from the coast, the plateau, the front ramp inland).
 pub const SIDE_ANDEAN: u8 = 2;
+
+/// ★ THE WATER'S OWN PATHS FOR THE EROSION (see [`ErosionWater`]): the solve's own lakes' budget and water tree over the
+/// routing that stands, followed — the receivers, their chords and their order become the water's; the discharge is the
+/// rain on each node's area with no sink ([`ErosionWater::RainOnWaterTree`]) or the budget's runoff less the spilling
+/// lakes' evaporation ([`ErosionWater::BudgetRunoff`]). THE LAKES BECOME THE BUDGET'S (the same water the paths follow):
+/// each land node's flood level is the budget's standing water, or its own ground where none stands, so the sweep skips
+/// only water and cuts a closed hollow's dry rim down to its lake, and the deposit fills a lake only up to its water.
+/// Returns the closed hollows for the basin fill ([`deposit_basins`]); `None` on a body with no water (no budget runs:
+/// the routing's lakes stand — the home planet's bench never takes that path).
+fn follow_the_budget(
+    state: &mut MacroSolve,
+    climate: Option<&vd_terrain::climate::Climate>,
+    has_water: bool,
+    water: ErosionWater,
+) -> Option<Basins> {
+    let c = climate?;
+    if water == ErosionWater::Routing {
+        return None;
+    }
+    if !has_water {
+        let mut tree = vd_terrain::lakes::dry_tree(state);
+        if water == ErosionWater::RainOnWaterTree {
+            tree.sinks.clear();
+            let rain = state.rain.clone();
+            let _ = state.follow_the_water(tree, &rain);
+        } else {
+            let _ = state.follow_the_water(tree, &c.runoff_mm_yr);
+        }
+        return None;
+    }
+    let lakes = vd_terrain::lakes::budget(state, c);
+    let mut tree = vd_terrain::lakes::water_tree(state, &lakes);
+    if water == ErosionWater::RainOnWaterTree {
+        tree.sinks.clear();
+        let rain = state.rain.clone();
+        let _ = state.follow_the_water(tree, &rain);
+    } else {
+        let _ = state.follow_the_water(tree, &c.runoff_mm_yr);
+    }
+    Some(lakes_from_budget(state, &lakes))
+}
+
+/// ★ THE BUDGET'S CLOSED HOLLOWS (see [`follow_the_budget`]): for each closed body (a hollow whose inflow stays under what
+/// its water hands the air, `Depression::full == false`), its nodes — every node whose own depression it covers, the
+/// lake and its dry rim, as the budget's own level solve gathers them — and its spill level, sixteenths.
+#[derive(Clone, Debug, Default)]
+struct Basins {
+    /// Each node's closed body's slot, or `u32::MAX`.
+    slot: Vec<u32>,
+    /// Each closed body's nodes and spill level.
+    bodies: Vec<(Vec<u32>, i32)>,
+}
+
+/// The budget's standing water as the solve's lakes (see [`follow_the_budget`]); returns the closed hollows.
+fn lakes_from_budget(state: &mut MacroSolve, lakes: &vd_terrain::lakes::Lakes) -> Basins {
+    use vd_terrain::lakes::{NO_DEP, OCEAN};
+    let n = state.node_count();
+    for i in 0..n {
+        if state.ocean[i] {
+            continue;
+        }
+        let w = lakes.water[i];
+        if w != vd_terrain::solve::DRY && w > state.z[i] {
+            state.z_flood[i] = w;
+            state.pit[i] = (w - state.z[i]) as u32;
+        } else {
+            state.z_flood[i] = state.z[i];
+            state.pit[i] = 0;
+        }
+    }
+    let mut slot_of_dep = vec![u32::MAX; lakes.deps.len()];
+    let mut bodies: Vec<(Vec<u32>, i32)> = Vec::new();
+    for (d, dep) in lakes.deps.iter().enumerate().skip(1) {
+        if lakes.body_of[d] == d as u32 && !dep.full {
+            slot_of_dep[d] = bodies.len() as u32;
+            bodies.push((Vec::new(), dep.spill_z));
+        }
+    }
+    let mut slot = vec![u32::MAX; n];
+    for (i, (&h, here)) in lakes.home.iter().zip(slot.iter_mut()).enumerate() {
+        if h == NO_DEP || h == OCEAN {
+            continue;
+        }
+        let b = lakes.body_of[h as usize];
+        if b == NO_DEP {
+            continue;
+        }
+        let s = slot_of_dep[b as usize];
+        if s != u32::MAX {
+            *here = s;
+            bodies[s as usize].0.push(i as u32);
+        }
+    }
+    Basins { slot, bodies }
+}
+
+/// How a sweep treats the lakes: the lakes' cure ([`Laws::lake_cure`]) and the budget's closed hollows since the last
+/// routing ([`ErosionWater`]; `None` keeps the routing's lakes and the solve's own deposit).
+#[derive(Clone, Copy)]
+struct LakeRules<'a> {
+    cure: bool,
+    basins: Option<&'a Basins>,
+}
+
+/// ★ THE LEVEL FILL of one closed hollow: `heights` its nodes' `(height, area)` sorted by height (sixteenths, m²), `volume`
+/// the rock it holds (sixteenths × m²); returns the one level, sixteenths, that the volume pays for over the lowest nodes,
+/// never over `spill` (a remainder under one sixteenth of the raised area stays unlaid). Every node under the level is then
+/// raised to it.
+///
+/// **Example.** A dry hollow in the plateau's lee holds three nodes at 0, 10 and 20 sixteenths, each 1 m², and its rim's
+/// rivers bring 15 sixteenths·m²: the lowest node rises to 10 (10 paid), then the two lowest share the last 5 and stand at 12.
+fn level_fill(heights: &[(i32, u64)], volume: u128, spill: i32) -> i32 {
+    let spill = i64::from(spill);
+    let Some(&(lowest, _)) = heights.first() else {
+        return spill as i32;
+    };
+    let (mut paid, mut area_below, mut level) = (0u128, 0u128, i64::from(lowest));
+    let mut k = 0usize;
+    loop {
+        let z_here = heights
+            .get(k)
+            .map_or(spill, |&(z, _)| i64::from(z).min(spill));
+        let cost = area_below * (z_here - level).max(0) as u128;
+        if paid + cost > volume {
+            level += ((volume - paid) / area_below.max(1)) as i64;
+            break;
+        }
+        paid += cost;
+        level = level.max(z_here);
+        if k >= heights.len() || z_here >= spill {
+            break;
+        }
+        area_below += u128::from(heights[k].1);
+        k += 1;
+    }
+    level.min(spill) as i32
+}
+
+/// ★ THE DEPOSIT WITH THE BUDGET'S CLOSED HOLLOWS (see [`follow_the_budget`]): the solve's own deposit, line for line,
+/// down the water's own paths — at a lake node the volume fills the node up to its water and the rest goes on — except
+/// that the rock reaching a CLOSED hollow's end (a node under its lake, or its dry pit, where the water's path stops)
+/// stays in that hollow: the hollow is then filled as ONE body, its lowest nodes raised to a common level the volume
+/// pays for, never over its spill (the level fill of the washboard bench, `router_variants::basin_fill_shaped`), so a
+/// closed basin keeps its rock and fills from its floor up, as its water does. Rock past a full hollow's spill and rock
+/// at the sea leave, as in the solve.
+fn deposit_basins(state: &mut MacroSolve, basins: &Basins) {
+    use vd_terrain::macro_lattice::NO_NODE;
+    let n = state.node_count();
+    let mut flux = vec![0u128; n];
+    let mut held = vec![0u128; basins.bodies.len()];
+    for k in 0..state.order.len() {
+        let i = state.order[k] as usize;
+        let area = u128::from(state.area[i].max(1));
+        flux[i] += u128::from(state.cut_now[i]) * area;
+        if state.pit[i] > 0 && flux[i] > 0 {
+            let room = u128::from(state.pit[i]) * area;
+            let laid = flux[i].min(room);
+            let dz = (laid / area) as i32;
+            if dz > 0 {
+                state.z[i] += dz;
+                state.pit[i] -= dz as u32;
+                state.pending[i] = state.pending[i].saturating_sub(dz);
+                flux[i] -= u128::from(dz as u32) * area;
+            }
+        }
+        let r = state.receiver[i];
+        if r != NO_NODE {
+            flux[r as usize] += flux[i];
+        } else if basins.slot[i] != u32::MAX {
+            held[basins.slot[i] as usize] += flux[i];
+        }
+    }
+    for (b, (members, spill)) in basins.bodies.iter().enumerate() {
+        let volume = held[b];
+        if volume == 0 || members.is_empty() {
+            continue;
+        }
+        let mut nodes = members.clone();
+        nodes.sort_unstable_by_key(|&v| (state.z[v as usize], v));
+        let heights: Vec<(i32, u64)> = nodes
+            .iter()
+            .map(|&v| (state.z[v as usize], state.area[v as usize].max(1)))
+            .collect();
+        let level = level_fill(&heights, volume, *spill);
+        for &v in &nodes {
+            let i = v as usize;
+            if state.z[i] >= level {
+                break;
+            }
+            let dz = level - state.z[i];
+            state.z[i] += dz;
+            state.pit[i] = state.pit[i].saturating_sub(dz as u32);
+            state.pending[i] = state.pending[i].saturating_sub(dz);
+        }
+    }
+}
+
+/// A convergent pair's key: its two plates, the smaller first.
+fn lo_hi_key(a: u8, b: u8) -> u16 {
+    (u16::from(a.min(b)) << 8) | u16::from(a.max(b))
+}
 
 /// The rock a wedge node's margin has taken in by `t_yr` (years from the solve's start), m² a metre of margin.
 #[must_use]
@@ -351,7 +579,7 @@ fn sweep_cured(
     pass: u32,
     passes: u32,
     active: Option<&[u32]>,
-    lake_cure: bool,
+    lakes: LakeRules,
 ) {
     use vd_terrain::macro_lattice::NO_NODE;
     use vd_terrain::solve::GAIN_BITS;
@@ -368,7 +596,7 @@ fn sweep_cured(
             continue;
         }
         // LAW (B46 item 2): a lake's level follows its outlet; a lake that stands still is skipped.
-        if state.pit[i] > 0 && (!lake_cure || lake_level_follows(state, i, r)) {
+        if state.pit[i] > 0 && (!lakes.cure || lake_level_follows(state, i, r)) {
             continue;
         }
         // LAW (B45 item 2): a node erodes only for its share of the pass after its ground was raised.
@@ -391,7 +619,12 @@ fn sweep_cured(
             state.cut_now[i] = cut as u32;
         }
     }
-    let _ = state.deposit();
+    match lakes.basins {
+        Some(b) => deposit_basins(state, b),
+        None => {
+            let _ = state.deposit();
+        }
+    }
 }
 
 /// ★ P2's calibration (Replumaz et al. 2010): the thickness of India's crust stored in the collision (in the thickened
@@ -802,12 +1035,12 @@ pub fn belts_by_influx(
     report.slowing_share = [0.1, 0.5, 0.9].map(|q| quantile(&slow_shares, q));
     // LAW (B49): the critical wedge at every continental node whose nearest boundary closes, sized by its margin's rock.
     let mut wedge: Vec<WedgeNode> = Vec::new();
+    let mut wedge_pair: Vec<u16> = Vec::new();
     if laws.wedge {
         total.iter_mut().for_each(|t| *t = 0);
         kind.iter_mut().for_each(|k| *k = BELT_NONE);
         let f = |v: [Gf; 3]| [v[0].to_f64(), v[1].to_f64(), v[2].to_f64()];
-        for k in 0..n {
-            let b = bounds[k];
+        for (k, &b) in bounds.iter().enumerate() {
             let Some(o) = b.other else { continue };
             if b.kind != Kind::Convergent || land.crust[k] < 128 || t_m <= 0.0 {
                 continue;
@@ -851,7 +1084,7 @@ pub fn belts_by_influx(
             ));
             let window = share * t_m;
             let crust = continental_m * own.crust_scatter.to_f64();
-            let w = WedgeNode {
+            wedge.push(WedgeNode {
                 node: k as u32,
                 side,
                 dist_m: radius * b.sine.to_f64(),
@@ -859,20 +1092,45 @@ pub fn belts_by_influx(
                 start_yr: age_yr.saturating_sub(window as u64),
                 ceil_m: force_height_m(force_n_m, crust, g),
                 tau_yr: if collision { tau_yr } else { None },
-            };
+            });
+            wedge_pair.push(lo_hi_key(b.plate, o));
+        }
+        // LAW (B50 item 2): one level a pair — the lower crust flows until the plateau is level.
+        if laws.level_plateau {
+            let steps_m = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+            let mut sums: std::collections::BTreeMap<u16, (f64, f64)> =
+                std::collections::BTreeMap::new();
+            for (w, &key) in wedge.iter().zip(&wedge_pair) {
+                let a = lattice.area_m2(w.node) as f64;
+                let platform = f64::from(land.z[w.node as usize]) / steps_m;
+                let e = sums.entry(key).or_insert((0.0, 0.0));
+                e.0 += (platform + w.ceil_m) * a;
+                e.1 += a;
+            }
+            for (w, key) in wedge.iter_mut().zip(&wedge_pair) {
+                let (sum, area) = sums[key];
+                let level = sum / area.max(1.0);
+                let platform = f64::from(land.z[w.node as usize]) / steps_m;
+                w.ceil_m = (level - platform).max(0.0);
+            }
+        }
+        let mut kept = Vec::with_capacity(wedge.len());
+        for w in wedge.drain(..) {
             let (h, _) = wedge_height_m(&w, wedge_area_m2(&w, age_yr));
             if h <= 0.0 {
                 continue;
             }
+            let k = w.node as usize;
             total[k] = (h * f64::from(vd_terrain::solve::Z_STEPS_PER_M)) as i64;
             start_yr[k] = w.start_yr;
-            kind[k] = if collision {
-                BELT_COLLISION
-            } else {
+            kind[k] = if w.side == SIDE_ANDEAN {
                 BELT_ANDEAN
+            } else {
+                BELT_COLLISION
             };
-            wedge.push(w);
+            kept.push(w);
         }
+        wedge = kept;
     }
     Belts {
         total,
@@ -978,7 +1236,7 @@ fn joint_sweep(
     passes: u32,
     cured: bool,
     active: Option<&[u32]>,
-    lake_cure: bool,
+    lakes: LakeRules,
 ) {
     let steps_m = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
     let basement = f64::from(vd_terrain::strata::Province::CrystallineBasement.erodibility_q8());
@@ -994,7 +1252,7 @@ fn joint_sweep(
             continue;
         }
         // LAW (B46 item 2): a lake's level follows its outlet; a lake that stands still is skipped.
-        if state.pit[i] > 0 && (!lake_cure || lake_level_follows(state, i, r)) {
+        if state.pit[i] > 0 && (!lakes.cure || lake_level_follows(state, i, r)) {
             continue;
         }
         // LAW (B45 item 2): a node erodes only for its share of the pass after its ground was raised.
@@ -1039,7 +1297,12 @@ fn joint_sweep(
             state.cut_now[i] = cut as u32;
         }
     }
-    let _ = state.deposit();
+    match lakes.basins {
+        Some(b) => deposit_basins(state, b),
+        None => {
+            let _ = state.deposit();
+        }
+    }
 }
 
 /// A picture of a stage: the stage's name and the field in sixteenths (the washboard bench's trace).
@@ -1533,6 +1796,8 @@ pub fn solve_copy(
     let mut since_rebound = 0;
     // The exact rebound's carried fractions of a sixteenth (a resolution; `Laws::rebound_exact`).
     let mut rebound_carry: Vec<f64> = Vec::new();
+    // LAW (B50 item 2): the budget's closed hollows since the last routing (`Laws::water`), for the deposit.
+    let mut basins: Option<Basins> = None;
     // The ledger: a pass's rebounds run between its sweeps (kept apart from the sweeps' net change).
     let mut inloop_rebound = [0.0f64; 2];
     let mut climate = None;
@@ -1674,6 +1939,13 @@ pub fn solve_copy(
                 }
             }
             since_route = 0;
+            // LAW (B50 item 2): the erosion reads the budget's water along the water's own tree.
+            basins = follow_the_budget(
+                &mut state,
+                climate.as_ref(),
+                words.water_km3 > 0,
+                laws.water,
+            );
             if ledger_on {
                 classes = source_classes(&state, &prev_receiver);
                 count_sources(&classes, &state.z, state.sea_z, &mut entry.nodes_by_source);
@@ -1953,6 +2225,12 @@ pub fn solve_copy(
                         }
                         routes.push(state.route());
                         state.accumulate();
+                        basins = follow_the_budget(
+                            &mut state,
+                            climate.as_ref(),
+                            words.water_km3 > 0,
+                            laws.water,
+                        );
                         if ledger_on {
                             classes = source_classes(&state, &prev_receiver);
                             count_sources(
@@ -1972,7 +2250,10 @@ pub fn solve_copy(
                             schedule.passes,
                             laws.base_cure,
                             active.as_deref(),
-                            laws.lake_cure,
+                            LakeRules {
+                                cure: laws.lake_cure,
+                                basins: basins.as_ref(),
+                            },
                         );
                     } else if laws.base_cure {
                         sweep_cured(
@@ -1981,7 +2262,10 @@ pub fn solve_copy(
                             pass,
                             schedule.passes,
                             active.as_deref(),
-                            laws.lake_cure,
+                            LakeRules {
+                                cure: laws.lake_cure,
+                                basins: basins.as_ref(),
+                            },
                         );
                     } else {
                         let _ = state.sweep(gain / u64::from(k), pass, schedule.passes);
@@ -2213,6 +2497,24 @@ mod tests {
         assert_eq!((mixed.len() - 1, fine.len() - 1), (214, 414));
         assert_eq!(mixed[mixed.len() - 1] - mixed[mixed.len() - 2], 500_000);
         assert_eq!(fine[fine.len() - 1] - fine[fine.len() - 2], 250_000);
+    }
+
+    /// A closed hollow's rock raises its lowest nodes first, to one level, never over its spill.
+    #[test]
+    fn a_closed_hollow_fills_from_its_floor_to_one_level() {
+        let hollow = [(0, 1), (10, 1), (20, 1)];
+        // The lowest node to 10 (10 paid), then the two lowest share the last 5: 12, and 1 under a sixteenth unlaid.
+        assert_eq!(level_fill(&hollow, 15, 100), 12);
+        // Exactly enough to bring the lowest to the next: the level is that node's height.
+        assert_eq!(level_fill(&hollow, 10, 100), 10);
+        // Never over the spill, however much rock arrives.
+        assert_eq!(level_fill(&hollow, 1_000_000, 15), 15);
+        // More rock than the whole hollow to its top node: the level rises over all three.
+        assert_eq!(level_fill(&hollow, 60, 100), 30);
+        // Areas weigh the share: a 3 m² floor takes three times the rock a metre.
+        assert_eq!(level_fill(&[(0, 3), (10, 1)], 15, 100), 5);
+        // No node: the spill.
+        assert_eq!(level_fill(&[], 5, 7), 7);
     }
 
     /// The front flank's constant is the critical taper's value at Taiwan's numbers.
