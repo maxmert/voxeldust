@@ -509,10 +509,8 @@ pub fn datum_z(lattice: &MacroLattice, z: &[i32], sea_z: Option<i32>) -> i32 {
         weighted += i128::from(h) * (a as i128);
         area += a;
     }
-    if area == 0 {
-        return 0;
-    }
-    (weighted / (area as i128)) as i32
+    // A field with no nodes weighs nothing and reads the ladder radius: zero over one.
+    (weighted / (area.max(1) as i128)) as i32
 }
 
 /// ★ THE SEA AS THE CLIMATE READS IT (2026-09-24, ruling B7 item 1): the sea's level and the mask
@@ -543,10 +541,8 @@ pub fn wet_share(lattice: &MacroLattice, sea: Option<SeaView<'_>>) -> Gf {
         all += a;
         wet += a * u128::from(ocean);
     }
-    if all == 0 {
-        return Gf::ZERO;
-    }
-    Gf::from_i64(wet as i64) / Gf::from_i64(all as i64)
+    // A mask with no nodes holds no sea: zero over one.
+    Gf::from_i64(wet as i64) / Gf::from_i64(all.max(1) as i64)
 }
 
 /// ★ THE FROST LINE at a latitude, in sixteenths from the ladder radius: the height at which the
@@ -752,6 +748,21 @@ pub fn climate(
     z: &[i32],
     sea: Option<SeaView<'_>>,
 ) -> Climate {
+    climate_on(body, lattice, words, z, sea, crate::par::Cores::default())
+}
+
+/// [`climate`] ON THE SOLVE'S CORES (ruling B64): each node's climate reads only the field and its own upwind
+/// neighbour, so the nodes are cut into ranges, each computed by its own thread, and the rows are filled in order — the
+/// climate one thread computes.
+#[must_use]
+pub fn climate_on(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    words: &SolveWords,
+    z: &[i32],
+    sea: Option<SeaView<'_>>,
+    cores: crate::par::Cores,
+) -> Climate {
     let datum = datum_z(lattice, z, sea.map(|s| s.level));
     let laws = climate_laws(body, words, wet_share(lattice, sea));
     let n = lattice.node_count();
@@ -769,8 +780,8 @@ pub fn climate(
             .to_i64_floor()
             .clamp(0, i64::from(u32::MAX)) as u32,
     };
-    for node in 0..n as u32 {
-        let i = node as usize;
+    let cells = crate::par::map(n, cores.threads(), |i| {
+        let node = i as u32;
         let d = dir_of(lattice.direction(node));
         let sin_lat = d[POLE_AXIS];
         // ★ THE AIR OVER WATER STANDS AT THE WATER'S OWN SURFACE, never at the floor under it: a
@@ -798,29 +809,47 @@ pub fn climate(
             (0, NO_WIND)
         };
         let frost = frost_line_z(&laws, sin_lat, datum);
-        out.temperature_dk.push(
-            (t_k * Gf::from_f64(10.0) + Gf::HALF)
+        let pet = pet_mm_yr(t_k);
+        NodeClimate {
+            temperature_dk: (t_k * Gf::from_f64(10.0) + Gf::HALF)
                 .to_i64_floor()
                 .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16,
-        );
-        out.rain_mm_yr.push(rain);
-        out.aridity_q8.push(aridity_q8(t_k, rain));
-        let pet = pet_mm_yr(t_k);
-        out.pet_mm_yr.push(
-            (pet + Gf::HALF)
+            rain_mm_yr: rain,
+            aridity_q8: aridity_q8(t_k, rain),
+            pet_mm_yr: (pet + Gf::HALF)
                 .to_i64_floor()
                 .clamp(0, i64::from(u32::MAX)) as u32,
-        );
-        out.runoff_mm_yr.push(
-            (runoff_mm_yr(Gf::from_i64(i64::from(rain)), pet) + Gf::HALF)
+            runoff_mm_yr: (runoff_mm_yr(Gf::from_i64(i64::from(rain)), pet) + Gf::HALF)
                 .to_i64_floor()
                 .clamp(0, i64::from(rain)) as u32,
-        );
-        out.frost_z.push(frost);
-        out.ela_z.push(ela_z(&laws, sin_lat, rain, datum));
-        out.upwind.push(slot);
+            frost_z: frost,
+            ela_z: ela_z(&laws, sin_lat, rain, datum),
+            upwind: slot,
+        }
+    });
+    for c in cells {
+        out.temperature_dk.push(c.temperature_dk);
+        out.rain_mm_yr.push(c.rain_mm_yr);
+        out.aridity_q8.push(c.aridity_q8);
+        out.pet_mm_yr.push(c.pet_mm_yr);
+        out.runoff_mm_yr.push(c.runoff_mm_yr);
+        out.frost_z.push(c.frost_z);
+        out.ela_z.push(c.ela_z);
+        out.upwind.push(c.upwind);
     }
     out
+}
+
+/// One node's climate as a core computes it ([`climate_on`]).
+struct NodeClimate {
+    temperature_dk: i16,
+    rain_mm_yr: u32,
+    aridity_q8: u8,
+    pet_mm_yr: u32,
+    runoff_mm_yr: u32,
+    frost_z: i32,
+    ela_z: i32,
+    upwind: u8,
 }
 
 /// ★ THE HEIGHT THE AIR STANDS AT OVER A NODE: the sea's surface over an OCEAN node, never the
@@ -926,30 +955,29 @@ mod tests {
         );
         let land = (0..lattice.node_count()).filter(|&i| is_land(i)).count();
         let under_ice = (0..lattice.node_count())
-            .filter(|&i| is_land(i) && climate.ela_z[i] != i32::MAX && land_z > climate.ela_z[i])
+            .filter(|&i| is_land(i) & (climate.ela_z[i] != i32::MAX) & (land_z > climate.ela_z[i]))
             .count();
         let share = under_ice as f64 * 100.0 / land as f64;
         let mut lines: Vec<i32> = climate
             .ela_z
             .iter()
             .copied()
-            .filter(|&e| e != i32::MAX && e != i32::MIN)
+            .filter(|&e| (e != i32::MAX) & (e != i32::MIN))
             .collect();
         lines.sort_unstable();
-        println!(
-            "G-ICE on an Earth-like charter: the ice covers {share:.2} % of the land ({under_ice} of {land} nodes); the snowline over {} nodes reads lowest {:.0} m, median {:.0} m, highest {:.0} m",
+        let at = |e: Option<&i32>| f64::from(*e.unwrap_or(&0)) / f64::from(Z_STEPS_PER_M);
+        let (count, lowest, median, highest) = (
             lines.len(),
-            f64::from(*lines.first().unwrap_or(&0)) / f64::from(Z_STEPS_PER_M),
-            f64::from(lines[lines.len() / 2]) / f64::from(Z_STEPS_PER_M),
-            f64::from(*lines.last().unwrap_or(&0)) / f64::from(Z_STEPS_PER_M)
+            at(lines.first()),
+            at(lines.get(lines.len() / 2)),
+            at(lines.last()),
+        );
+        println!(
+            "G-ICE on an Earth-like charter: the ice covers {share:.2} % of the land ({under_ice} of {land} nodes); the snowline over {count} nodes reads lowest {lowest:.0} m, median {median:.0} m, highest {highest:.0} m"
         );
         assert!(
             (4.0..=25.0).contains(&share),
-            "the ice covers {share:.2} % of an Earth-like charter's land; Earth carries about 10 %. The snowline over {} nodes: lowest {:.0} m, median {:.0} m, highest {:.0} m",
-            lines.len(),
-            f64::from(*lines.first().unwrap_or(&0)) / f64::from(Z_STEPS_PER_M),
-            f64::from(lines[lines.len() / 2]) / f64::from(Z_STEPS_PER_M),
-            f64::from(*lines.last().unwrap_or(&0)) / f64::from(Z_STEPS_PER_M)
+            "the ice covers {share:.2} % of an Earth-like charter's land; Earth carries about 10 %. The snowline over {count} nodes: lowest {lowest:.0} m, median {median:.0} m, highest {highest:.0} m"
         );
         // AND THE LINE ITSELF: at the equator Earth's snowline stands four to five kilometres up,
         // and the law must put it there or the share above is a coincidence.
@@ -1091,11 +1119,8 @@ mod tests {
             ),
         };
         // ★ THE COEFFICIENT NORTH & COAKLEY REPORT: `s₁ = 0.796` at Earth's tilt.
-        assert!(
-            (earth.s1.to_f64() - 0.796).abs() < 0.001,
-            "{}",
-            earth.s1.to_f64()
-        );
+        let s1 = earth.s1.to_f64();
+        assert!((s1 - 0.796).abs() < 0.001, "{s1}");
         // The season is nothing at the equator and greatest at the pole, and the ocean's heat
         // store holds it to a few kelvin — never the fifty the bare radiation balance would give.
         assert_eq!(seasonal_amplitude_k(&earth, Gf::ZERO), Gf::ZERO);

@@ -247,7 +247,101 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// (`ARTIFACT_KEY_GENERATION` 21) and no realm solves again. `ARTIFACT_VERSION` stays 9 and
 /// `PROTO_MINOR` does not move: the shard ships no coast mask and no pyramid water words, which the
 /// wire already allows.
-pub const GENERATOR_VERSION: u32 = 22;
+///
+/// ★ VERSION 23 (2026-10-04, phase 1 of the ground step; rulings B9 item 2, B37 item 3, B52 item 2).
+/// THE SOLVE MOVES, so the artifact moves with it (`ARTIFACT_KEY_GENERATION` 23: every stored
+/// artifact of the old solve is refused and solved again):
+///
+/// 1. **A DRY FLAT'S WATER STEPS DOWN BARNES' TWO FIELDS AS ONE POTENTIAL** (`lakes::flats`,
+///    `downhill`, `step_along`; Barnes, Lehman & Mulla 2014): `Φ = 2·T + (A_max − A)`, `T` the
+///    summed chord to the drain and `A` to the higher ground, so the water leaves the walls first
+///    and gathers along the flat's middle instead of running along the lattice's rows to its one
+///    nearest drain. MEASURED (generator 22 against this change alone): the flats' trunks 1.470 →
+///    1.187 against ~1.006. A spilling lake keeps its straight walk to its spill (test T9): the same
+///    potential across a lake MEASURED a walk error of 20.18° against T9's 12°, so it was refused.
+/// 2. **THE REBOUND READS ITS COARSE FIELD SMOOTHLY** (`MacroSolve::rebound`, `smooth_read`,
+///    `smooth_lifts`; the belts' design L10): each block hands its lift over the nodes around its
+///    centre by bilinear weights, exact to the sixteenth, so no block lifts its 131 km square whole.
+///    MEASURED (`relief_cause`): the step at a block's edge 74.4 m → 43.2 m against 44.2 m inside
+///    (the edge over the inside 1.62 → 0.98; the uneroded control 0.96).
+///
+/// The column rule does not move: a chunk with NO artifact reads none of these, so the SEED-ONLY
+/// golden tables stand and `gpu-drift` compares like with like. `ARTIFACT_VERSION` stays 9 and
+/// `PROTO_MINOR` does not move.
+///
+/// ★ VERSION 24 (2026-10-04, PHASE 2's MACRO CHANGE of the ground step; the laws of rulings B37–B51,
+/// built by rulings B52–B53). THE SOLVE MOVES, so the artifact moves with it
+/// (`ARTIFACT_KEY_GENERATION` 24: every stored artifact of the old solve is refused and solved
+/// again):
+///
+/// 1. **THE MIXED AXIS** (rulings B39, B47; `solve::mixed_times`): 214 passes from the system's start
+///    to the present, the last half a million years, each pass before it a quarter longer until 25
+///    million years; a routing every pass and two sweeps of the joint law on it, a rebound after each.
+/// 2. **THE JOINT LAW** (ruling B43 item 2; Adams et al. 2020: `E = K_lp·Q·S^2.2`, solved implicitly by
+///    Newton under the fence's own power) with THE CURED BASE (B43 item 1: a receiver is a lake only
+///    where the routing found one) and THE LAKES' CURE (B46–B47: a lake's level follows its outlet
+///    inside the sweep).
+/// 3. **THE STEPPED ICE** with no cap (ruling B44), its cut booked for the rebound, and **THE EXACT
+///    REBOUND** (ruling B45 item 1: no floors, each node's fraction carried).
+/// 4. **THE LANDSCAPE'S TIME** (rulings B45–B46: each plate's ground erodes only since its last raise
+///    under the reworking law) and **THE CRATERS AT THEIR OWN AGE** (ruling B37).
+/// 5. **THE BELTS AS CRITICAL WEDGES** (rulings B49–B51, `belts`): each convergent margin's rock in a
+///    taper wedge, the crust's partition at a collision (P2) and its slowing (S2), one level a pair's
+///    plateau — at the plates' corrected mean speed, Earth's 50 mm/yr (ruling B40 item 2), which the
+///    craters' plate clock reads too.
+/// 6. **THE WATER'S OWN PATHS** (ruling B51 item 2): after every routing the erosion reads the budget's
+///    water tree, its rain on the area that truly drains to each node, and a closed hollow keeps its
+///    rock, filling from its floor to one level under its spill.
+/// 7. **THE LIMITS AS LAW** (ruling B23; the belts' design L0): no envelope, no crater clip, no uplift
+///    re-clamp — the peak law per node over the body's datum (the sea, or the ladder's datum on a dry
+///    body, ruling B25 item 1) is the one limit, and it is a law.
+///
+/// The column rule does not move: a chunk with NO artifact reads none of these, so the SEED-ONLY
+/// golden tables stand and `gpu-drift` compares like with like. `ARTIFACT_VERSION` stays 9 and
+/// `PROTO_MINOR` does not move: the artifact's rows keep their form and only their values change.
+///
+/// ★ VERSION 25 (2026-10-05; rulings B54–B56, the convergence gate answered by measurement). THE
+/// SOLVE MOVES, so the artifact moves with it (`ARTIFACT_KEY_GENERATION` 25):
+///
+/// 1. **THE ROCK IS KEPT EXACTLY** (`MacroSolve::deposit_basins`, `pass_on`): a closed hollow full of
+///    rock passes the rest over its saddle by the water's own rule, through any hollow already full
+///    of rock, into the sea or into a hollow with room, and the rest passes each hollow once, so the
+///    cascade ends. MEASURED before: 17 % of all the rock the rivers cut vanished past the closed
+///    hollows' spills, and a run of the bench spun 90 minutes round a full hollow.
+/// 2. **THE MIXED AXIS TWICE AS FINE** (ruling B56): 414 passes, the last a quarter of a million
+///    years, the longest 12.5 million, the climate every twenty passes — the axis the gate passes on
+///    under B54's noise rule (the census's gate section item 14).
+/// 3. **THE BAND FROM THE ARTIFACT'S HEAD** (ruling B55; wire minor 36): a solved body's ladder is
+///    sized from the drawn ground's range the head states, so a solved body's chunks move with it.
+///
+/// The column rule for a chunk with NO artifact does not move, so the SEED-ONLY golden tables stand.
+/// `ARTIFACT_VERSION` stays 9: the artifact's rows keep their form and only their values change.
+///
+/// ★ VERSION 26 (2026-10-07; rulings B58–B62, THE WORLD MOVES ONCE after the bench). THE SOLVE
+/// MOVES, so the artifact moves with it (`ARTIFACT_KEY_GENERATION` 26):
+///
+/// 1. **RHO8 IN THE WATER'S DESCENT** (ruling B58; Fairfield & Leymarie 1991): on sloping ground the
+///    water takes the lower neighbour the ground's own downhill bearing reaches by a seeded split.
+///    MEASURED before: 32.7 % of the river axes within 5° of a lattice line (none 22.2 %).
+/// 2. **THE FIRST LAND'S RELIEF AND MARGINS** (rulings B59–B60, `land`): each node its cell's mean;
+///    the margins by kind; the sourced crust spread; the older landscape's relief by the continents'
+///    spectrum, read by the freeboard law. MEASURED before: 87 % of the first land on an exact flat,
+///    21.9 % of the boundary coastline stepped along the node rows.
+/// 3. **THE BELTS READ THE CRUST SHARE** (ruling B61 item 1, `belts`): a node takes in its share of
+///    the margin's rock, the room's profiles blend by the share, and the Andean wedge rises from the
+///    coast. MEASURED before: a cliff about 3 km tall on the continent's half-share line.
+/// 4. **EIGHT SWEEPS A PASS AND THE CAPTURE INSIDE THE SWEEP** (ruling B62, `solve`): a closed body's
+///    water drains to its saddle as it stands now, so a basin a river opens passes its rock on in the
+///    same sweep. MEASURED before: the gate missed two old plains by 10–12 %.
+/// 5. **FOUR ROUTINGS A PASS** (ruling B65, `solve::ROUTINGS`): the water routed four times a pass, two
+///    sweeps on each. MEASURED before: plate 13 followed the routing count alone (263 / 218–232 /
+///    214–215 m at 414 / 828 / 1 656 routings over the age).
+/// 6. **THE ROCK NAMES WHERE PLATES PUSH TOGETHER** (ruling B63 item 2, `land::province_of`): a sinking
+///    forearc and the diving plate's lifted floor are deep sediment, never rift basalt.
+///
+/// The column rule for a chunk with NO artifact does not move, so the SEED-ONLY golden tables stand.
+/// `ARTIFACT_VERSION` stays 9: the artifact's rows keep their form and only their values change.
+pub const GENERATOR_VERSION: u32 = 26;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -267,13 +361,17 @@ pub fn declared_world_tag(universe_seed: u64) -> u64 {
 /// BUMP IT BY HAND whenever the home planet's artifact pin moves (`crates/bins/tests/
 /// home_artifact_pin.rs` asserts this number beside its digest): a moved digest is a changed solve,
 /// and an artifact stored by the old solve must then be refused and solved again. At 21 the key
-/// equals the declared tag of generator 21, so every artifact stored before the split still opens.
+/// equalled the declared tag of generator 21, so every artifact stored before the split still
+/// opened; at 23 (phase 1 of the ground step), at 24 (phase 2's macro change), at 25 (the rock
+/// kept and the finer axis, ruling B56) and at 26 (the first land's relief and margins, Rho8, the
+/// crust share and the capture, rulings B58–B62) the solve moved and every stored artifact solves
+/// again.
 ///
 /// **Example.** Generator 22 removes the shore law. The home planet's shard boots, finds its
 /// artifact stored under key generation 21, opens it and ships it at once; the client builds the
 /// chunks again under the new column rule, and nobody waits 205 s for a solve that would change
 /// nothing.
-pub const ARTIFACT_KEY_GENERATION: u32 = 21;
+pub const ARTIFACT_KEY_GENERATION: u32 = 26;
 
 /// The key a realm's stored artifact is written and read under: the artifact's own generation
 /// ([`ARTIFACT_KEY_GENERATION`]) folded with the universe seed.
@@ -329,7 +427,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 22,
+            GENERATOR_VERSION, 26,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -339,12 +437,13 @@ mod tests {
         );
     }
 
-    /// The artifact's key is its own generation: at 21 it is the key every stored artifact was
-    /// written under (generator 21's declared tag), and it folds the seed like the declared tag.
+    /// The artifact's key is its own generation: at 26 the solve moved (the first land's relief and
+    /// margins, Rho8, the crust share and the capture, rulings B58–B62), so every artifact stored under
+    /// 25 is refused, and it folds the seed like the declared tag.
     #[test]
     fn the_artifact_key_is_its_own_generation_folded_with_the_seed() {
         assert_eq!(
-            ARTIFACT_KEY_GENERATION, 21,
+            ARTIFACT_KEY_GENERATION, 26,
             "bump by hand when the home planet's artifact pin moves, and say so"
         );
         assert_eq!(artifact_world_tag(2298), ARTIFACT_KEY_PIN);
@@ -375,9 +474,9 @@ mod tests {
         assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 11_118_486_825_642_358_705;
+    const DECLARED_PIN: u64 = 6_435_761_202_656_745_901;
 
-    /// The key the home world's artifacts are stored under: generator 21's declared tag, so the
-    /// artifacts written before the key had its own generation still open.
-    const ARTIFACT_KEY_PIN: u64 = 7_301_160_111_668_162_610;
+    /// The key the home world's artifacts are stored under: generation 26's, which equals generator
+    /// 26's declared tag (the solve moved at 26, so no artifact of an older key opens).
+    const ARTIFACT_KEY_PIN: u64 = 6_435_761_202_656_745_901;
 }

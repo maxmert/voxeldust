@@ -1242,6 +1242,15 @@ mod tests {
     }
 
     use super::*;
+
+    /// The drawn ground's range of a home-moon artifact, as its head states it (ruling B55).
+    fn drawn_of(artifact: &vd_terrain::artifact::Artifact) -> (i32, i32) {
+        artifact.drawn_range_m(
+            &vd_terrain::home::home_moon()
+                .macro_lattice()
+                .expect("a lattice"),
+        )
+    }
     use glam::DVec3;
     use vd_core::entity_kind::EntityKind;
     use vd_core::pose::{FrameRef, StampedPose};
@@ -1577,6 +1586,8 @@ mod tests {
                 levels: artifact.pyramid.len() as u32,
                 sea_m: artifact.sea_m,
                 coast_parts: 0,
+                low_m: drawn_of(&artifact).0,
+                high_m: drawn_of(&artifact).1,
             }),
         );
         c.step(0.0);

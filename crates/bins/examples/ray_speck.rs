@@ -109,7 +109,10 @@ fn main() {
         words: home_solve_words(),
     })
     .expect("the home planet solves");
-    let body = home_planet().with_sea_m(artifact.sea());
+    let wet = home_planet().with_sea_m(artifact.sea());
+    // ★ THE BAND THE HEAD SIZES (ruling B55), as the client's lane takes it from the same head.
+    let drawn = artifact.drawn_range_m(&wet.macro_lattice().expect("a lattice"));
+    let body = wet.with_band_m(drawn.0, drawn.1).unwrap_or(wet);
     let realm = RealmId::Planet(HOME_PLANET_SEED);
     let mut rx = ArtifactReceiver::default();
     rx.accept(BulkMsg::ArtifactHead {
@@ -122,6 +125,8 @@ fn main() {
         levels: artifact.pyramid.len() as u32,
         sea_m: artifact.sea_m,
         coast_parts: vd_bins::artifact_store::coast_parts_of(&artifact),
+        low_m: drawn.0,
+        high_m: drawn.1,
     });
     for (k, level) in artifact.pyramid.iter().enumerate().rev() {
         rx.accept(BulkMsg::ArtifactPyramid {

@@ -194,7 +194,7 @@ fn ozone_term(w: &AirWords, density_ratio: f64, height_ratio: f64, shell_m: f64)
 }
 
 /// THE AIR OF ONE BODY from its charter, its ladder's datum radius and its relief bound (the most its
-/// surface falls under the datum, at any rung); `None` for a body without air, or with air and a
+/// drawn surface falls under the datum: the body's ground range, ruling B55); `None` for a body without air, or with air and a
 /// missing word. The air's ground is the charter's sea where it states one (the owning realm writes
 /// the solved sea into its charter), else the datum; the air's floor stands the relief under the datum.
 ///

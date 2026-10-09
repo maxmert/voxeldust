@@ -1298,6 +1298,7 @@ judges the clouds and the water before the status file is deleted (amends B6 ite
 | 51 | The province as the nearest node's word (a stand-in for a law) | `artifact.rs:1211-1237` | REPLACED by the outcrop rule (K3 law 7; F35), phase 4 |
 | 52 | The tree horizon and the canopy-fold distance | not yet in code | Set on pictures and the forest bench (M0-15), never a typed cap |
 | 53 | ADDED 2026-10-02 (the cause bench, `docs/investigation/2026-10-02/phase0_relief_cause.txt`): THE BELTS' ROOM — every belt's amplitude is the relief less the TALLEST platform on the whole planet, times the convergence's and the plate age's shares | `crates/terrain/src/land.rs:1004`, `:1014-1016` | MEASURED on the home planet: room 2 323 m, the largest uplift 769 m, no land node rises 1 000 m. Replaced by the belts' law (convergence over the belt's own active time, limited per node by the crust's strength), designed in phase 0 and built in phase 2's macro change (ruling B37) |
+| 54 | ADDED 2026-10-08 (found by the coverage gate, HR5): THE ERODIBILITY'S CEILING — a province's share of `K₀` held at shale's 256 | `crates/terrain/src/strata.rs` (`Province::erodibility_q8`) | GONE 2026-10-08: it never bound (no province holds a rock softer than shale, so every province read 256 or less without it); a province of a softer rock would read more, by Sklar & Dietrich's law itself |
 
 **Kept on purpose:**
 - The render-scale floor s ≥ 720 / rows (`crates/client/src/reconstruction.rs:220-232`), a law of the pixel. The valve

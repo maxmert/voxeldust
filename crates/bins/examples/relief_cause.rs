@@ -16,15 +16,15 @@
 //! 3. **THE BELTS' SHAPE:** the uplift the belts ask for — its largest total, its share of the land, its steepest slope
 //!    between land neighbours — and the relief rule on two fields with NO erosion: the platform alone, and the platform
 //!    with the whole uplift. Can the plates and the belts alone make mountains at 8.2 km?
-//! 4. **THE CLAMPS' HITS:** the land's uplift clamp (nodes at a bound `±relief − h`), and the envelope at the end (nodes
-//!    at `±relief`, with the solve's own report of the worst height before it).
+//! 4. **THE CLAMPS' HITS:** the land's uplift clamp (nodes at a bound `±relief − h`), and since phase 2 the peak law (the
+//!    one limit left, a law: its collapses and what it left over its cap; the envelope that stood here went, B23).
 //! 5. **THE EROSION AGAINST THE UPLIFT:** on the belts (land whose uplift over the age is 1 000 m or more), the mean
 //!    uplift, the mean removal and the mean height left over the sea; the relief rule on the final field, the belts apart
 //!    from the rest; the rebounds.
-//! 6. **THE EROSION'S STRENGTH** (`--k0 0.1,0.01`): the same shipped solve with the schedule's `K₀` times each factor (a
-//!    bench input, never the world; `macro_bench`'s scan does the same): the relief rule on each final field.
+//! 6. (RETIRED with phase 2: the erosion's strength scan read the old stream-power law's `K₀`; the joint law's constant
+//!    is its calibration's, never scanned — ruling B38.)
 //!
-//! `cargo run --release -p vd-bins --example relief_cause [-- --k0 0.1,0.01]`
+//! `cargo run --release -p vd-bins --example relief_cause`
 //!
 //! **Example.** A folded belt rises over the whole age on a plate boundary of the home planet. If the reading of item 5
 //! finds that the rivers removed nearly all of its uplift, the belt is a graded plateau and the cure is in the balance
@@ -38,10 +38,10 @@ use vd_terrain::land::{
     FREEBOARD_FACTOR_RANGE, dry_field, initial_land, isostatic_parts_m, ocean_mask, relief_cap_m,
 };
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
-use vd_terrain::solve::{FACIES_SEA, Schedule, Z_STEPS_PER_M, envelope_steps, solve_full};
+use vd_terrain::solve::{FACIES_SEA, Schedule, Z_STEPS_PER_M, solve_full};
 
 /// The release gate's pinned digest of the home planet's artifact (`crates/bins/tests/home_artifact_pin.rs`).
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x1eb5_3c78_2459_e0df, 0xc2cc_7661_57d2_a0e4];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x81c0_d090_3ce0_129b, 0xb29e_978b_3db0_1040];
 /// A belt node: land whose uplift over the age is this much or more, metres (MEASURED on the first run: no land node
 /// rises 1 000 m, and 3.69 % of the land rises 100 m or more).
 const BELT_M: i32 = 100;
@@ -147,17 +147,6 @@ fn read_field(
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let k0_factors: Vec<f64> = args
-        .iter()
-        .position(|a| a == "--k0")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| {
-            s.split(',')
-                .map(|f| f.parse().expect("a K0 factor"))
-                .collect()
-        })
-        .unwrap_or_default();
     println!(
         "WHY THE HOME PLANET'S MOUNTAINS ARE LOW (phase 0, the cause bench), generator {}",
         vd_terrain::GENERATOR_VERSION
@@ -234,10 +223,9 @@ fn main() {
     );
     println!(
         "   the sea at the initial land stands {:.0} m over the field's mean, so a platform at the mean stands {:.0} m \
-         under it and the envelope's top stands {:.0} m over it",
+         under it",
         f64::from(sea) / steps,
-        f64::from(sea) / steps,
-        relief_m - f64::from(sea) / steps
+        f64::from(sea) / steps
     );
 
     // 3. The belts' shape.
@@ -340,16 +328,12 @@ fn main() {
             "DIFFERS FROM"
         }
     );
-    let envelope = envelope_steps(&body);
-    let env_top = state.z.iter().filter(|&&z| z == envelope).count();
-    let env_bottom = state.z.iter().filter(|&&z| z == -envelope).count();
     println!(
-        "4. THE ENVELOPE at the end: the worst |height| before it {:.0} m, clamped {}; nodes at its top {env_top}, at its \
-         bottom {env_bottom} (the envelope {:.0} m over the ladder radius, {:.0} m over the final sea)",
-        f64::from(report.envelope.0) / steps,
-        report.envelope.1,
-        f64::from(envelope) / steps,
-        f64::from(envelope - state.sea_z) / steps
+        "4. THE PEAK LAW over the passes (the one limit, a law): {} collapses; the largest excess left over its cap after \
+         a pass {:.0} m; the cap {:.0} m over the body's datum",
+        report.peak.0,
+        f64::from(report.peak.1) / steps,
+        vd_terrain::land::relief_cap_m(&body)
     );
     let land_final: Vec<bool> = facies.iter().map(|&f| f & FACIES_SEA == 0).collect();
     let (fin, fin_away) = read_field(&lattice, &area, &state.z, state.sea_z, &land_final);
@@ -419,20 +403,4 @@ fn main() {
         fill as f64 / steps,
         report.craters
     );
-
-    // 6. The erosion's strength.
-    for f in &k0_factors {
-        let mut schedule = Schedule::standard(words.age_yr);
-        schedule.k0_per_yr *= f;
-        let started = std::time::Instant::now();
-        let (s, fac, _) = solve_full(&body, &words, schedule).expect("the variant solves");
-        let land_v: Vec<bool> = fac.iter().map(|&x| x & FACIES_SEA == 0).collect();
-        let (all, away) = read_field(&lattice, &area, &s.z, s.sea_z, &land_v);
-        println!(
-            "\n6. THE EROSION'S STRENGTH: K0 × {f} (a bench input, not the world), solved in {:.1} s",
-            started.elapsed().as_secs_f64()
-        );
-        line("all land", &all);
-        line("away from closed basins", &away);
-    }
 }

@@ -15,7 +15,8 @@
 
 use vd_terrain::BodyDefinition;
 use vd_terrain::artifact::Artifact;
-use vd_terrain::solve::{Schedule, SolveWords, solve_full};
+use vd_terrain::par::Cores;
+use vd_terrain::solve::{Schedule, SolveWords, solve_full_on};
 
 /// What the worker is asked: a body and its charter's words.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,17 +37,28 @@ pub struct SolveDone {
 /// artifact. `None` where the body has no lattice.
 #[must_use]
 pub fn run_solve(job: &SolveJob) -> Option<Artifact> {
+    run_solve_on(job, Cores::default())
+}
+
+/// [`run_solve`] ON `cores` THREADS (ruling B64): the same artifact, byte for byte, on any number of them.
+#[must_use]
+pub fn run_solve_on(job: &SolveJob, cores: Cores) -> Option<Artifact> {
     let lattice = job.body.macro_lattice()?;
-    let (state, facies, _) =
-        solve_full(&job.body, &job.words, Schedule::standard(job.words.age_yr))?;
+    let (state, facies, _) = solve_full_on(
+        &job.body,
+        &job.words,
+        Schedule::standard(job.words.age_yr),
+        cores,
+    )?;
     // ★ THE CLIMATE OVER THE CONNECTED OCEAN (2026-09-24, ruling B7 item 1): the same sea the
     // solve's own budget read, so the artifact's climate bytes and its lakes agree.
-    let climate = vd_terrain::climate::climate(
+    let climate = vd_terrain::climate::climate_on(
         &job.body,
         &lattice,
         &job.words,
         &state.z,
         Some(state.sea_view()),
+        cores,
     );
     Some(Artifact::of(
         &state,
@@ -100,10 +112,23 @@ impl ArtifactWorker for InlineWorker {
     }
 }
 
-/// The binary's worker: one thread per solve, the answer on a channel the tick loop drains.
+/// The binary's worker: one thread per solve, the answer on a channel the tick loop drains; the solve's steps run on
+/// the worker's share of the host's cores ([`ThreadedWorker::with_cores`], ruling B64).
 #[derive(Default)]
 pub struct ThreadedWorker {
     receiver: Option<crossbeam_channel::Receiver<Option<SolveDone>>>,
+    cores: Cores,
+}
+
+impl ThreadedWorker {
+    /// A worker whose solves use `cores` threads.
+    #[must_use]
+    pub fn with_cores(cores: Cores) -> ThreadedWorker {
+        ThreadedWorker {
+            receiver: None,
+            cores,
+        }
+    }
 }
 
 impl ArtifactWorker for ThreadedWorker {
@@ -112,11 +137,12 @@ impl ArtifactWorker for ThreadedWorker {
             return false;
         }
         let (sender, receiver) = crossbeam_channel::bounded(1);
+        let cores = self.cores;
         std::thread::Builder::new()
             .name("artifact-solve".to_owned())
             .spawn(move || {
                 let started = std::time::Instant::now();
-                let answer = run_solve(&job).map(|artifact| SolveDone {
+                let answer = run_solve_on(&job, cores).map(|artifact| SolveDone {
                     artifact,
                     millis: started.elapsed().as_millis() as u64,
                 });
@@ -168,7 +194,9 @@ mod tests {
         assert!(threaded.busy());
         assert!(!threaded.start(job));
         let mut answer = None;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // A guard against a hung thread, never a speed gate: the moon's whole solve takes about 73 s in a debug build
+        // on the 414-pass axis (ruling B56; MEASURED 2026-10-05 beside a loaded machine), twice the 214-pass axis's.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
         while answer.is_none() && std::time::Instant::now() < deadline {
             answer = threaded.poll();
             std::thread::sleep(std::time::Duration::from_millis(5));

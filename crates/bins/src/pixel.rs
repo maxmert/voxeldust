@@ -318,10 +318,12 @@ pub fn unsolved_realms(st: &DevState) -> Vec<&str> {
         .collect()
 }
 
-/// The artifact wait's deadline: the slowest first solve in the home planet's window MEASURED
-/// 382 s on the development machine (2026-09-27, three runs: a 25 400 km planet 196 million km
-/// away), and this allows it more than twice over.
-pub const SOLVE_DEADLINE: Duration = Duration::from_secs(900);
+/// The artifact wait's deadline: the slowest first solve in the home planet's window, allowed more
+/// than twice over. MEASURED 382 s at generator 21 (2026-09-27, three runs: a 25 400 km planet 196
+/// million km away); ★ 4 174 s at generator 25 (2026-10-05, the 414-pass axis of ruling B56: the
+/// desert world, solved beside the home planet's 2 093 s and other solves on the development
+/// machine) — a gate on a fresh fixture now waits over an hour for its first solves.
+pub const SOLVE_DEADLINE: Duration = Duration::from_secs(9_000);
 /// How often the artifact wait prints its course, in seconds.
 pub const SOLVE_COURSE_S: u64 = 10;
 /// The artifact wait's poll period.

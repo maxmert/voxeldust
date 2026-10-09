@@ -433,6 +433,14 @@ pub enum BulkMsg {
         /// whole only when every one of them is here. A field APPEND to an arm minor 33 shipped,
         /// which moved [`crate::version::PROTO_MINOR_FLOOR`] to 34.
         coast_parts: u32,
+        /// ★ THE DRAWN GROUND'S RANGE (2026-10-05, ruling B55, SL6 owner-approved): the lowest and
+        /// the highest height the realm's macro field can draw, whole metres over the ladder
+        /// radius, the spline's own overshoot included. Every host's chunk band reads these two
+        /// words — none can compute them but the shard, which holds every row — so every host
+        /// builds the same chunks, and the band never changes while a ship flies. A field APPEND
+        /// to an arm minor 35 shipped, which moved [`crate::version::PROTO_MINOR_FLOOR`] to 36.
+        low_m: i32,
+        high_m: i32,
     },
     /// ★ ONE PART OF A PYRAMID LEVEL: level `level` (from 1), part `part` of `parts`, the heights in
     /// whole metres in the coarser lattice's node order — the globe from orbit. APPENDED
@@ -1415,6 +1423,8 @@ mod tests {
                     levels: 6,
                     sea_m: -1_250,
                     coast_parts: 34,
+                    low_m: -9_870,
+                    high_m: 12_420,
                 },
                 3,
             ),

@@ -10414,7 +10414,7 @@ updated in the same change as the work, deleted when done). The interims named h
   generator 20's budget, which breaks B8's "the row's sum into the sea equals the cascade's"; C look for a missing law;
   D, added by the review: questions 1 and 2 without the flat sweep and the brim, MEASURED exact at 4.162 % — the row
   never needed the flats).
-- 🟥 **THE FLAT STEP READS ONE OF BARNES' TWO FIELDS — AND STEP 2b's FLAT LAW IS NOT MET** (plan step 2b, question
+- 🟨 **THE FLAT STEP READS ONE OF BARNES' TWO FIELDS — AND STEP 2b's FLAT LAW IS NOT MET** (plan step 2b, question
   4): the step across a spilling lake and a flat of the ground heads for ONE target, the spill or the nearest drain
   ("toward lower ground", in the lattice's own chord), with Rho8's split; Barnes, Lehman & Mulla 2014's "away from
   higher ground" is left out. MEASURED on the planet at generator 21 (`lake_census`): G-LAKE-WALK (37 303 six-step
@@ -10426,6 +10426,13 @@ updated in the same change as the work, deleted when done). The interims named h
   squares, T4); the walks 1.605. Whether Barnes' two combined fields read under 1.05 on node-square flats is
   UNMEASURED. WHERE: `terrain/src/lakes.rs` `flats`, `flat_step`. WHEN: ★ RULED 2026-09-25
   (B9 item 2): plan step 2c, BEFORE R2 (step 3) carves any valley; step 2b committed with it RED.
+  ★ PHASE 1 OF THE GROUND STEP (generator 23, 2026-10-04; `docs/investigation/2026-10-04/phase1_census.txt`): a DRY
+  flat now steps down Barnes' two fields as one potential (`Φ = 2·T + (A_max − A)`; `lakes::downhill`, `step_along`)
+  — MEASURED alone the flats 1.470 → 1.187; the same potential across a SPILLING lake was REFUSED (the walk 13.73° →
+  20.18°, test T9 red), so a lake keeps its straight walk to its spill. With the smooth rebound (the same generator)
+  the flats are other flats (129 k nodes, not 688 k) and read 1.312, the lakes 1.646, and G-LAKE-WALK 8.48° GREEN.
+  OWED: the flats' and the lakes' classes stay RED on node-square shapes — R2's field (no node squares), or the
+  owner's word on a bound for node squares (status item 11 option C).
 - 🟩 **THE INSTRUMENTS' COAST AND LAKE STANDS FOLLOWED A ROW WHOSE MEANING A STEP CHANGES** (review findings 4 and 9 of
   plan step 2b) — CURED 2026-09-25 (NOT committed): `bins/src/drainage_gates.rs` `pick_stands` picked the coast by the
   greatest discharge class and the plain by the lake bits, and `shore_teeth` took the largest lake; at generator 21 the
@@ -11818,6 +11825,7 @@ updated in the same change as the work, deleted when done). The interims named h
     the final field the mean step between land neighbours at a block's edge is 74.4 m against 45.8 m inside a block
     (1.62 times); the field with no rebound reads 0.96 (the control). The last rebound follows the last sweep and is
     never eroded. Straight steps every 131 km along the grid's lines — a G-GRID defect of the macro field.
+    ★ CURED by the smooth rebound (phase 1, generator 23): the edge 43.2 m against 44.2 m inside (0.98; control 0.96).
   **Example.** A folded belt on the home planet rises 300 m over five billion years, while its rivers cut 2.5 km into
   the platform under it; today it is a lowland 478 m over the sea, and the high flat platforms beside it stand a
   kilometre higher. On Earth the same belt would be a young range a few tens of millions of years old.
@@ -11828,7 +11836,10 @@ updated in the same change as the work, deleted when done). The interims named h
   - THE LANDSCAPE'S TIME: each landscape erodes for the time since its ground was last raised (a belt's own age, a
     plate's age), not for the system's whole age (the "cratons' transient" that ruling W8 left owed);
   - THE REBOUND AS A SMOOTH FLEXURE: the lithosphere bends smoothly over its flexural parameter; one value per block is
-    not the law;
+    not the law; ★ BUILT in phase 1 (generator 23, 2026-10-04: `MacroSolve::rebound`'s smooth read, exact to the
+    sixteenth). Its readings under today's schedule (8 rebounds of up to ~0.9 km, the last uneroded): the hollows grow
+    (spilling 3 700 → 8 421), the lake share 4.83 → 5.08 %, the basins' integral G-AGE 0.590 → 0.766 (RED against
+    Strahler's 0.35–0.60) — owed: read again with phase 2's exact rebound at 12.5 Myr or finer (B45 item 1);
   - the design's caps list (§6) gains the room's row.
   - THE BELTS' TWO EARTH CONSTANTS FROM THE BODY'S OWN HEAT (ruling B41 item 2): the decoupling level (P2, India's 19 km
     carried by the elastic thickness, 20.0 km on the home planet) and the slowing time (S2, Tibet's 45.1 Myr) become each
@@ -11890,6 +11901,165 @@ updated in the same change as the work, deleted when done). The interims named h
     CONVERGES NOW (B47 item 2), and under the wedge the interim builds 87 % of the plateau land (8.6–8.8 % of the land,
     against the central Andes' ≈ 0.44 % of Earth's), about half of all the mountains left (runs 27–28, the design §17).
     NEXT (ruling B51 item 3): the Andean margins' law, researched then benched.
+- 🟨 **PHASE 2'S MACRO CHANGE BUILT (generator 24, ARTIFACT_KEY_GENERATION 24, 2026-10-04; rulings B52–B53; NOT
+  committed — no commit until the owner asks).** THE GAME'S OWN SOLVE (`vd_terrain::solve::solve_full`,
+  `vd_terrain::belts`) now runs every ruled law: the mixed axis (214 passes, two sweeps a routing, a rebound after each;
+  B39, B47); the joint law with the cured base and the lakes' cure (B43, B46–B47); the stepped ice with no cap and the
+  exact rebound (B44, B45); the landscape's time and the craters at their own age (B37, B45–B46); the belts as critical
+  wedges with the crust's partition, the collision's slowing and one level a pair, at the plates' corrected speed
+  (B40–B42, B49–B51); the water's own paths (B51 item 2); the limits as law — no envelope, no crater clip, no uplift
+  re-clamp, the peak law per node over the body's datum (B23; the belts' design L0). The artifact keeps its form
+  (`ARTIFACT_VERSION` 9, `PROTO_MINOR` unchanged: no new data crosses a realm boundary, SL6).
+  - FOUND ON THE WAY AND CURED: the peak law read a height over the SEA, and a dry body states none (its level is the
+    lowest integer), so on the home moon and the desert world the subtraction wrapped silently in a release build; it
+    now reads over the body's datum (the ladder's on a dry body, ruling B25 item 1), in 64-bit integers. Four guards
+    that never act were removed (B23); the ice step's one-year guard (the bench's own) stays, and a reading counts its
+    acts.
+  - THE BENCH'S COPY RE-BASED (`crates/bins/src/solve_copy.rs`): it mirrors the game's solve line for line and calls the
+    game's own law functions; its control equals the game's solve bit for bit (MEASURED on the home moon, dry and wet,
+    `the_control_is_the_games_own_solve`; on the home planet by the belts' bench's `phase2` case against the pin); its
+    switches take ONE ruled law out at a time (the water's own paths, the landscape's time, the craters' own age, the
+    wedge) — each run a MEASUREMENT of that law's own effect, never a candidate (B38 item 4). The bench's own forms of
+    the laws and its old cases (runs 9–30) stay in git and in `phase0_belts_bench.txt`. The washboard what-ifs (Rho8,
+    D∞, the fills, the fans) cut with the old stream-power law, so they left the copy: 🟥 their cut's port to the joint
+    law is owed when R2 measures D∞ (ruling B12); `router_variants.rs` keeps its own copy of the old arithmetic and says
+    so.
+  - MEASURED (the census, `docs/investigation/2026-10-04/phase2_census.txt`): the copy's control is the game's solve on the home planet (the artifact's digest MATCHES the pin); the game against the bench's ruled case (run 30) within the gate's tolerance — land 24.16 % of the globe (bench 24.02 %), mountains 5.33 % of the land (5.41 %), land over 1 000 m 30.49 % (29.54 %), the old plains 611 / 361 m (593 / 356 m), the craters 368 (370). Each law's own effect (every other law in): the water's own paths out, land over 1 000 m 24.76 % and the old plains 467 / 297 m; the landscape's time out, land 16.04 % and the old plains 159 / 71 m with all 1 610 craters kept; the craters' own age out, 1 610 craters and the peak law unsettled (976 m left); the wedge out, mountains 0.23 %. ★ THE CONVERGENCE GATE FAILS AT 214 PASSES (B39, binding; 214 x 2 against 414 x 2 sweeps): the plains 29.59 → 35.30 % and the tablelands 65.07 → 60.15 % (tolerance 2 points), the old plains' median 361 → 313 m (−13 %; tolerance 10 %), the relief at 50 % 175 → 147 m (−16 %); the mountains (0.8 points), the land over 1 000 m (1.9), the old plains' mean (−7 %) and the relief at 90 / 99 % (−6 / −8 %) agree. The bench's own fine runs of this law set (414 x 1) were outside the tolerance on the plains and the tablelands too (2.9 / 2.8 points). ★ THE GATE'S CAUSE, MEASURED (2026-10-05; the census document's gate section): the SWEEPS converge (four a routing against two: every share within 0.8 points, every height within 6 %); the ROUTING INTERVAL does not; the WATER'S OWN PATHS carry it (without them the gate passes at 214 against 414 passes). A DEFECT FOUND AND CURED IN THE GAME'S SOLVE (`MacroSolve::deposit_basins`; ruling B51's own words, rock past a full hollow's spill leaves): the level fill DROPPED every volume over a closed hollow's spill — 125.6 × 10¹⁵ m³ of the 754 × 10¹⁵ m³ the rivers cut (17 %), more on the coarser axis; now a closed hollow full of rock passes the rest over its saddle by the water's own rule, every hollow that does not spill is a body the rock can fill (its own lake, or its dry ring once its children are full), and the rock is kept EXACTLY (MEASURED: dropped 0 on both axes; the bench's rock meter, its own check exact). With the rock kept the HEIGHTS converge from 414 to 814 passes (the old plains 571 / 327 against 566 / 325 m, land over 1 km 29.42 against 28.31 %), not from 214 to 414 (the drainage of freshly raised land integrates faster when the routing comes oftener: closed area 7 against 10–16 million km² in 3.0–4.5 Gyr, the old plains about 100 m higher on the coarse axis); and the PLAINS' SMALL RELIEF swings with the step at every axis (the plains 32.51 / 35.04 / 30.37 %, the relief at 50 % 160 / 146 / 169 m at 214 / 414 / 814 passes). A candidate measured and DROPPED: a full lake passing its catchment's rain in the share of its water that leaves it (no effect). ★ THE CHAOS TEST (one resolution, the axis's last pass 4 % longer): at 414 passes the plains move 2.6 points (35.04 → 32.47 %), the relief at 50 % 7 %, plate 10's old plains 6 %, the old plains 1 %; at 214 passes plate 5's old plains move 20 %. So the solve is SENSITIVE at the scale of its drainage layout (the young plateaus' dissection: where each river runs depends on tiny differences, while the land's statistics stand): THE HEIGHTS NEED THE FINER AXIS (414 passes: 214 → 414 moves the old plains 13 % / 18 %, beyond their own noise; 414 → 814 moves them 1 %), and THE PLAINS' SHARE CARRIES ITS OWN NOISE OF ABOUT 2.6 POINTS at one resolution, over B47's 2-point tolerance. ★ RULED B54 (the cure first, then a noise rule; 214 passes until the cure). MEASURED NEXT: without the
+water's own paths the same change moves the plains 0.33 points and the old plains 1–2 % — the sensitivity is that law's.
+★ A DEFECT IN THE ROCK'S WAYS, FOUND AND CURED (2026-10-05; the census's gate section, item 12): a chaos run of B54's first
+candidate spun 90 minutes in the deposit's work list — a full hollow's side whose water's way runs back into the hollow
+itself sent the rest round that side for ever. The cure's first form (every way that ended in a body full of rock refused)
+DROPPED 1.15 × 10¹⁶ m³ of rock in one solve (MEASURED, 81 085 ways refused) and is gone. Now the rest passes on at once
+along its whole way (`MacroSolve::pass_on`): into the sea, into a closed body not yet full of rock, or THROUGH a body full
+of rock, which passes it on by its own way; only a way back to a body this rest already passed, an inland end and a ring are
+refused and counted (`SweepReport::rock_refused`), so the cascade ends by construction. The tests
+`a_way_that_runs_back_into_a_full_hollow_is_refused` and `the_rest_passes_through_a_full_hollow_and_never_twice` hang on the
+old rule (MEASURED with a 120 s limit). B54's first candidate (the routing's receivers on open land) is a DIAGNOSTIC only:
+it restores the routing's older flat rule.
+★ B54 ANSWERED BY MEASUREMENT (2026-10-05; the census's gate section item 14; six runs on the rule above, the water's
+paths at 214 / 414 / 814 passes, each with its chaos twin; no way refused, no rock lost): THE SENSITIVITY IS NOT NUMERICAL
+— the twins' spread on the plains share is 1.4 / 1.6 / 5.0 points as the axis fines (plate 10's young plateau carries it,
+its mean 2 / 6 / 13 %); UNDER THE NOISE RULE (the tolerance the larger of B47's and the reading's own twin spread; the axes
+by their pairs' means) the gate FAILS 214 → 414 on the heights beyond their noise (land over 1 km −3.0 points, the old
+plains −11 / −16.5 %, plate 5 −24 %) and PASSES 414 → 814 on every reading (shares within 0.4 points, heights within
+4.5 %): the solve's own axis is 414 passes (B39), the first solve about 1.6 times as long.
+★ RULED B56 ("414 steps") AND BUILT (generator 25, not committed): the game's `Schedule::standard` on the 414-pass axis
+(`MIXED_T_MIN_YR` 250 000, `MIXED_T_MAX_YR` 12 500 000, `CLIMATE_EVERY` 20); `GENERATOR_VERSION` and
+`ARTIFACT_KEY_GENERATION` 25; the pins re-recorded by one solve (the digest [0x81c0_d090_3ce0_129b, 0xb29e_978b_3db0_1040],
+the identity word 0xf182_f5ca_7c79_b497, the sea 3 487 m, the ocean 75.88 %); THE RELEASE PIN GATE PASSES; a cluster's
+shard solved the home planet to the same digest. MEASURED first solves at generator 25 on the development machine, beside
+other solves: the home planet 2 093 s, the desert world 4 174 s, a far planet 581 s, the moon 5 s.
+🟥 OWED: the census and the pictures on the three bodies, then the owner's one look (B53); the coverage run on the final
+code. 🟨 THE PROCESS GATES' FIRST SOLVES (a consequence of B56): `pixel::SOLVE_DEADLINE` re-sized 900 → 9 000 s from the
+measured 4 174 s, so a gate on a FRESH fixture (a new slot, no stored artifact) waits over an hour before its first leg.
+The lawful road is the owner's (B36 Q7: "a slow bake is solved by another law with its numbers"): e.g. a store of solved
+artifacts shared by every fixture of one world tag (the artifact is a function of the seed, the charter and the
+generation alone), so a body solves once per generation on a machine, not once per gate run.
+  - STILL OPEN, EACH REGISTERED:
+    - 🟨 THE ANDEAN MARGINS' SHARE (the interim above) — the research stands (the belts' design §18).
+    - 🟨 INDIA'S DECOUPLING DEPTH AND TIBET'S SLOWING TIME stay Earth's calibrations until the world states a heat law per
+      body (ruling B41 item 2; the owner's word on "proper laws, never Earth" owed).
+    - 🟨 THE REWORKING RATE is Earth's (Artemieva 2006) for every body whose plates turn, until the rate is scaled by each
+      body's own turnover (the home planet's plates turn over in about 225 Myr against Earth's ~190 Myr).
+    - 🟨 THE ICE STEP'S ONE-YEAR GUARD: a reading counts its acts (FullReport `ice_floored`); the bench prints it from the next run.
+    - 🟥 THE BAND (the belts' design L0; caps-list row 2's band term): the old envelope also held every height inside the
+      body's band, which the SAMPLE BOX (a halo cell over the band's top is air), the LADDER's chunk layers
+      (`chunk::in_ladder`), the far tile reach (`artifact_source`), the client's ladder reach (`ladder_view::relief_m`)
+      and the air's floor (`sky_terms`) read as the surface's bound. MEASURED (the stands tool, `family_stands`): the home
+      planet's band ±9 246 m against a solved field of −9 862 .. +12 019 m; the moon's ±12 385 m against −20 540 ..
+      +14 776 m (its craters keep their whole depth and rims); the desert world inside (±6 890 m, −6 622 .. +6 182 m).
+      ★ VISIBLE (MEASURED on the pictures' probe, the bullet below): the summits over the band's top are cut into walls,
+      cracks and lids; besides, a far peak over the band can be fetched late, a tall far caster can miss its shadow, and
+      the air under the floor in the deepest dry basins is wrong. ★ RULED B55 AND BUILT (2026-10-05, not committed): THE
+      BAND'S TWO ENDS IN THE ARTIFACT'S HEAD — the shard reads the macro field's drawn range off every row and level
+      (`Artifact::drawn_range_m`: each sixteen-node stencil widened by the spline's overshoot, at most 9/32 of its range)
+      and ships `low_m` / `high_m` in `BulkMsg::ArtifactHead` (wire minor 36, the floor 36); every host sizes its ladder
+      from them (`BodyDefinition::with_band_m`: the range plus the fine relief's bound, the strata, the caves and the room,
+      never narrower than the recipe's band; `Ladder::with_band`) — the shard's tile source, the client's lane on the first
+      head, the gates' solved body — and reads the drawn ground's range (`ground_range_m`) where it read the recipe's bound
+      (the reach, the casters, the air's floor, the shadow switch). The store keeps its form (the shard derives the range
+      from its rows), the digest does not move. MEASURED: on the home moon the craters move the floor by one top-rung cell;
+      tests in the seed, terrain, wire, client, gateway and bins crates. ★ THE PICTURES' CHECK (headless, the same eyes,
+      the stored generator-24 artifact): on the mountain stand the walls, cracks and lids are GONE — one continuous ridge
+      line — and the reach grew from 480.8 to 582 km (rung 10 drawn: the tallest ground the reach reads is the real one);
+      the moon draws whole on its moved floor (its reach 128.8 → 152.8 km). ★ B55 ITEM 2 MEASURED (headless, the cured
+      solve; `bins/examples/fold_steps`, `bins/examples/far_cull`): THE FOLD STEPS — at every fold of the home planet the
+      surface at both rungs through the shipped reader, sixteen places a node of the coarser level: the 9 → 10 fold (the
+      rows → level 1, 35.5 M samples) stands over its stated step (1 620 m) at 0.0089 % of the planet, by at most 2.14
+      times (3 470 m; 4.3 px at its 704 km switch distance, 1.2 px at the 99.9th percentile; a crossfade slide, not a
+      one-frame jump); the far folds 14 → 15 and 15 → 16 at 0.065 % and 7 samples, all under 0.2 px; 16 → 17 and 17 → 18
+      never. THE FAR CULL — the client's own descent beside a brute-force skyline (3 600 azimuths, the ground at the rung the
+      client draws at each slant distance) from the sixteen home stands of the look, 1–2 km and 140–152 km up: NO visible
+      sample dropped (1.2–6.6 million visible samples a stand). So per-tile ranges are not needed for the cull; for the
+      9 → 10 fold's rare slide they are the owner's call (B55 item 3). OWED: the coverage run. Before the ruling, three cures were laid out: (1) the top from
+      the law — the datum the realm states plus the relief cap plus the fine relief's bound, no new data — with the
+      bottom from (2) or (3); (2) BOTH ENDS FROM THE ARTIFACT, each host scanning the artifact it already holds (the
+      shard solved it, the gateway and the client hold it whole): NO NEW DATA CROSSES, the band becomes a function of
+      the seed, the charter and the artifact (the chunks a client built before the artifact landed use the recipe's
+      band and are rebuilt on its arrival, as every provisional chunk already is); (3) both ends stated in the
+      artifact's head (an SL6 ask).
+    - 🟨 B52's WORDS "IN INTEGER FORM": the three new curves — the joint law's power, the slowing's exponential, the raise
+      time's logarithm — use the generator's own fenced functions (`Gf::powf`, `exp`, `ln`; SL10 clause 4: the crate's
+      own deterministic implementation), as the climate and the craters do; true integer tables are a change at three
+      places, on the owner's word.
+    - 🟨 CURED BY B55 (the band from the head; the pictures' check above), the owner's look owed — FOUND BY THE PICTURES (B53's look, headless): on the high ranges the skyline shows flat-topped rectangular
+      blocks and dark line cracks (SL8: a seam is a defect). ★ THE CAUSE IS THE BAND (MEASURED 2026-10-04 on the
+      capture's own probe picture, `home_mountains_high_near`): every block pixel is a rung-6 surface at ONE distance
+      (21–24 km) whose height falls down the column — a vertical wall facing the eye — standing 10 060 to 10 950 m over
+      the body's radius (6 341 670 m), all of it over the sample box's band top (+9 310 m, the recipe's Σ|a| plus one
+      step). A halo cell over the band's top is AIR (`lattice.rs`, `sample_box`) while the core cell pass computes every
+      cell from the height, so above the top each chunk meshes a wall on its own edges and two neighbours disagree on
+      their shared vertices (the crack); the ladder builds no chunk layer over the band (`chunk::in_ladder`), so a summit
+      over the top layer is cut flat (the lid). Generator 22's envelope held every node inside the band; phase 2 removed
+      it (no caps, B23) and the solved field reaches +12 019 m. NOT the cause, MEASURED: the rung handover
+      (`rung_swap` on the massif, rungs 6–13: no step over its stated step or its sink) and the skyline's cull (it culls
+      nothing inside the eye's horizon, 138 km; the far rungs 14–20 in the stamp are four other bodies drawn whole).
+      THE CURE IS THE BAND ITEM ABOVE (the owner's choice owed): the band must hold the solved field.
+    - 🟨 THE DESERT WORLD'S SUMMITS: its wedges' force ceiling stands over its crust's strength height (1.3 g), so the peak
+      law collapses 977 356 nodes and many summits stand at the cap's own height (6 182 m) — a limit that is a law (B23),
+      read on the pictures.
+    - 🟨 THE ANDEAN MARGINS' LAW (B52 item 4): the research (the belts' design §18) found no complete published law from
+      the world's facts; the choice of the first chain to bench is the owner's.
+    - 🟨 THE FIRST SOLVE ON MORE CORES (ruling B64; built 2026-10-07, NOT committed; `vd_terrain::par`,
+      `solve::solve_full_on`, `artifact_worker::run_solve_on`): the first land, the climate, the routing's receivers,
+      the descent, the sweep by river basin and the rebound run on the solve's cores with the same bytes on any number
+      (a test solves the wet moon on one core and on three). MEASURED 2026-10-08 ON THE HOME PLANET: the bench copy's
+      full solve (414 passes, four routings) on three cores gives every reading and the digest
+      [0x588d_27d7_c4d3_eb01, 0xbf77_3fdd_99ac_bbce] of the same solve on one core, line for line; the 828-pass solve on
+      three cores reads every number of its one-core run too. OWED: (1) the timing
+      on the home planet, one job at a time, and the release pin gate on the parallel solve once the final pins are
+      recorded; (2) THE HARD STEPS still on one core — the routing's
+      priority flood and the flats' walk, the lakes' hierarchy (`lakes::budget`), the deposit after each sweep and the
+      order — about a sixth of a pass at pass 250 (the profile), so the gain stops near six times until they are parallel
+      (Barnes 2017's parallel priority-flood is the published method), each measured before any work on it; (3) THE
+      HOST'S CORE BUDGET: each shard takes `VD_SOLVE_CORES` or half the host's cores, so a system's nine planets solving
+      at once ask for nine halves — correct, but the share across the host's solves is owed a design (the orchestrator
+      knows the host); (4) the solve AHEAD of the player by the reach rule (the owner's question of 2026-10-07, the
+      ground step design's Q8); (5) ★ THE OWNER'S FUTURE DIRECTION (2026-10-07, "for the future … I'd like to solve
+      planets as fast as possible"): A LEARNED MODEL OF THE SOLVE — a network that maps a body's laws' inputs (its seed's
+      plates, its charter) to the solved state, its laws built in as tensors or layers where they can be, trained on
+      solves the sweep solver makes — explored LATER, never before the owner says. Its conditions, stated when it was
+      raised: the artifact must stay the same bytes on every host (SL10's no-drift: inference in fenced or integer
+      arithmetic, not a card's own floats); a learned model is no law (B38), so it needs the owner's ruling and a gate
+      against the law's own solve on bodies it never trained on (B39's tolerances); and every change of a law retrains
+      it, so it fits after the laws settle (G-LOOK, the freeze). **Example.** The home planet's shard solves on seven threads of the owner's fourteen
+      cores; its artifact is the one a single thread stores, and the far planets solving beside it share the rest.
+    - 🟨 GENERATOR 26's INTERIMS (rulings B59–B62; built 2026-10-07, NOT committed; `vd_terrain::land`, `belts`, `solve`;
+      the research `docs/investigation/2026-10-06/platform_margin_research.md`): (1) A TRANSFORM MARGIN'S WIDTH is
+      Earth's measured necking, 50 km (Mercier de Lépinay et al. 2016) — a named calibration until a law exists (the
+      research's §4.3); (2) A RIFTED MARGIN'S STRONG LAYER is identified with the model's decoupling level (the belts'
+      `INDIA_STORED_CRUST_M` carried by the elastic thickness) — a stated identification that becomes each body's own
+      with the heat law per body, like the decoupling depth (B41 item 2); (3) THE OLDER LANDSCAPE'S LONGEST WAVE, 4 096
+      km (a continent's own scale), is the named scatter's stated construction — its spectrum (Gagnon, Lovejoy &
+      Schertzer 2006) and its size (Earth's stable continents' 131 m at 110 km, ETOPO1) are the published readings;
+      (4) THE ANDEAN COAST'S WIDTH reads a FIRST ESTIMATE of the freeboard factor (the law over the node centres, one
+      step) — MEASURED in the bench, the margins move the factor by a part in ten thousand, about ten metres of the
+      coast's 94 km; (5) the dip's tangent is stated as a number (the fence offers no tangent) and a test computes it
+      again by the fenced series. MEASURED (the coast bench, the same day): the game's first land equals the benched
+      world's byte for byte, heights and belts' mask; it costs 168 s against 24 s, the 64 sub-cells of every node (a
+      speed item for the owner, never a change of the law's numbers). **Example.** A transform margin on the desert
+      world thins its continent over 50 km because Earth's do; when the world states a law for a transform's necking,
+      that law replaces the number and the desert world's margins move once.
 - 🟥 **THE REST OF M0-4:** finer Earth data for the scales under a node (the hills, the valleys, the pits), the Moon and
   Mars, the spectra, the slopes by class and the ice line on Earth's real climate.
 - 🟥 **STEPS 2, 3 AND 5 OWED:** the "before" record on every pinned stand (numbers and pictures, no window); the corrected

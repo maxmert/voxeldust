@@ -795,10 +795,12 @@ pub fn reach_m(surface_m: f64, altitude_m: f64, relief_m: f64) -> f64 {
     vd_terrain::artifact::reach_m(surface_m, altitude_m, relief_m)
 }
 
-/// The tallest ground the recipe can raise over its radius, in metres: the recipe's own bound.
+/// The tallest ground a far peak can stand on over the radius, in metres: the body's drawn ground's
+/// highest point (ruling B55) — the solved field's own, with the fine relief's bound, once the
+/// artifact's head states it; the recipe's own bound before (`relief_bound_m(0)`).
 #[must_use]
 pub fn relief_m(body: &BodyDefinition) -> f64 {
-    body.relief_bound_m(0)
+    body.ground_range_m().1
 }
 
 /// Where a wanted chunk stands for the band: in the hysteresis margin past its rung's switch, in
@@ -2101,6 +2103,15 @@ pub fn frame_step_m(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drawn ground's range of a home-moon artifact, as its head states it (ruling B55).
+    fn drawn_of(artifact: &vd_terrain::artifact::Artifact) -> (i32, i32) {
+        artifact.drawn_range_m(
+            &vd_terrain::home::home_moon()
+                .macro_lattice()
+                .expect("a lattice"),
+        )
+    }
     use vd_core::pose::RealmId;
     use vd_terrain::home::home_planet;
 
@@ -2141,6 +2152,8 @@ mod tests {
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
             coast_parts: 0,
+            low_m: drawn_of(&artifact).0,
+            high_m: drawn_of(&artifact).1,
         });
         let col = Column {
             face: Face::PosZ,
@@ -2201,6 +2214,8 @@ mod tests {
             levels,
             sea_m: artifact.sea_m,
             coast_parts: 0,
+            low_m: drawn_of(&artifact).0,
+            high_m: drawn_of(&artifact).1,
         });
         for (k, level) in artifact
             .pyramid

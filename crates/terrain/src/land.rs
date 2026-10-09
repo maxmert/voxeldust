@@ -23,6 +23,25 @@
 //! continental a plate is, how old a belt is, and the crust's NAMED scatter. Floats run under the
 //! fence and are floored ONCE per node into sixteenths of a metre; the solve reads integers.
 //!
+//! ★ GENERATOR 26 (rulings B59–B61, 2026-10-06; each law measured first in the bench's land copy,
+//! `vd_bins::land_copy`, against the convergence gate):
+//!
+//! - **a node is its cell's mean** ([`CELL_SUBCELLS`]): every term that depends on a plate — its
+//!   continental character, its crust's scatter, its boundary's profile — is read on the node's
+//!   sub-cells and averaged, so a plate's step falls inside the cells it crosses and never whole on
+//!   one node row (W16, B16: a node stands for its cell). MEASURED before: 21.9 % of the boundary
+//!   coastline stepped along the node rows;
+//! - **the margins by kind** ([`margin_width_m`]): on the side of a boundary whose crust column
+//!   stands higher, the crust share and the crust's scatter ramp from the other plate's at the
+//!   boundary to the plate's own over the margin's published width;
+//! - **the sourced spread** ([`EARTH_CONTINENT_SPREAD`]): each plate's crust scatter on Earth's
+//!   stable continents' measured spread;
+//! - **the older landscape's relief** ([`older_landscape_m`]): the relief a plate carried when its
+//!   erosion began, by the continents' published spectrum, weighted by each node's crust share and
+//!   read by the freeboard law. MEASURED before: 87 % of the first land stood on an exact flat;
+//! - **the crust share read continuously**: the room's profiles blend the continental and the
+//!   oceanic profile by each sub-cell's own share, in place of a yes-or-no test at one half.
+//!
 //! **Example.** The home planet draws fourteen plates from its seed. A pilot flies west: the
 //! ground rises for 300 km into a range, drops into a valley of old sea floor, and rises again
 //! into a line of islands. One boundary where two plates push together drew all three, and the
@@ -83,8 +102,47 @@ pub const EARTH_CONTINENTAL_CRUST_M: f64 = 35_000.0;
 /// Oceanic crust thickness on Earth, metres; the same scaling.
 pub const EARTH_OCEANIC_CRUST_M: f64 = 7_000.0;
 /// ★ THE NAMED SCATTER of a plate's continental thickness around the computed value (ruling T9: a
-/// named scatter around a computed value is lawful): a craton is thicker than a young platform.
-pub const CRUST_SCATTER: (f64, f64) = (0.7, 1.4);
+/// named scatter around a computed value is lawful; a craton is thicker than a young platform),
+/// SOURCED (ruling B59 item 3, generator 26): Earth's stable continents' spread of their mean
+/// crust, σ 1.4 km on 40.4 km over seven continents (the research's reading of CRUST1.0, Laske et
+/// al. 2013; `docs/investigation/2026-10-06/platform_margin_research.md`, Appendix A). A plate
+/// draws its factor uniformly with that σ: `1 ± σ·√3`. MEASURED before: the range [0.7, 1.4]
+/// named no source and is about 5.6 times Earth's spread; where two continental plates met they
+/// stood in steps of 1 939 m (10 m on the first land with the margins).
+pub const EARTH_CONTINENT_SPREAD: f64 = 1.4 / 40.4;
+/// ★ THE CELL'S SUB-CELLS a side (ruling B59 item 2, generator 26): a node holds the mean of its
+/// plate terms over `K × K` sub-cells of the recipe's own bend on a lattice `K` times finer, so the
+/// sub-cells tile the cell exactly. A resolution of the mean, never a knob: 1 km sub-cells on the
+/// home planet's 8 km nodes.
+pub const CELL_SUBCELLS: u32 = 8;
+/// ★ THE ANDEAN INTERFACE'S DIP, degrees: the seismogenic zone's mean dip over Earth's subduction
+/// zones, 23 ± 8° (Heuret, Lallemand, Funiciello, Piromallo & Faccenna 2011, G³ 12, Q01004).
+pub const ANDEAN_DIP_DEG: f64 = 23.0;
+/// The tangent of [`ANDEAN_DIP_DEG`], stated as a number because the fence offers no tangent (a
+/// test computes it again by the fenced series).
+pub const ANDEAN_DIP_TAN: f64 = 0.424_474_816_209_604_76;
+/// ★ THE NECKING WAVELENGTH over the strong layer's thickness: 3 to 4 (Fletcher & Hallet 1983, as
+/// Chenin, Schmalholz, Manatschal & Karner 2018 apply it, their Appendix A2); the middle of the
+/// stated range.
+pub const NECKING_WAVELENGTH_RATIO: f64 = 3.5;
+/// ★ THE BULK EXTENSION when the neck forms: 12 to 30 % (the same source); the middle of the stated
+/// range.
+pub const NECKING_STRETCH: f64 = 0.21;
+/// ★ A TRANSFORM MARGIN'S NECKING WIDTH, metres: Earth's measured ~50 km (Mercier de Lépinay et
+/// al. 2016, 78 margins). A named calibration until a law exists (the research's §4.3).
+pub const TRANSFORM_NECKING_M: f64 = 50_000.0;
+/// ★ THE CONTINENTS' TOPOGRAPHY SPECTRUM's exponent `β`: power ∝ `k^−β` (Gagnon, Lovejoy &
+/// Schertzer 2006, Nonlin. Processes Geophys. 13); the field's Hurst exponent is `(β − 1)/2`.
+pub const SPECTRUM_BETA: f64 = 2.09;
+/// ★ EARTH'S STABLE CONTINENTS' HEIGHT DIFFERENCE, metres, at [`SPECTRUM_LAG_M`] (the research's
+/// reading of ETOPO1 over the stable continents' cells): the older landscape's one calibration of
+/// size, a NAMED scatter for a history the facts cannot recover (rulings T9, B60).
+pub const SPECTRUM_RMS_M: f64 = 131.0;
+/// The lag of [`SPECTRUM_RMS_M`], metres.
+pub const SPECTRUM_LAG_M: f64 = 110_000.0;
+/// The older landscape's longest wave, metres: a continent's own scale, from which the spectrum's
+/// octaves halve down to two of the body's nodes (the shortest wave its lattice holds).
+pub const SPECTRUM_LONGEST_M: f64 = 4_096_000.0;
 /// ★ THE CONTINENTAL SHARE of the surface: the crust field's threshold is the area quantile that
 /// gives continental crust this share (calibration: Earth, 40 % — 29 % land plus the shelves).
 /// No published law gives another body's share; it is the one calibration with no scaling.
@@ -327,8 +385,9 @@ pub fn draw_plates(seed: u64, count: u32) -> Vec<Plate> {
             let speed = draw_unit(&mut rng);
             let affinity = (draw_unit(&mut rng) * Gf::TWO - Gf::ONE) * Gf::from_f64(PLATE_AFFINITY);
             let age = draw_unit(&mut rng);
-            let (lo, hi) = CRUST_SCATTER;
-            let crust_scatter = Gf::from_f64(lo) + draw_unit(&mut rng) * Gf::from_f64(hi - lo);
+            // The sourced spread: uniform with Earth's stable continents' σ, `1 ± σ·√3`.
+            let half = Gf::from_f64(EARTH_CONTINENT_SPREAD) * Gf::from_i64(3).sqrt();
+            let crust_scatter = (Gf::ONE - half) + draw_unit(&mut rng) * (Gf::TWO * half);
             Plate {
                 site,
                 drift: scale(tangent, speed),
@@ -477,14 +536,17 @@ pub fn uplift_m(
 }
 
 /// ★ THE PROVINCE OF ONE NODE (slice 8d step 2; `slice_8d_design.md` §3.5): which rock map the
-/// node's beds are drawn from, from THREE WORDS THE LAND ALREADY HOLDS and nothing else — the
-/// crust share, the uplift over the age, and whether the node stands under its own sea.
+/// node's beds are drawn from, from FIVE WORDS THE LAND ALREADY HOLDS and nothing else — the
+/// crust share, the uplift over the age, whether the node stands under its own sea, its
+/// boundary's kind, and whether the plate across that boundary is continental.
 ///
 /// ★ NO NUMBER IS DRAWN HERE (ruling T9). Each test is the land's OWN word:
 ///
-/// * `crust >= 128` is the very test [`initial_land_from`] hands to [`uplift_m`] to decide whether
-///   a node's side of a boundary is continental. The crust share is the smoothstep of the affinity
-///   against the area quantile, so 128 IS the threshold the quantile placed, not a tuning dial.
+/// * `crust >= 128` is the crust share's own half: the node's crust is more continental than
+///   oceanic. The crust share is the cell's mean of the smoothstep of the affinity against the area
+///   quantile, so 128 IS the threshold the quantile placed, not a tuning dial. (Since generator 26
+///   the room's profiles blend by the share itself; the province names the rock the larger share
+///   made.)
 /// * `uplift != 0` says the plates are moving this ground: a belt, an arc, a ridge, a rift or a
 ///   trench. Zero is zero. A transform boundary and a plate's interior both uplift nothing.
 /// * `z < sea` is the sea the land's own inventory solved for.
@@ -492,10 +554,12 @@ pub fn uplift_m(
 /// | crust | uplift | under the sea | province | the landform |
 /// |---|---|---|---|---|
 /// | continental | rises | — | folded belt | a collision belt, a cordillera |
-/// | continental | sinks | — | rift basalt | a continental rift valley, flooded with lava |
+/// | continental | sinks where the plates pull apart | — | rift basalt | a continental rift valley, flooded with lava |
+/// | continental | sinks where the plates push together | — | deep sediment | a forearc under the trench's inner wall |
 /// | continental | still | no | crystalline basement | the old shield |
 /// | continental | still | yes | flat shelf | the drowned platform |
-/// | oceanic | rises | — | rift basalt | a mid-ocean ridge or an island arc |
+/// | oceanic | rises where the plates pull apart, or against an ocean | — | rift basalt | a mid-ocean ridge or an island arc |
+/// | oceanic | rises where it dives under a continent | — | deep sediment | the diving plate's own floor |
 /// | oceanic | sinks or still | — | deep sediment | a trench, and the abyssal plain |
 ///
 /// **Example.** The pilot flies west over the home planet. She leaves the shield (crystalline
@@ -503,17 +567,36 @@ pub fn uplift_m(
 /// (flat shelf), and then over the deep floor (deep sediment). Every rock she mines on that leg
 /// comes from the province she stands on.
 #[must_use]
-pub fn province_of(crust: u8, uplift: i32, z: i32, sea_z: Option<i32>) -> Province {
+pub fn province_of(
+    crust: u8,
+    uplift: i32,
+    z: i32,
+    sea_z: Option<i32>,
+    kind: Kind,
+    other_continental: bool,
+) -> Province {
     let continental = crust >= 128;
     let drowned = matches!(sea_z, Some(level) if z < level);
     if uplift > 0 {
         if continental {
             return Province::FoldedBelt;
         }
+        // ★ THE DIVING PLATE MAKES NO ARC (ruling B63 item 2): oceanic crust that rises where it
+        // dives under a continent — the crust share's blend gives its partly continental cells a
+        // part of the belt's profile — is the diving plate's sediment, never an arc's basalt.
+        // MEASURED before: 25 073 such nodes of the home planet named rift basalt (generator 25:
+        // none).
+        if (kind == Kind::Convergent) & other_continental {
+            return Province::DeepSediment;
+        }
         return Province::RiftBasalt;
     }
     if uplift < 0 {
-        if continental {
+        // ★ A SINKING CONTINENT IS A RIFT ONLY WHERE THE PLATES PULL APART (ruling B63 item 2): where
+        // they push together it is a forearc under the trench's inner wall, which fills with
+        // sediment like the trench beside it. MEASURED before: 12 609 forearc nodes of the home
+        // planet named rift basalt.
+        if continental & (kind == Kind::Divergent) {
             return Province::RiftBasalt;
         }
         return Province::DeepSediment;
@@ -551,6 +634,178 @@ fn affinity_octaves(body: &BodyDefinition) -> [Octave; AFFINITY_OCTAVES] {
 /// The affinity noise at a node's direction, as a unit-amplitude sum in `[−1.75, 1.75]`.
 fn affinity_noise(octaves: &[Octave], dir: [Gi; 3]) -> Gf {
     Gf::from_i64(relief(octaves, dir).raw()) / Gf::from_i64(1 << NOISE_BITS)
+}
+
+/// ★ THE SUB-CELLS' BOUNDARIES of node `node` (ruling B59 item 2): the boundary at each of its
+/// [`CELL_SUBCELLS`]² sub-cells, the recipe's own bend on a lattice `K` times finer (`inv_sub` is
+/// its reciprocal), row by row, into `out`.
+fn sub_boundaries(
+    lattice: &MacroLattice,
+    plates: &[Plate],
+    node: u32,
+    inv_sub: Gi,
+    out: &mut Vec<Boundary>,
+) {
+    out.clear();
+    let (face, i, j) = lattice.split(node);
+    let k = CELL_SUBCELLS as i32;
+    for b in 0..k {
+        for a in 0..k {
+            let d =
+                vd_recipe::bend::direction(i32::from(face.index()), i * k + a, j * k + b, inv_sub);
+            out.push(boundary_of(plates, dir_of(d)));
+        }
+    }
+}
+
+/// ★ THE MARGIN'S WIDTH BY KIND, metres (ruling B59 item 2), for the plate `own` whose crust column
+/// stands higher; `freeboard` is the continental thickness factor and `elastic_thickness_m` the
+/// body's lithosphere:
+///
+/// - an ANDEAN margin (convergent): the coast stands over the crossing of the plate interface and
+///   the upper plate's Moho (Ruff & Tichelaar 1996; Melnick 2016), `x = (z_M − d_T)/tan δ` — `z_M`
+///   the plate's own continental crust, `d_T` the ocean floor's depth under its platform (the land's
+///   own Airy step), `δ` [`ANDEAN_DIP_DEG`];
+/// - a RIFTED margin (divergent): the necking instability, `W = ½(1 + ε)·λ`, `λ`
+///   [`NECKING_WAVELENGTH_RATIO`] times the strong layer, `ε` [`NECKING_STRETCH`]; the strong
+///   layer is the model's own decoupling level — the upper crust over the weak lower crust, the
+///   belts' law's [`crate::belts::INDIA_STORED_CRUST_M`] carried by the elastic thickness, a stated
+///   identification;
+/// - a TRANSFORM margin: Earth's measured necking, [`TRANSFORM_NECKING_M`];
+/// - no boundary: no margin.
+///
+/// **Example.** Earth's own crusts (a 35 km continent over a 7 km ocean floor) put an Andean coast
+/// about 72 km inland of the trench; the home planet's continents, which the freeboard law
+/// thickens, put it about 94 km inland. The continent's crust thins toward the trench over that
+/// width, so its height falls at about 3.7°, as Earth's continental slopes fall at 3–4°.
+#[must_use]
+pub fn margin_width_m(
+    kind: Kind,
+    own: &Plate,
+    cap_m: f64,
+    freeboard: Gf,
+    elastic_thickness_m: u32,
+) -> Gf {
+    let cap_ratio = Gf::from_f64(cap_m) / Gf::from_f64(EARTH_RELIEF_CAP_M);
+    match kind {
+        Kind::Convergent => {
+            let rm = Gf::from_f64(MANTLE_DENSITY_KGM3);
+            let t_c =
+                Gf::from_f64(EARTH_CONTINENTAL_CRUST_M) * cap_ratio * own.crust_scatter * freeboard;
+            let t_o = Gf::from_f64(EARTH_OCEANIC_CRUST_M) * cap_ratio;
+            let d_t = t_c * (Gf::ONE - Gf::from_f64(CONTINENTAL_CRUST_DENSITY_KGM3) / rm)
+                - t_o * (Gf::ONE - Gf::from_f64(OCEANIC_CRUST_DENSITY_KGM3) / rm);
+            (t_c - d_t) / Gf::from_f64(ANDEAN_DIP_TAN)
+        }
+        Kind::Divergent => {
+            let strong = Gf::from_f64(crate::belts::INDIA_STORED_CRUST_M)
+                * Gf::from_i64(i64::from(elastic_thickness_m))
+                / Gf::from_f64(EARTH_ELASTIC_THICKNESS_M);
+            Gf::HALF
+                * (Gf::ONE + Gf::from_f64(NECKING_STRETCH))
+                * Gf::from_f64(NECKING_WAVELENGTH_RATIO)
+                * strong
+        }
+        Kind::Transform => Gf::from_f64(TRANSFORM_NECKING_M),
+        Kind::None => Gf::ZERO,
+    }
+}
+
+/// ★ A FIELD OF OCTAVES over the lattice, zero mean and unit variance by area: each octave
+/// `(wave_m, amplitude)` is the recipe's smooth noise at that wave on the body's stream `stream`,
+/// its amplitude in the recipe's whole steps.
+fn unit_field(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    stream: u64,
+    octaves: &[(Gf, Gf)],
+) -> Vec<Gf> {
+    let radius = Gf::from_f64(body.ladder().radius_m());
+    let built: Vec<Octave> = octaves
+        .iter()
+        .enumerate()
+        .map(|(k, &(wave, amp))| {
+            let (fi, ff) = frequency_of(radius / wave);
+            Octave::smooth(
+                child_seed(body.seed(), stream, 1 + k as u64),
+                fi,
+                ff,
+                Gi::new((amp * Gf::from_i64(1 << AMP_BITS) + Gf::HALF).to_i64_floor()),
+            )
+        })
+        .collect();
+    let mut field: Vec<Gf> = (0..lattice.node_count() as u32)
+        .map(|node| affinity_noise(&built, lattice.direction(node)))
+        .collect();
+    let (mut sum, mut sum2, mut total) = (Gf::ZERO, Gf::ZERO, Gf::ZERO);
+    for (node, &f) in field.iter().enumerate() {
+        let a = Gf::from_i64(lattice.area_m2(node as u32) as i64);
+        sum += f * a;
+        sum2 += f * f * a;
+        total += a;
+    }
+    let mean = sum / total;
+    let sd = (sum2 / total - mean * mean).sqrt();
+    for f in &mut field {
+        *f = (*f - mean) / sd;
+    }
+    field
+}
+
+/// The root-mean-square difference of `field` between nodes `lag` apart along the face rows and
+/// columns.
+fn rms_difference(lattice: &MacroLattice, field: &[Gf], lag: i32) -> Gf {
+    let edge = lattice.edge as i32;
+    let (mut s, mut c) = (Gf::ZERO, 0i64);
+    for node in 0..lattice.node_count() as u32 {
+        let (face, i, j) = lattice.split(node);
+        if i + lag < edge {
+            let d = field[lattice.index(face, i + lag, j) as usize] - field[node as usize];
+            s += d * d;
+            c += 1;
+        }
+        if j + lag < edge {
+            let d = field[lattice.index(face, i, j + lag) as usize] - field[node as usize];
+            s += d * d;
+            c += 1;
+        }
+    }
+    (s / Gf::from_i64(c)).sqrt()
+}
+
+/// ★ THE OLDER LANDSCAPE'S RELIEF, metres a node (rulings B59 item 1, B60 item 1): the relief a
+/// plate carried when its erosion began, which no fact in hand recovers — a NAMED scatter (ruling
+/// T9) with the continents' published spectrum ([`SPECTRUM_BETA`]; Hurst `(β − 1)/2`) from
+/// [`SPECTRUM_LONGEST_M`] down to two of the body's nodes, sized so that its height difference at
+/// [`SPECTRUM_LAG_M`] along the face rows and columns is Earth's stable continents'
+/// [`SPECTRUM_RMS_M`]. The land weights it by each node's crust share: an ocean floor carries none.
+///
+/// **Example.** A pilot over the home planet's old plains sees low rises and shallow basins about
+/// 130 m apart in height over 110 km, the older landscape the plate carried when its erosion
+/// began, and rivers that wind between them; before generator 26 the same plains started as one
+/// exact flat and their first rivers ran in straight lines.
+#[must_use]
+pub fn older_landscape_m(body: &BodyDefinition, lattice: &MacroLattice) -> Vec<Gf> {
+    let hurst = (Gf::from_f64(SPECTRUM_BETA) - Gf::ONE) / Gf::TWO;
+    let ratio = Gf::TWO.powf(-hurst);
+    let shortest = Gf::from_f64(lattice.node_m()) * Gf::TWO;
+    let mut octaves = Vec::new();
+    let (mut wave, mut amp) = (Gf::from_f64(SPECTRUM_LONGEST_M), Gf::ONE);
+    while wave >= shortest {
+        octaves.push((wave, amp));
+        wave = wave / Gf::TWO;
+        amp *= ratio;
+    }
+    let field = unit_field(body, lattice, salt::OLDER_LANDSCAPE, &octaves);
+    // The height difference at the lag, between the two whole lags around it.
+    let lag = Gf::from_f64(SPECTRUM_LAG_M) / Gf::from_f64(lattice.node_m());
+    let below = lag.floor();
+    let frac = lag - below;
+    let l0 = below.to_i64_floor() as i32;
+    let at = rms_difference(lattice, &field, l0) * (Gf::ONE - frac)
+        + rms_difference(lattice, &field, l0 + 1) * frac;
+    let scale = Gf::from_f64(SPECTRUM_RMS_M) / at;
+    field.into_iter().map(|f| f * scale).collect()
 }
 
 /// A node's direction as fenced floats.
@@ -940,11 +1195,22 @@ pub fn relief_cap_m(body: &BodyDefinition) -> f64 {
 /// from the body's own seed by the plate law, then [`initial_land_from`].
 #[must_use]
 pub fn initial_land(body: &BodyDefinition, lattice: &MacroLattice, words: &LandWords) -> Land {
+    initial_land_on(body, lattice, words, crate::par::Cores::default())
+}
+
+/// [`initial_land`] ON THE SOLVE'S CORES (ruling B64): the same land on any number of them.
+#[must_use]
+pub fn initial_land_on(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    words: &LandWords,
+    cores: crate::par::Cores,
+) -> Land {
     let plates = draw_plates(
         body.seed(),
         plate_count(body.ladder().radius_m(), words.elastic_thickness_m),
     );
-    initial_land_from(body, lattice, words, plates)
+    initial_land_from_on(body, lattice, words, plates, cores)
 }
 
 /// The initial land over STATED plates — the shipped kernel on a stated neighbourhood (06 §3.3),
@@ -956,6 +1222,20 @@ pub fn initial_land_from(
     words: &LandWords,
     plates: Vec<Plate>,
 ) -> Land {
+    initial_land_from_on(body, lattice, words, plates, crate::par::Cores::default())
+}
+
+/// [`initial_land_from`] ON THE SOLVE'S CORES (ruling B64): each node's cell mean on its own thread, the same land on
+/// any number of them.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn initial_land_from_on(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    words: &LandWords,
+    plates: Vec<Plate>,
+    cores: crate::par::Cores,
+) -> Land {
     let n = lattice.node_count();
     let gravity = body.facts().gravity_mm_s2;
     let cap_m = relief_cap_m(body);
@@ -964,70 +1244,212 @@ pub fn initial_land_from(
     let width =
         Gf::from_f64(flexural_parameter_m(words.elastic_thickness_m, gravity) * BELT_HALF_WIDTHS);
     let relief = Gf::from_f64(body.relief_m());
-    // 1. The plates and the affinity at every node.
+    // 1. The plates and the affinity at every node's centre.
     let mut boundaries = Vec::with_capacity(n);
     let mut affinity = Vec::with_capacity(n);
+    let mut noise = Vec::with_capacity(n);
     let mut area = Vec::with_capacity(n);
     for node in 0..n as u32 {
         let gi = lattice.direction(node);
         let d = dir_of(gi);
         let b = boundary_of(&plates, d);
-        affinity.push(affinity_noise(&octaves, gi) + plates[usize::from(b.plate)].affinity);
+        let a = affinity_noise(&octaves, gi);
+        affinity.push(a + plates[usize::from(b.plate)].affinity);
+        noise.push(a);
         boundaries.push(b);
         area.push(lattice.area_m2(node));
     }
-    // 2. The crust threshold: the continental share of the AREA.
+    // 2. The crust threshold: the continental share of the AREA, over the centres' field.
     let threshold = area_quantile(&affinity, &area, 1.0 - CONTINENTAL_SHARE);
-    // 3. Isostasy, dry, about the area-weighted mean — and the room the belts have under the
-    //    relief: THE ENVELOPE (03 §4.13) holds by construction, `|z| ≤ relief`, because the belts'
-    //    amplitude is the relief less the tallest platform.
+    // ★ THE FIRST ESTIMATE of the freeboard factor (generator 26), which the Andean margin's width
+    // reads: the law over the node centres' own plates, before the margins and the older landscape.
+    // MEASURED in the bench: the margins move the factor by a part in ten thousand, so the coast's
+    // width is the solved one's within about ten metres.
+    let first = {
+        let mut part_o = Vec::with_capacity(n);
+        let mut part_c = Vec::with_capacity(n);
+        let mut crust = Vec::with_capacity(n);
+        for k in 0..n {
+            let share = crust_share(affinity[k], threshold);
+            let own = &plates[usize::from(boundaries[k].plate)];
+            let (o, c) = isostatic_parts_m(share, cap_m, own.crust_scatter);
+            part_o.push(o);
+            part_c.push(c);
+            crust.push((share * Gf::from_f64(255.0) + Gf::HALF).to_i64_floor() as u8);
+        }
+        let flat = vec![Gf::ZERO; n];
+        freeboard_factor(
+            lattice,
+            &part_o,
+            &part_c,
+            &crust,
+            &area,
+            words.water_km3,
+            &flat,
+        )
+    };
+    // ★ ONE SUB-CELL'S CRUST SHARE AND SCATTER (rulings B59 item 2, B61 item 1): its own plate's,
+    // or — on the side of a boundary whose crust column stands higher, by the land's own Airy parts
+    // at the first estimate — a linear ramp from the other plate's terms at the boundary to its own
+    // over the margin's width ([`margin_width_m`]), so the crust thins toward the ocean as a
+    // margin's crust does and a thick continent thins toward a thinner one. The lower side keeps
+    // its own, so the two sides meet at the boundary. MEASURED before (the bench): a plate's
+    // offset sign alone left cliffs of 46° at the 99th percentile.
+    let terms = |k: usize, sb: &Boundary| -> (Gf, Gf) {
+        let own = &plates[usize::from(sb.plate)];
+        let own_share = crust_share(noise[k] + own.affinity, threshold);
+        let Some(o) = sb.other else {
+            return (own_share, own.crust_scatter);
+        };
+        let other = &plates[usize::from(o)];
+        let other_share = crust_share(noise[k] + other.affinity, threshold);
+        let column = |share: Gf, scatter: Gf| -> Gf {
+            let (o, c) = isostatic_parts_m(share, cap_m, scatter);
+            o + first * c
+        };
+        if column(own_share, own.crust_scatter) <= column(other_share, other.crust_scatter) {
+            return (own_share, own.crust_scatter);
+        }
+        let w = margin_width_m(sb.kind, own, cap_m, first, words.elastic_thickness_m);
+        let t = (radius * sb.sine / w).clamp(Gf::ZERO, Gf::ONE);
+        (
+            other_share + (own_share - other_share) * t,
+            other.crust_scatter + (own.crust_scatter - other.crust_scatter) * t,
+        )
+    };
+    // 3. Isostasy, dry, about the area-weighted mean — each node the MEAN of its sub-cells' Airy
+    //    parts and crust shares (ruling B59 item 2) — and the room the belts have under the relief.
     //    ★ THE CONTINENTAL THICKNESS IS SOLVED BY THE FREEBOARD LAW (W7 step 2): a node's dry
     //    height is linear in the thickness factor, `A + f·B` (the oceanic part and the continental
     //    part of the Airy sum), so the field at any factor is one pass, and the factor is bisected
-    //    until the sea the inventory fills stands at the continental platform's median.
+    //    until the sea the inventory fills stands at the continental platform's shelf quantile —
+    //    with the older landscape's relief in the platform (ruling B60: MEASURED in the bench, the
+    //    relief added after the law left the home planet with 18.4 % land against 24.6 %).
+    let inv_sub = vd_recipe::bend::inv_n_of(lattice.edge * CELL_SUBCELLS);
+    let count = Gf::from_i64(i64::from(CELL_SUBCELLS * CELL_SUBCELLS));
+    // ★ ON THE SOLVE'S CORES (ruling B64): each node's mean reads only its own sub-cells, so the nodes are cut into
+    // ranges, each with its own scratch, and joined in order.
+    let parts = crate::par::per_range(n, cores.threads(), |r| {
+        let mut subs = Vec::with_capacity((CELL_SUBCELLS * CELL_SUBCELLS) as usize);
+        r.map(|k| {
+            sub_boundaries(lattice, &plates, k as u32, inv_sub, &mut subs);
+            let (mut o_sum, mut c_sum, mut s_sum) = (Gf::ZERO, Gf::ZERO, Gf::ZERO);
+            for sb in &subs {
+                let (share, scatter) = terms(k, sb);
+                let (o, c) = isostatic_parts_m(share, cap_m, scatter);
+                o_sum += o;
+                c_sum += c;
+                s_sum += share;
+            }
+            (
+                o_sum / count,
+                c_sum / count,
+                (s_sum / count * Gf::from_f64(255.0) + Gf::HALF).to_i64_floor() as u8,
+            )
+        })
+        .collect::<Vec<_>>()
+    });
     let mut part_o = Vec::with_capacity(n);
     let mut part_c = Vec::with_capacity(n);
     let mut crust = Vec::with_capacity(n);
-    for k in 0..n {
-        let b = boundaries[k];
-        let share = crust_share(affinity[k], threshold);
-        let own = &plates[usize::from(b.plate)];
-        let (o, c) = isostatic_parts_m(share, cap_m, own.crust_scatter);
+    for (o, c, s) in parts.into_iter().flatten() {
         part_o.push(o);
         part_c.push(c);
-        crust.push((share * Gf::from_f64(255.0) + Gf::HALF).to_i64_floor() as u8);
+        crust.push(s);
     }
     let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
-    let freeboard_factor =
-        freeboard_factor(lattice, &part_o, &part_c, &crust, &area, words.water_km3);
+    // The older landscape's relief, by each node's crust share: an ocean floor carries none.
+    let older: Vec<Gf> = older_landscape_m(body, lattice)
+        .into_iter()
+        .zip(&crust)
+        .map(|(r, &c)| Gf::from_i64(i64::from(c)) / Gf::from_i64(255) * r)
+        .collect();
+    let freeboard_factor = freeboard_factor(
+        lattice,
+        &part_o,
+        &part_c,
+        &crust,
+        &area,
+        words.water_km3,
+        &older,
+    );
     let (dry, tallest) = dry_field(&part_o, &part_c, &area, freeboard_factor);
     let room = (relief - tallest).greater(Gf::ZERO);
-    // 4. Orogeny: the belts under the room — THE UPLIFT OVER THE AGE, kept beside the land.
-    let mut uplift = Vec::with_capacity(n);
-    for k in 0..n {
-        let b = boundaries[k];
-        let own = &plates[usize::from(b.plate)];
-        let (other_continental, other_lower) = match b.other {
-            Some(o) => (plates[usize::from(o)].affinity >= Gf::ZERO, o < b.plate),
-            None => (false, false),
-        };
-        let amplitude = room
-            * (b.convergence.abs() / Gf::TWO).clamp(Gf::ZERO, Gf::ONE)
-            * (Gf::ONE - own.age * Gf::HALF);
-        let up = uplift_m(
-            b.kind,
-            crust[k] >= 128,
-            other_continental,
-            !other_lower,
-            radius * b.sine,
-            amplitude,
-            width,
-        );
-        uplift.push((up * steps).to_i64_floor() as i32);
-    }
+    // 4. Orogeny: the belts under the room — THE UPLIFT OVER THE AGE, kept beside the land; each
+    //    node the mean of its sub-cells' profiles. ★ THE CRUST SHARE READ CONTINUOUSLY (ruling B61
+    //    item 1): a sub-cell's profile blends the continental and the oceanic profile by its own
+    //    crust share, where the yes-or-no test at one half put a belt's edge on the half-share line.
+    //    ★ THE ANDEAN MARGIN'S TRENCH (ruling B60 item 1): a continent's side of an ocean diving
+    //    under it holds the trench's inner wall — the outer wall's own profile, so the trough is one
+    //    trough with its axis on the boundary — and its wedge rises from the coast inland (the
+    //    belts' law).
+    let mut uplift: Vec<i32> = crate::par::per_range(n, cores.threads(), |r| {
+        let mut subs = Vec::with_capacity((CELL_SUBCELLS * CELL_SUBCELLS) as usize);
+        r.map(|k| {
+            sub_boundaries(lattice, &plates, k as u32, inv_sub, &mut subs);
+            let mut sum = Gf::ZERO;
+            for sb in &subs {
+                let own = &plates[usize::from(sb.plate)];
+                let (other_continental, other_lower) = match sb.other {
+                    Some(o) => (plates[usize::from(o)].affinity >= Gf::ZERO, o < sb.plate),
+                    None => (false, false),
+                };
+                let amplitude = room
+                    * (sb.convergence.abs() / Gf::TWO).clamp(Gf::ZERO, Gf::ONE)
+                    * (Gf::ONE - own.age * Gf::HALF);
+                let distance = radius * sb.sine;
+                let andean = (sb.kind == Kind::Convergent)
+                    & (own.affinity >= Gf::ZERO)
+                    & sb.other
+                        .is_some_and(|o| plates[usize::from(o)].affinity < Gf::ZERO);
+                let (continental, oceanic) = if andean {
+                    let wall = uplift_m(
+                        Kind::Convergent,
+                        false,
+                        true,
+                        true,
+                        distance,
+                        amplitude,
+                        width,
+                    );
+                    (wall, wall)
+                } else {
+                    (
+                        uplift_m(
+                            sb.kind,
+                            true,
+                            other_continental,
+                            !other_lower,
+                            distance,
+                            amplitude,
+                            width,
+                        ),
+                        uplift_m(
+                            sb.kind,
+                            false,
+                            other_continental,
+                            !other_lower,
+                            distance,
+                            amplitude,
+                            width,
+                        ),
+                    )
+                };
+                let s = terms(k, sb).0;
+                sum += continental * s + oceanic * (Gf::ONE - s);
+            }
+            (sum / count * steps).to_i64_floor() as i32
+        })
+        .collect::<Vec<i32>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    // The dry field in sixteenths, the older landscape's relief in sixteenths added to it.
     let z_dry: Vec<i32> = dry
         .iter()
-        .map(|&h| (h * steps).to_i64_floor() as i32)
+        .zip(&older)
+        .map(|(&h, &r)| (h * steps).to_i64_floor() as i32 + (r * steps).to_i64_floor() as i32)
         .collect();
     // 5. The sea, with the load — ★ OVER THE CONNECTED OCEAN ONLY (2026-09-24, ruling B7 item 1):
     //    a pocket under the level that no path joins to the ocean carries neither the sea's water
@@ -1062,7 +1484,13 @@ pub fn initial_land_from(
         .iter()
         .zip(&uplift)
         .zip(&z)
-        .map(|((&c, &u), &h)| province_of(c, u, h, sea_z).code())
+        .zip(&boundaries)
+        .map(|(((&c, &u), &h), b)| {
+            let other_continental = b
+                .other
+                .is_some_and(|o| plates[usize::from(o)].affinity >= Gf::ZERO);
+            province_of(c, u, h, sea_z, b.kind, other_continental).code()
+        })
         .collect();
     Land {
         z,
@@ -1136,6 +1564,10 @@ pub fn dry_field(part_o: &[Gf], part_c: &[Gf], area: &[u64], factor: Gf) -> (Vec
 /// ★ THE SEA HERE IS THE CONNECTED OCEAN'S (2026-09-24, ruling B7 item 1; plan question 9): the
 /// same law the first land and the solve read, so a pocket on the first land holds no sea here
 /// either.
+///
+/// ★ THE PLATFORM CARRIES ITS RELIEF (generator 26, ruling B60): `relief_m` is the surface relief
+/// each node carries over its Airy height (the older landscape's), so the law reads the sea and
+/// the platform's quantile on the field the land will stand on.
 #[must_use]
 pub fn freeboard_factor(
     lattice: &MacroLattice,
@@ -1144,6 +1576,7 @@ pub fn freeboard_factor(
     crust: &[u8],
     area: &[u64],
     water_km3: u64,
+    relief_m: &[Gf],
 ) -> Gf {
     if water_km3 == 0 {
         return Gf::ONE;
@@ -1157,7 +1590,10 @@ pub fn freeboard_factor(
     let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
     // The sea's height over the platform at a factor, in sixteenths.
     let over = |factor: Gf| -> i64 {
-        let (dry, _) = dry_field(part_o, part_c, area, factor);
+        let (mut dry, _) = dry_field(part_o, part_c, area, factor);
+        for (d, &r) in dry.iter_mut().zip(relief_m) {
+            *d += r;
+        }
         let z_dry: Vec<i32> = dry
             .iter()
             .map(|&h| (h * steps).to_i64_floor() as i32)
@@ -1394,7 +1830,9 @@ mod tests {
             );
             assert!(dot(p.drift, p.drift).to_f64() < 1.0);
             assert!(p.affinity.to_f64().abs() <= PLATE_AFFINITY);
-            assert!((0.7..1.4).contains(&p.crust_scatter.to_f64()));
+            // The sourced spread: `1 ± σ·√3` with Earth's stable continents' σ.
+            let half = EARTH_CONTINENT_SPREAD * 3f64.sqrt();
+            assert!((1.0 - half..1.0 + half).contains(&p.crust_scatter.to_f64()));
         }
         assert_eq!(draw_plates(home_planet().seed(), 14), plates);
         assert_ne!(draw_plates(home_moon().seed(), 14), plates);
@@ -1763,8 +2201,8 @@ mod tests {
 
     /// ★ THE MULTI-PLATE LAND ON A REAL SMALL BODY: the moon handed two stated plates that push
     /// together along the +X/+Y bisector, and an ocean's worth of water. The boundary's kind is
-    /// stated at every node, a belt or a trench stands near it, the sea exists and loads the floor
-    /// under it, the far plate's character is read, and the hypsometry keeps two humps.
+    /// stated at every node, a trench stands at it, the sea exists and loads the floor under it,
+    /// the far plate's character is read, and the hypsometry keeps two humps.
     #[test]
     fn the_moon_with_two_stated_plates_and_a_sea() {
         let moon = home_moon();
@@ -1799,14 +2237,23 @@ mod tests {
         let under = (0..n).filter(|&k| land.z[k] <= sea).count();
         assert!(under > 0, "nothing under the sea");
         assert!(under < n, "under {under} of {n}: everything under the sea");
-        // The belts: near the boundary on the continental side the uplift stands over zero, and
-        // far from any boundary it is EXACTLY zero (the bump's exact zero outside its width).
-        let near_max = (0..n)
-            .filter(|&k| land.boundary_m[k] < 20_000 && land.crust[k] >= 128)
-            .map(|k| land.uplift[k])
-            .max()
-            .expect("a near node");
-        assert!(near_max > 0, "belt {near_max}");
+        // ★ THE MARGIN (generator 26, ruling B60 item 1): plate 0's continent meets plate 1's ocean
+        // at a trench whose inner wall stands on the continent's side, so near the boundary the
+        // ground sinks on BOTH sides (the wedge that rises from the coast inland is the belts'
+        // law's, not the room's); far from any boundary the uplift is EXACTLY zero (the bump's
+        // exact zero outside its width).
+        for plate in [0u8, 1] {
+            let near: Vec<i64> = (0..n)
+                .filter(|&k| (land.boundary_m[k] < 20_000) & (land.plate[k] == plate))
+                .map(|k| i64::from(land.uplift[k]))
+                .collect();
+            assert!(!near.is_empty(), "plate {plate} reaches the boundary");
+            let sum: i64 = near.iter().sum();
+            assert!(
+                sum < 0,
+                "plate {plate} at the boundary: a trench, not {sum}"
+            );
+        }
         assert!(
             (0..n)
                 .filter(|&k| land.boundary_m[k] > 250_000)
@@ -1857,7 +2304,11 @@ mod tests {
         let land = initial_land_from(&moon, &lattice, &words, plates.clone());
         let f = land.freeboard_factor.to_f64();
         assert!(
-            f > FREEBOARD_FACTOR_RANGE.0 && f < FREEBOARD_FACTOR_RANGE.1,
+            f > FREEBOARD_FACTOR_RANGE.0,
+            "the factor {f} sits inside the range"
+        );
+        assert!(
+            f < FREEBOARD_FACTOR_RANGE.1,
             "the factor {f} sits inside the range"
         );
         let sea = land.sea_z.expect("a sea");
@@ -1887,6 +2338,15 @@ mod tests {
             plates,
         );
         assert_eq!(dry.freeboard_factor, Gf::ONE);
+        // A stated field of ocean floor alone (no node of continental crust) holds no platform for
+        // its sea to stand at: the law has no continent to thicken, and the factor is ONE. (The
+        // crust share follows the area quantile, so a body's own plates always lay a continent.)
+        let flat = vec![Gf::ZERO; n];
+        let area: Vec<u64> = (0..n as u32).map(|k| lattice.area_m2(k)).collect();
+        assert_eq!(
+            freeboard_factor(&lattice, &flat, &flat, &vec![0u8; n], &area, 1_000, &flat),
+            Gf::ONE
+        );
     }
 
     /// ★ FAILING FIRST (slice 8d step 2): THE PROVINCE RULE'S SIX ARMS, each on the words the land
@@ -1894,23 +2354,61 @@ mod tests {
     #[test]
     fn the_province_rule_reads_the_crust_the_uplift_and_the_sea() {
         let sea = Some(0);
+        let (push, pull) = (Kind::Convergent, Kind::Divergent);
         // Continental crust (the solve's own `>= 128` test), rising: a collision belt.
-        assert_eq!(province_of(200, 12, -50, sea), Province::FoldedBelt);
-        // Continental, sinking: a rift valley the lava fills.
-        assert_eq!(province_of(200, -12, -50, sea), Province::RiftBasalt);
+        assert_eq!(
+            province_of(200, 12, -50, sea, push, true),
+            Province::FoldedBelt
+        );
+        // Continental, sinking where the plates pull apart: a rift valley the lava fills.
+        assert_eq!(
+            province_of(200, -12, -50, sea, pull, true),
+            Province::RiftBasalt
+        );
+        // ★ Continental, sinking where the plates push together (ruling B63 item 2): a forearc
+        // under the trench's inner wall, which fills with sediment.
+        assert_eq!(
+            province_of(200, -12, -50, sea, push, false),
+            Province::DeepSediment
+        );
         // Continental, still, above its sea: the old shield.
-        assert_eq!(province_of(128, 0, 1, sea), Province::CrystallineBasement);
+        assert_eq!(
+            province_of(128, 0, 1, sea, push, true),
+            Province::CrystallineBasement
+        );
         // Continental, still, under its sea: the drowned platform.
-        assert_eq!(province_of(128, 0, -1, sea), Province::FlatShelf);
-        // Oceanic, rising: a ridge or an island arc.
-        assert_eq!(province_of(127, 9, -900, sea), Province::RiftBasalt);
+        assert_eq!(
+            province_of(128, 0, -1, sea, push, true),
+            Province::FlatShelf
+        );
+        // Oceanic, rising: a ridge, or an island arc where two oceans meet.
+        assert_eq!(
+            province_of(127, 9, -900, sea, pull, true),
+            Province::RiftBasalt
+        );
+        assert_eq!(
+            province_of(127, 9, -900, sea, push, false),
+            Province::RiftBasalt
+        );
+        // ★ Oceanic, rising where it dives under a continent (ruling B63 item 2): the diving
+        // plate's own floor, no arc.
+        assert_eq!(
+            province_of(127, 9, -900, sea, push, true),
+            Province::DeepSediment
+        );
         // Oceanic, sinking: a trench, which fills with its own sediment.
-        assert_eq!(province_of(0, -9, -900, sea), Province::DeepSediment);
+        assert_eq!(
+            province_of(0, -9, -900, sea, push, true),
+            Province::DeepSediment
+        );
         // Oceanic, still: the abyssal plain.
-        assert_eq!(province_of(0, 0, -900, sea), Province::DeepSediment);
+        assert_eq!(
+            province_of(0, 0, -900, sea, Kind::None, false),
+            Province::DeepSediment
+        );
         // A DRY body has no sea, so no node is drowned and no shelf exists.
         assert_eq!(
-            province_of(200, 0, -900, None),
+            province_of(200, 0, -900, None, Kind::None, false),
             Province::CrystallineBasement
         );
     }
@@ -1918,12 +2416,13 @@ mod tests {
     /// ★ FAILING FIRST (slice 8d step 2): THE ROCK MAP OVER A REAL SMALL BODY OF THE WORLD — the
     /// moon under two stated convergent plates and a sea, the same fixture the belts stand on.
     ///
-    /// Four statements. (1) Every node carries a province a reader can name. (2) The belt nodes —
-    /// continental crust the uplift raised — are the FOLDED BELT, node for node. (3) Both the dry
-    /// shield and the drowned shelf appear, because the sea covers part of the continent. (4) Which
+    /// Four statements. (1) Every node carries a province a reader can name. (2) Every node the
+    /// margin moves is deep sediment (ruling B63 item 2): the room raises no continental crust on
+    /// this body, so no node is a belt. (3) The dry shield appears. (4) Which
     /// codes are ABSENT is stated, never shrugged at: this body's two plates only push together, so
-    /// nothing pulls apart and no node sinks on continental crust — the rift is absent for that
-    /// reason, and the deep sediment stands on the oceanic crust.
+    /// nothing pulls apart and the diving plate makes no arc — the rift basalt is absent for that
+    /// reason; the folded belt is the belts' law's, which needs a ridge to time it; and the first
+    /// land holds no shelf (generator 26: no pocket, the continent clear of its sea).
     #[test]
     fn the_moons_rock_map_names_a_province_for_every_node() {
         let moon = home_moon();
@@ -1948,20 +2447,36 @@ mod tests {
         let sea = land.sea_z.expect("a sea");
         assert_eq!(land.province.len(), n);
         let mut counts = std::collections::BTreeMap::new();
+        let (mut diving, mut risen_continent) = (0usize, 0usize);
         for k in 0..n {
             let p = Province::from_code(land.province[k]).expect("a named province");
             *counts.entry(p).or_insert(0usize) += 1;
-            // (2) EVERY BELT NODE IS THE BELT PROVINCE.
-            if (land.uplift[k] > 0) & (land.crust[k] >= 128) {
-                assert_eq!(
-                    p,
-                    Province::FoldedBelt,
-                    "node {k} rose on continental crust"
-                );
+            // ★ (2) WHERE THE PLATES PUSH TOGETHER, NO RIFT AND NO ARC ON THIS BODY (ruling B63
+            // item 2): every node the margin moves that is no belt — the trench's floor and walls, a
+            // forearc the inner wall sinks, the diving plate's cells the crust share lifts — is
+            // sediment. A belt node (continental crust the room raised) would be the folded belt
+            // (the province rule's own test); this body holds none, counted below.
+            let belt = (land.uplift[k] > 0) & (land.crust[k] >= 128);
+            risen_continent += usize::from(belt);
+            if (land.uplift[k] != 0) & !belt {
+                assert_eq!(p, Province::DeepSediment, "node {k}: moved by the margin");
+                diving += usize::from((land.uplift[k] > 0) & (land.plate[k] == 1));
             }
         }
         let held = |p: Province| counts.get(&p).copied().unwrap_or_default();
-        assert!(held(Province::FoldedBelt) > 0, "no belt: {counts:?}");
+        // The diving plate's own cells rise where the crust share gives them a part of the belt's
+        // profile (MEASURED: 436 nodes, all sediment).
+        assert!(diving > 0, "the diving plate rises nowhere: {counts:?}");
+        // THE BELT IS ABSENT, AND THAT IS A MEASUREMENT (generator 26): the Andean margin's room holds
+        // the trench, and its belt is the belts' law's wedge, which needs a ridge to time it — this
+        // body's two plates only push together, so no wedge rises (the belts' law's own domain;
+        // `belts::tests` raise one on four plates). MEASURED: the room raises no node of
+        // continental crust here — the margin's room is the trench.
+        assert_eq!(
+            risen_continent, 0,
+            "the room raised continental crust: {counts:?}"
+        );
+        assert_eq!(held(Province::FoldedBelt), 0, "{counts:?}");
         assert!(
             held(Province::CrystallineBasement) > 0,
             "no shield: {counts:?}"
@@ -1970,11 +2485,13 @@ mod tests {
             held(Province::DeepSediment) > 0,
             "no ocean floor: {counts:?}"
         );
-        // (4) TWO CODES ARE ABSENT, AND EACH ABSENCE IS A MEASUREMENT, not a shrug.
+        // (4) THREE CODES ARE ABSENT (the belt above, the rift and the shelf below), AND EACH
+        // ABSENCE IS A MEASUREMENT, not a shrug.
         //
-        // THE RIFT: both of this body's boundaries push together, so nothing pulls apart and no
-        // node on continental crust sinks. A divergent plate pair is what draws it, and the home
-        // planet's fourteen plates hold several.
+        // THE RIFT: both of this body's boundaries push together, so nothing pulls apart, and the
+        // diving plate makes no arc: what the margin sinks or the crust share lifts there is deep
+        // sediment, never rift basalt (ruling B63 item 2); a divergent plate pair is what draws a
+        // rift, and the home planet's fourteen plates hold several.
         assert_eq!(held(Province::RiftBasalt), 0, "a rift with no rifting");
         assert!(land.kind.iter().all(|&k| k == Kind::Convergent as u8));
         // THE SHELF: three million cubic kilometres of water stands under every node of
@@ -1984,19 +2501,179 @@ mod tests {
             .filter(|&k| (land.crust[k] >= 128) & (land.z[k] < sea) & land.ocean[k])
             .count();
         assert_eq!(drowned, 0, "continental crust under this moon's ocean");
-        // ★ THE SHELF'S NODES STAND IN A POCKET (2026-09-24, ruling B7 item 1). This moon's dry
-        // field holds a second basin no path joins to the ocean (MEASURED: one pocket, 2 955 nodes).
-        // The sea over the connected ocean stands higher than the sea over every node, and the rule
-        // names a node of continental crust under the level a shelf — here only inside that pocket,
-        // which holds no sea. Whether a dry pocket's continental floor is a shelf is the owner's
-        // open question (plan question 9); the rule itself is unchanged.
-        assert_eq!(land.pockets, 1);
-        assert!(held(Province::FlatShelf) > 0, "{counts:?}");
-        for k in 0..n {
-            if land.province[k] == Province::FlatShelf.code() {
-                assert!(!land.ocean[k], "node {k}: a shelf in the ocean");
-            }
+        // ★ THE SHELF IS ABSENT ON THIS FIRST LAND, AND THAT IS A MEASUREMENT (generator 26). Before
+        // it, the only shelf stood in a dry pocket under the connected sea's level (one pocket of
+        // 2 955 nodes, ruling B7 item 1); the margins now thin the continent toward its trench and
+        // the older landscape lies over it, and the first land holds no pocket at all — so no
+        // continental floor stands under the level anywhere, in the ocean or out of it. The shelf's
+        // own arm is the province rule's test above.
+        assert_eq!(
+            (land.pockets, land.pocket_nodes),
+            (0, 0),
+            "a pocket on the first land: {counts:?}"
+        );
+        assert_eq!(held(Province::FlatShelf), 0, "{counts:?}");
+    }
+
+    /// ★ THE DIP'S TANGENT is the tangent of the published dip: the fenced series of the sine and the cosine of 23°
+    /// agree with [`ANDEAN_DIP_TAN`] to the word's own precision.
+    #[test]
+    fn the_dip_tangent_is_the_dips() {
+        let x = gf(ANDEAN_DIP_DEG) * gf(std::f64::consts::PI) / Gf::from_i64(180);
+        let (mut sin, mut cos) = (x, Gf::ONE);
+        let (mut term_s, mut term_c) = (x, Gf::ONE);
+        for k in 1..12i64 {
+            term_s = -term_s * x * x / Gf::from_i64((2 * k) * (2 * k + 1));
+            term_c = -term_c * x * x / Gf::from_i64((2 * k - 1) * (2 * k));
+            sin += term_s;
+            cos += term_c;
         }
+        let tan = (sin / cos).to_f64();
+        assert!((tan - ANDEAN_DIP_TAN).abs() < 1e-15, "{tan}");
+    }
+
+    /// ★ THE MARGINS' WIDTHS BY KIND (ruling B59 item 2), each against its law written out again: an Andean coast where
+    /// the plate interface at 23° meets the Moho of Earth's own crusts (about 72 km), a rifted margin of half
+    /// `(1 + ε)·3.5` strong layers (about 40 km over Earth's lithosphere), a transform margin at Earth's measured 50 km,
+    /// and no margin without a boundary.
+    #[test]
+    fn the_margins_widths_by_kind() {
+        let own = Plate {
+            site: [Gf::ONE, Gf::ZERO, Gf::ZERO],
+            drift: [Gf::ZERO; 3],
+            affinity: gf(0.3),
+            age: gf(0.2),
+            crust_scatter: Gf::ONE,
+        };
+        let te = EARTH_ELASTIC_THICKNESS_M as u32;
+        let andean =
+            margin_width_m(Kind::Convergent, &own, EARTH_RELIEF_CAP_M, Gf::ONE, te).to_f64();
+        let (t_c, t_o) = (EARTH_CONTINENTAL_CRUST_M, EARTH_OCEANIC_CRUST_M);
+        let d_t = t_c * (1.0 - CONTINENTAL_CRUST_DENSITY_KGM3 / MANTLE_DENSITY_KGM3)
+            - t_o * (1.0 - OCEANIC_CRUST_DENSITY_KGM3 / MANTLE_DENSITY_KGM3);
+        let want = (t_c - d_t) / ANDEAN_DIP_TAN;
+        assert!((andean - want).abs() < 1e-6, "{andean} against {want}");
+        assert!((71_000.0..73_000.0).contains(&andean), "{andean}");
+        // A thicker crust (the freeboard factor) moves the coast inland.
+        assert!(
+            margin_width_m(Kind::Convergent, &own, EARTH_RELIEF_CAP_M, gf(1.4), te).to_f64()
+                > andean
+        );
+        let rifted =
+            margin_width_m(Kind::Divergent, &own, EARTH_RELIEF_CAP_M, Gf::ONE, te).to_f64();
+        let want = 0.5
+            * (1.0 + NECKING_STRETCH)
+            * NECKING_WAVELENGTH_RATIO
+            * crate::belts::INDIA_STORED_CRUST_M;
+        assert!((rifted - want).abs() < 1e-6, "{rifted} against {want}");
+        assert_eq!(
+            margin_width_m(Kind::Transform, &own, EARTH_RELIEF_CAP_M, Gf::ONE, te).to_f64(),
+            TRANSFORM_NECKING_M
+        );
+        assert_eq!(
+            margin_width_m(Kind::None, &own, EARTH_RELIEF_CAP_M, Gf::ONE, te),
+            Gf::ZERO
+        );
+    }
+
+    /// ★ THE OLDER LANDSCAPE (ruling B60) on a real body of the world, the home moon: its area-weighted mean is zero, its
+    /// height difference at 110 km along the face rows and columns is Earth's stable continents' 131 m, it holds no two
+    /// equal neighbours, and the same seed draws the same field.
+    #[test]
+    fn the_older_landscape_holds_earths_relief_at_its_lag() {
+        let moon = home_moon();
+        let lattice = MacroLattice::of(&moon).expect("a lattice");
+        let field = older_landscape_m(&moon, &lattice);
+        let n = lattice.node_count();
+        assert_eq!(field.len(), n);
+        let (mut sum, mut total) = (0.0f64, 0.0f64);
+        for (k, f) in field.iter().enumerate() {
+            let a = lattice.area_m2(k as u32) as f64;
+            sum += f.to_f64() * a;
+            total += a;
+        }
+        assert!((sum / total).abs() < 1e-6, "the mean {}", sum / total);
+        let lag = SPECTRUM_LAG_M / lattice.node_m();
+        let (l0, frac) = (lag.floor() as i32, lag - lag.floor());
+        let at = rms_difference(&lattice, &field, l0).to_f64() * (1.0 - frac)
+            + rms_difference(&lattice, &field, l0 + 1).to_f64() * frac;
+        assert!(
+            (at - SPECTRUM_RMS_M).abs() < 1e-6,
+            "{at} m at {SPECTRUM_LAG_M} m"
+        );
+        let flat = (0..n as u32)
+            .filter(|&k| {
+                lattice
+                    .neighbours(k)
+                    .iter()
+                    .all(|&m| m == NO_NODE || field[m as usize] == field[k as usize])
+            })
+            .count();
+        assert_eq!(flat, 0, "an exact flat in the older landscape");
+        assert_eq!(older_landscape_m(&moon, &lattice), field);
+    }
+
+    /// ★ GENERATOR 26's FIRST LAND on the moon's two stated plates (rulings B59–B61): (1) the margin closes the plates'
+    /// step — the crust shares on the two sides of the boundary agree within a few steps at the boundary while the
+    /// plates' interiors differ by most of the scale; (2) no node of continental crust stands on an exact flat (the root
+    /// ruling B59 measured: 87 % of the old first land did).
+    #[test]
+    fn the_margin_closes_the_plates_step_and_no_continent_is_flat() {
+        let moon = home_moon();
+        let lattice = MacroLattice::of(&moon).expect("a lattice");
+        let plate = |site: [f64; 3], drift: [f64; 3], affinity: f64| Plate {
+            site: [gf(site[0]), gf(site[1]), gf(site[2])],
+            drift: [gf(drift[0]), gf(drift[1]), gf(drift[2])],
+            affinity: gf(affinity),
+            age: gf(0.2),
+            crust_scatter: Gf::ONE,
+        };
+        let plates = vec![
+            plate([1.0, 0.0, 0.0], [0.0, 0.5, 0.0], 0.3),
+            plate([0.0, 1.0, 0.0], [0.5, 0.0, 0.0], -0.3),
+        ];
+        let words = LandWords {
+            water_km3: 3_000_000,
+            elastic_thickness_m: 5_000,
+        };
+        let land = initial_land_from(&moon, &lattice, &words, plates);
+        let n = lattice.node_count();
+        // (1) The mean crust share of each plate's nodes within one node of the boundary, and on the farthest third of
+        // the plate from it (the moon is 355 km in radius, so its farthest node stands about 350 km from the boundary).
+        let node_m = lattice.node_m() as u32;
+        let mean_crust = |plate: u8, lo: u32, hi: u32| -> f64 {
+            let picked: Vec<f64> = (0..n)
+                .filter(|&k| {
+                    (land.plate[k] == plate)
+                        & (land.boundary_m[k] >= lo)
+                        & (land.boundary_m[k] < hi)
+                })
+                .map(|k| f64::from(land.crust[k]))
+                .collect();
+            assert!(!picked.is_empty(), "plate {plate} has nodes at {lo}–{hi} m");
+            picked.iter().sum::<f64>() / picked.len() as f64
+        };
+        let farthest = (0..n).map(|k| land.boundary_m[k]).max().expect("a node");
+        let deep = farthest / 3 * 2;
+        let (near0, near1) = (mean_crust(0, 0, node_m), mean_crust(1, 0, node_m));
+        let (far0, far1) = (mean_crust(0, deep, u32::MAX), mean_crust(1, deep, u32::MAX));
+        assert!(
+            (near0 - near1).abs() < 40.0,
+            "at the boundary {near0} against {near1}"
+        );
+        assert!(far0 - far1 > 100.0, "deep inside {far0} against {far1}");
+        // (2) No continental node stands on an exact flat.
+        let flat = (0..n as u32)
+            .filter(|&k| land.crust[k as usize] >= 128)
+            .filter(|&k| {
+                lattice
+                    .neighbours(k)
+                    .iter()
+                    .filter(|&&m| m != NO_NODE)
+                    .all(|&m| land.z[m as usize] == land.z[k as usize])
+            })
+            .count();
+        assert_eq!(flat, 0, "continental nodes on an exact flat");
     }
 
     /// The home planet's land words are the pinned ones.

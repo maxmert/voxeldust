@@ -300,7 +300,9 @@ pub fn profile_m(shape: &Shape, r_m: Gf) -> Gf {
 
 /// ★ THE PLATE CLOCK at a node, years: how long a patch of OCEANIC crust can stand before the
 /// plate carrying it reaches a boundary — the distance to that boundary over the plate's own
-/// speed, which is the drift share the seed drew for that plate times Earth's mean plate speed.
+/// speed, which is the drift share the seed drew for that plate times the speed a whole share
+/// stands for ([`crate::belts::PLATE_SPEED_PER_SHARE_MM_YR`]: the shares' mean is a half, so a
+/// whole share is twice Earth's mean plate speed; ruling B40 item 2, the one speed the belts read).
 /// Continental crust is not consumed, and a one-plate body has no boundary to reach, so both
 /// answer `u64::MAX`: no clock at all.
 ///
@@ -319,7 +321,7 @@ pub fn plate_clock_yr(surface: &Surface, node: u32) -> u64 {
     };
     let d = plate.drift;
     let share = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-    let speed_mm_yr = share * Gf::from_f64(EARTH_MEAN_PLATE_SPEED_MM_YR);
+    let speed_mm_yr = share * Gf::from_f64(crate::belts::PLATE_SPEED_PER_SHARE_MM_YR);
     if speed_mm_yr <= Gf::ZERO {
         return u64::MAX;
     }
@@ -413,6 +415,17 @@ pub fn expected_count(body: &BodyDefinition, lattice: &MacroLattice, words: &Sol
     count_of(expected, draw_unit(&mut rng))
 }
 
+/// The share of the candidates a surface still shows: the production over its retention age against
+/// the production over the body's whole age, within `[0, 1]` — and nothing where the whole age
+/// produced nothing (a crater no age made is never kept).
+fn kept_share(kept: Gf, whole: Gf) -> Gf {
+    if whole > Gf::ZERO {
+        (kept / whole).clamp(Gf::ZERO, Gf::ONE)
+    } else {
+        Gf::ZERO
+    }
+}
+
 /// ★ THE CRATER POPULATION of `body` over `lattice`: the expected count from the laws over the
 /// body's whole area, its size along the size-frequency distribution, its place a draw of a face
 /// and a cell — every draw on the body's own crater stream in a frozen order (a count's fraction,
@@ -454,11 +467,7 @@ pub fn crater_population(
         let retention = retention_age_yr(surface, node, depth_m, words.age_yr);
         let whole = density_per_km2(words.age_yr, diameter);
         let kept = density_per_km2(retention, diameter);
-        let share = if whole > Gf::ZERO {
-            (kept / whole).clamp(Gf::ZERO, Gf::ONE)
-        } else {
-            Gf::ZERO
-        };
+        let share = kept_share(kept, whole);
         if draw_unit(&mut keep_rng) >= share {
             continue;
         }
@@ -774,11 +783,10 @@ mod tests {
             ..surface_of(&land, &clim)
         };
         let wet_kept = crater_population(&moon, &lattice, &dry_words, &wet);
+        let (wet_n, dry_n) = (wet_kept.len(), kept.len());
         assert!(
-            wet_kept.len() * 10 < kept.len(),
-            "the rain takes most of the record: {} of {}",
-            wet_kept.len(),
-            kept.len()
+            wet_n * 10 < dry_n,
+            "the rain takes most of the record: {wet_n} of {dry_n}"
         );
         for c in &wet_kept {
             assert!(c.age_yr <= dry_words.age_yr);
@@ -824,9 +832,9 @@ mod tests {
             province: &province,
             rain_mm_yr: &rain_mm_yr,
         };
-        // Oceanic crust on a plate drifting at half Earth's mean speed, 3 000 km from its
-        // boundary: 3 000 km at 25 mm a year is 120 million years.
-        assert_eq!(plate_clock_yr(&s, 0), 120_000_000);
+        // Oceanic crust on a plate whose drift share is a half — Earth's mean speed, 50 mm a year
+        // (ruling B40 item 2) — 3 000 km from its boundary: 60 million years.
+        assert_eq!(plate_clock_yr(&s, 0), 60_000_000);
         // Continental crust, a plate that does not move, and a plate nobody named: no clock.
         assert_eq!(plate_clock_yr(&s, 1), u64::MAX);
         assert_eq!(plate_clock_yr(&s, 2), u64::MAX);
@@ -848,18 +856,28 @@ mod tests {
         let shield_keeps = retention_age_yr(&s, 2, Gf::from_f64(1_000.0), age);
         assert_eq!(shield_keeps, 83_333_333);
         let ocean_keeps = retention_age_yr(&s, 0, Gf::from_f64(100_000.0), age);
-        assert_eq!(ocean_keeps, 120_000_000, "the trench beats the rain");
+        assert_eq!(ocean_keeps, 60_000_000, "the trench beats the rain");
     }
 
     /// The formation age: the production function's own inverse over the retention age, rising
     /// with the draw, zero at zero and the whole retention at the top.
+    /// The kept share: the retention's production over the whole age's, held within one; nothing
+    /// kept where the whole age produced nothing.
+    #[test]
+    fn the_kept_share_is_the_retentions_part_of_the_whole() {
+        assert_eq!(kept_share(Gf::ONE, Gf::TWO), Gf::HALF);
+        assert_eq!(kept_share(Gf::TWO, Gf::ONE), Gf::ONE);
+        assert_eq!(kept_share(Gf::ZERO, Gf::ZERO), Gf::ZERO);
+    }
+
     #[test]
     fn the_formation_age_walks_the_chronology() {
         let span = 400_000_000u64;
         assert_eq!(formation_age_yr(span, Gf::ZERO), 0);
         assert_eq!(formation_age_yr(span, Gf::ONE), span);
         let half = formation_age_yr(span, Gf::HALF);
-        assert!(half > 0 && half < span, "{half}");
+        assert!(half > 0, "{half}");
+        assert!(half < span, "{half}");
         let quarter = formation_age_yr(span, Gf::from_f64(0.25));
         assert!(quarter < half, "{quarter} under {half}");
         assert_eq!(formation_age_yr(0, Gf::HALF), 0);

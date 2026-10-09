@@ -25,7 +25,8 @@
 //!    difference in that mean is a difference in BRIGHTNESS, and the eye's working threshold is
 //!    2 % of the local mean (Blackwell 1946; Barten 1999; DICOM PS 3.14).
 //!
-//! `cargo run --release -p vd-bins --example rung_swap -- [rung_lo] [rung_hi] [grid] [sun_deg]`
+//! `cargo run --release -p vd-bins --example rung_swap -- [rung_lo] [rung_hi] [grid] [sun_deg]`, with
+//! `VD_SWAP_AIM="x y z"` to stand the grid on another range than the belt.
 
 use vd_bins::artifact_worker::{SolveJob, run_solve};
 use vd_client::chunks::{sink_m, smooth_normals};
@@ -44,6 +45,22 @@ use vd_terrain::position::vertex_position_m;
 
 /// THE BELT the owner flies over, as a unit direction in the planet's frame.
 const BELT: [f64; 3] = [0.617_270, -0.437_286, -0.654_033];
+
+/// The aim the grid stands around: `VD_SWAP_AIM="x y z"` (a unit direction in the planet's frame, a bench input), the
+/// belt by default — so a reading can stand on a range phase 2 raised (ruling B53's stands).
+fn aim() -> DVec3 {
+    std::env::var("VD_SWAP_AIM")
+        .ok()
+        .map(|v| {
+            let w: Vec<f64> = v
+                .split_whitespace()
+                .map(|x| x.parse().expect("an aim component"))
+                .collect();
+            DVec3::new(w[0], w[1], w[2])
+        })
+        .unwrap_or_else(|| DVec3::from_array(BELT))
+        .normalize()
+}
 
 fn main() {
     let a: Vec<f64> = std::env::args()
@@ -76,7 +93,7 @@ fn main() {
         }
     };
     // THE SUN, stated: `sun_deg` over the belt's own horizon, in the planet's frame.
-    let up = DVec3::from_array(BELT).normalize();
+    let up = aim();
     let east = up.cross(DVec3::Z).normalize();
     let sun = (up * sun_deg.to_radians().sin() + east * sun_deg.to_radians().cos()).normalize();
     println!(
@@ -201,7 +218,7 @@ fn main() {
     for rung in rung_lo..=rung_hi {
         let (fine, coarse) = (field_of(rung), field_of(rung + 1));
         // The coarse chunk column under the belt, and the four finer columns under it.
-        let dir = DVec3::from_array(BELT).normalize();
+        let dir = aim();
         let face = vd_seed::bend::face_of(dir.to_array());
         let (t, s) = vd_seed::bend::face_coords(face, dir.to_array());
         let cells = |r: u8| {

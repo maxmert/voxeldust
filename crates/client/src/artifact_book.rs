@@ -46,6 +46,10 @@ pub struct ArtifactHead {
     /// ★ HOW MANY COAST PARTS FOLLOW (2026-09-22, ruling W10): the parts of the realm's coast
     /// mask. The cache is whole only when every one is here.
     pub coast_parts: u32,
+    /// ★ THE DRAWN GROUND'S RANGE (ruling B55): the lowest and highest height the realm's macro
+    /// field can draw, whole metres over the ladder radius — what the body's band is sized from.
+    pub low_m: i32,
+    pub high_m: i32,
 }
 
 impl ArtifactHead {
@@ -377,6 +381,8 @@ impl ArtifactReceiver {
                 levels,
                 sea_m,
                 coast_parts,
+                low_m,
+                high_m,
             } => self.accept_head(
                 realm,
                 ArtifactHead {
@@ -388,6 +394,8 @@ impl ArtifactReceiver {
                     levels,
                     sea_m,
                     coast_parts,
+                    low_m,
+                    high_m,
                 },
             ),
             BulkMsg::ArtifactPyramid {
@@ -683,6 +691,15 @@ pub const MAX_LEVELS: usize = 11;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drawn ground's range of a home-moon artifact, as its head states it (ruling B55).
+    fn drawn_of(artifact: &vd_terrain::artifact::Artifact) -> (i32, i32) {
+        artifact.drawn_range_m(
+            &vd_terrain::home::home_moon()
+                .macro_lattice()
+                .expect("a lattice"),
+        )
+    }
     use vd_seed::bend::Face;
     use vd_terrain::artifact::{Artifact, TILE_EDGE};
     use vd_terrain::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
@@ -723,6 +740,8 @@ mod tests {
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
             coast_parts,
+            low_m: drawn_of(artifact).0,
+            high_m: drawn_of(artifact).1,
         }
     }
 
@@ -958,6 +977,8 @@ mod tests {
             levels: 1,
             sea_m: vd_terrain::artifact::DRY_M,
             coast_parts: 0,
+            low_m: 0,
+            high_m: 0,
         });
         let wrong = BulkMsg::ArtifactPyramid {
             realm: realm(),
@@ -1267,6 +1288,8 @@ mod tests {
                 levels,
                 sea_m: artifact.sea_m,
                 coast_parts: 0,
+                low_m: 0,
+                high_m: 0,
             };
         let mut other_digest = artifact.digest();
         other_digest[0] ^= 1;

@@ -131,18 +131,17 @@ fn bench_land(label: &str, body: &BodyDefinition, words: &LandWords, age_yr: u64
     let t = Instant::now();
     let mut state = MacroSolve::from_land(body, &land).expect("a state");
     let schedule = Schedule::standard(age_yr);
-    let gain = schedule.gain();
     let mut routes = Vec::new();
-    let mut since = schedule.flood_every;
     let mut last = Default::default();
-    for pass in 0..schedule.passes {
-        if since >= schedule.flood_every {
-            routes.push(state.route());
-            state.accumulate();
-            since = 0;
+    let sub = schedule.sub_sweeps.max(1);
+    for pair in schedule.times().windows(2) {
+        routes.push(state.route());
+        state.accumulate();
+        let dt = vd_terrain::Gf::from_i64((pair[1] - pair[0]) as i64)
+            / vd_terrain::Gf::from_i64(i64::from(sub));
+        for _ in 0..sub {
+            last = state.sweep(dt, None, None);
         }
-        since += 1;
-        last = state.sweep(gain, pass, schedule.passes);
     }
     let t_solve = t.elapsed();
     let r = routes.last().copied().unwrap_or_default();
@@ -163,11 +162,11 @@ fn bench_land(label: &str, body: &BodyDefinition, words: &LandWords, age_yr: u64
     );
 }
 
-/// ★ THE FULL SOLVE's bench (stage C3): the whole schedule — the craters, the climate inside it,
-/// the uplift, the rebound, the talus, the ice, the coast, the envelope — timed as one, with the
-/// gates' readings: G-AGE (the basins' integrals against Strahler's band), the facies shares, the
-/// deposits. `VD_BENCH_K0_SCAN=1` adds the erodibility scan on this body (a tenth, one, ten times
-/// the stated `K0_PER_YR`) so the calibration against the age is a MEASURED choice.
+/// ★ THE FULL SOLVE's bench (stage C3; phase 2 of the ground step): the whole axis — the belts, the craters, the
+/// climate inside it, the uplift, the joint law's sweeps, the rebound, the talus, the ice, the peak law, the coast —
+/// timed as one, with the gates' readings: G-AGE (the basins' integrals against Strahler's band), the facies shares,
+/// the deposits. (The erodibility scan of the old stream-power law is retired with that law: the joint law's constant
+/// is its calibration's, never scanned — ruling B38.)
 fn bench_full(label: &str, body: &BodyDefinition, words: &SolveWords) {
     let schedule = Schedule::standard(words.age_yr);
     let rss_before = peak_rss_bytes();
@@ -197,8 +196,8 @@ fn bench_full(label: &str, body: &BodyDefinition, words: &SolveWords) {
         "\n{label} — THE FULL SOLVE (C3): {:.3} s wall on one thread; peak RSS {:.0} MB ({:.1} B/node over \
          the start); {} craters; {} routings (last: {} outlets, {} lake nodes, {} flat, undrained {}, \
          cyclic {}); cuts {:.0} m summed over the sweeps; rebounds {} (nodes lifted {}); talus worst \
-         excess {:.1} m first, {:.1} m last; ice: {} nodes, thickest {:.0} m, deepest cut {:.0} m; \
-         envelope: max |z| {:.0} m, scaled {}; coast band {:.1} m; deposits in {} basins",
+         excess {:.1} m first, {:.1} m last; ice: {} nodes, thickest {:.0} m, its cut summed {:.0} m·nodes in {} \
+         steps; the peak law: {} collapses, {:.0} m left over its cap; coast band {:.1} m; deposits in {} basins",
         t_full.as_secs_f64(),
         mb(rss),
         rss.saturating_sub(rss_before) as f64 / n as f64,
@@ -216,9 +215,10 @@ fn bench_full(label: &str, body: &BodyDefinition, words: &SolveWords) {
         talus_last as f64 / f64::from(Z_STEPS_PER_M),
         report.ice.0,
         report.ice.1,
-        metres(report.ice.2),
-        metres(report.envelope.0),
-        report.envelope.1,
+        report.ice.2 as f64 / f64::from(Z_STEPS_PER_M),
+        report.ice_steps,
+        report.peak.0,
+        metres(report.peak.1),
         metres(report.coast_band),
         report.deposits
     );
@@ -295,7 +295,7 @@ fn bench_full(label: &str, body: &BodyDefinition, words: &SolveWords) {
         ));
         let t_rebound = t.elapsed();
         let t = Instant::now();
-        probe.ice(
+        probe.ice_stepped(
             &c.ela_z,
             &c.temperature_dk,
             c.lapse_mk_km,
@@ -315,140 +315,42 @@ fn bench_full(label: &str, body: &BodyDefinition, words: &SolveWords) {
             t_ice.as_secs_f64()
         );
     }
-    if std::env::var_os("VD_BENCH_K0_SCAN").is_some() {
-        for factor in [0.1, 0.01, 0.001, 10.0] {
-            let scan = Schedule {
-                k0_per_yr: schedule.k0_per_yr * factor,
-                ..schedule
-            };
-            let t = Instant::now();
-            let Some((_, _, r)) = solve_full(body, words, scan) else {
-                continue;
-            };
-            match age_gate(&r.integrals) {
-                Some((median, mature)) => println!(
-                    "  K0 × {factor}: {:.3} s; median integral {:.2} over {} basins — {}",
-                    t.elapsed().as_secs_f64(),
-                    f64::from(median) / 256.0,
-                    r.integrals.len(),
-                    if mature { "mature" } else { "not mature" }
-                ),
-                None => println!("  K0 × {factor}: no basin to read"),
-            }
-        }
-    }
 }
 
-/// ★ THE TRACE (`VD_BENCH_TRACE=1`): the full schedule replayed pass by pass in the open, with the
-/// field's extremes after every step — the instrument that says WHICH pass runs away when the
-/// whole solve does.
+/// ★ THE TRACE (`VD_BENCH_TRACE=1`): the full solve replayed pass by pass in the bench's copy of the solve
+/// (`vd_bins::solve_copy`, every law as the game runs it), with each process's volume on the land and the land after
+/// every pass — the instrument that says WHICH pass runs away when the whole solve does.
 fn bench_trace(label: &str, body: &BodyDefinition, words: &SolveWords) {
     let schedule = Schedule::standard(words.age_yr);
-    let Some(lattice) = MacroLattice::of(body) else {
+    let laws = vd_bins::solve_copy::Laws::default();
+    let Some(solved) = vd_bins::solve_copy::solve_copy(body, words, schedule, &laws, true) else {
         return;
     };
-    let land = initial_land(body, &lattice, &words.land());
-    let Some(mut state) = MacroSolve::from_land(body, &land) else {
-        return;
-    };
-    let gravity = body.facts().gravity_mm_s2;
-    let extremes = |state: &MacroSolve, what: &str| {
-        let (lo, hi) = state.range();
+    for (pass, e) in solved.ledger.iter().enumerate() {
         println!(
-            "  trace {label}: {what}: z {:.0}..{:.0} m",
-            metres(lo),
-            metres(hi)
-        );
-    };
-    extremes(&state, "the land");
-    let pre = vd_terrain::climate::climate(body, &lattice, words, &land.z, land.sea_view());
-    let surface = vd_terrain::craters::Surface {
-        crust: &land.crust,
-        boundary_m: &land.boundary_m,
-        plate: &land.plate,
-        plates: &land.plates,
-        province: &land.province,
-        rain_mm_yr: &pre.rain_mm_yr,
-    };
-    let craters = vd_terrain::craters::crater_population(body, &lattice, words, &surface);
-    drop(pre);
-    vd_terrain::craters::apply_craters(&mut state.z, &lattice, &craters, gravity);
-    let relief = vd_terrain::solve::envelope_steps(body);
-    for z in &mut state.z {
-        *z = (*z).clamp(-relief, relief);
-    }
-    for (u, &z) in state.uplift.iter_mut().zip(&state.z) {
-        *u = (*u).clamp(-relief - z, relief - z);
-    }
-    state.z_flood.clone_from(&state.z);
-    extremes(&state, "the craters, clipped");
-    let gain = schedule.gain();
-    let alpha = vd_terrain::land::flexural_parameter_m(words.elastic_thickness_m, gravity);
-    let mut climate = None;
-    for pass in 0..schedule.passes {
-        if pass % schedule.climate_every == 0 {
-            let sea = land.sea_z.map(|level| vd_terrain::climate::SeaView {
-                level,
-                ocean: &state.ocean,
-            });
-            let c = vd_terrain::climate::climate(body, &lattice, words, &state.z, sea);
-            state.rain.clone_from(&c.rain_mm_yr);
-            climate = Some(c);
-            let r = state.route();
-            state.accumulate();
-            println!(
-                "  trace {label}: pass {pass} climate+routing: outlets {}, lakes {}, flat {}, undrained {}",
-                r.outlets, r.raised, r.flat, r.undrained
-            );
-        }
-        let s = state.sweep(gain, pass, schedule.passes);
-        let (lo, hi) = state.range();
-        println!(
-            "  trace {label}: pass {pass} sweep: lowered {}, max cut {:.1} m, z {:.0}..{:.0} m",
-            s.lowered,
-            metres(s.max_cut),
-            metres(lo),
-            metres(hi)
-        );
-        if (pass + 1) % schedule.isostasy_every == 0 {
-            let (level, lifted, max_lift) = state.rebound(alpha);
-            let (lo, hi) = state.range();
-            println!(
-                "  trace {label}: pass {pass} rebound level {level}: lifted {lifted}, max lift {:.1} m, z {:.0}..{:.0} m",
-                metres(max_lift),
-                metres(lo),
-                metres(hi)
-            );
-        }
-    }
-    let climate = climate.expect("a climate");
-    let tan: Vec<u32> = climate
-        .aridity_q8
-        .iter()
-        .map(|&a| vd_terrain::solve::tan_repose_q16(a))
-        .collect();
-    for k in 0..schedule.talus_passes {
-        let (shed, worst) = state.talus(&tan);
-        let (lo, hi) = state.range();
-        println!(
-            "  trace {label}: talus {k}: shed {shed}, worst excess {:.1} m, z {:.0}..{:.0} m",
-            worst as f64 / f64::from(Z_STEPS_PER_M),
-            metres(lo),
-            metres(hi)
+            "  trace {label}: pass {pass} [{:.2}, {:.2}) Myr on the land: craters {:+.3e} m³, talus {:+.3e}, ice \
+             {:+.3e}, uplift {:+.3e}, sweeps {:+.3e}, rebound {:+.3e}, peak law {:+.3e}; then land {:.1} % of the \
+             globe, mean {:.0} m over the sea, {:.1} % over 1 km",
+            e.t0_yr as f64 / 1e6,
+            e.t1_yr as f64 / 1e6,
+            e.craters_m3[0],
+            e.talus_m3[0],
+            e.ice_m3[0],
+            e.uplift_m3[0],
+            e.sweep_m3[0],
+            e.rebound_m3[0],
+            e.peak_m3[0],
+            e.land_share * 100.0,
+            e.land_mean_m,
+            e.land_over_1km * 100.0
         );
     }
-    let (_, under, thickest, deepest) = state.ice(
-        &climate.ela_z,
-        &climate.temperature_dk,
-        climate.lapse_mk_km,
-        gravity,
-        vd_terrain::solve::GLACIAL_EPOCH_YR,
-    );
+    let (lo, hi) = solved.state.range();
     println!(
-        "  trace {label}: ice: {under} nodes, thickest {thickest:.0} m, deepest cut {:.1} m",
-        metres(deepest)
+        "  trace {label}: the end: z {:.0}..{:.0} m",
+        metres(lo),
+        metres(hi)
     );
-    extremes(&state, "after the ice");
 }
 
 /// One body's bench: the phases timed, the schedule timed, the memory read.
@@ -478,8 +380,12 @@ fn bench(label: &str, body: &BodyDefinition, age_yr: u64) {
     state.accumulate();
     let t_acc = t.elapsed();
     let schedule = Schedule::standard(age_yr);
+    // The first sweep of the axis: the oldest pass's share of a sub-sweep.
+    let times = schedule.times();
+    let dt = vd_terrain::Gf::from_i64((times[1] - times[0]) as i64)
+        / vd_terrain::Gf::from_i64(i64::from(schedule.sub_sweeps.max(1)));
     let t = Instant::now();
-    let sweep = state.sweep(schedule.gain(), 0, 1);
+    let sweep = state.sweep(dt, None, None);
     let t_sweep = t.elapsed();
     let rss_phases = peak_rss_bytes();
     drop(state);
@@ -515,10 +421,10 @@ fn bench(label: &str, body: &BodyDefinition, age_yr: u64) {
     let undrained: usize = report.routes.iter().map(|r| r.undrained + r.cyclic).sum();
     let last = report.sweeps.last().copied().unwrap_or_default();
     println!(
-        "  THE SCHEDULE ({} passes, a routing every {}): {:.3} s wall on one thread; peak RSS {:.0} MB; \
-         state {} B/node",
-        schedule.passes,
-        schedule.flood_every,
+        "  THE AXIS ({} passes, a routing every pass, {} sweeps a routing): {:.3} s wall on one thread; peak RSS \
+         {:.0} MB; state {} B/node",
+        times.len() - 1,
+        schedule.sub_sweeps,
         t_solve.as_secs_f64(),
         mb(rss_solve),
         state.bytes_per_node()

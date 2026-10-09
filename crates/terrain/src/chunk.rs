@@ -1508,24 +1508,18 @@ mod tests {
                 }
                 if seen_in_band > 0 {
                     layers += 1;
-                    // (3) the half the bed's own hardness names.
-                    if vd_recipe::terrace::bed_hardness(
+                    // (3) the half the bed's own hardness names: the hard pair or the soft pair.
+                    let is_hard = vd_recipe::terrace::bed_hardness(
                         m.terrace_at(rung).hardness_seed.raw() as u64,
                         vd_recipe::terrace::bed_of(charter.bed_datum, charter.bed_spacing_recip, r),
-                    ) > Gi::ZERO
-                    {
-                        hard += 1;
-                        assert!(
-                            (rock == rocks[2]) | (rock == rocks[3]),
-                            "a hard bed reads {rock:?}"
-                        );
-                    } else {
-                        soft += 1;
-                        assert!(
-                            (rock == rocks[0]) | (rock == rocks[1]),
-                            "a soft bed reads {rock:?}"
-                        );
-                    }
+                    ) > Gi::ZERO;
+                    hard += i32::from(is_hard);
+                    soft += i32::from(!is_hard);
+                    let pair = [[rocks[0], rocks[1]], [rocks[2], rocks[3]]][usize::from(is_hard)];
+                    assert!(
+                        (rock == pair[0]) | (rock == pair[1]),
+                        "a bed (hard: {is_hard}) reads {rock:?}"
+                    );
                 }
             }
         }

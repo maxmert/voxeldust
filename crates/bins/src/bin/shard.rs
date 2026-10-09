@@ -320,6 +320,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             frame: own_frame,
             generator: vd_terrain::declared_world_tag(universe_seed),
         });
+    // ★ THE FIRST SOLVE'S CORES (ruling B64): `VD_SOLVE_CORES` threads for the solve's steps, or — unset — HALF the
+    // host's cores (the share the client's terrain workers take, ruling B20), at least one. The artifact is the same
+    // bytes on any number.
+    let solve_cores =
+        vd_terrain::par::Cores(env.parse::<usize>("VD_SOLVE_CORES").unwrap_or_else(|_| {
+            std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
+        }));
     // ★ THE ARTIFACT (slice 8c stage C4; the owner's ruling of 2026-09-19): read from this realm's
     // own store, or solved ONCE on a worker thread off the tick and written when it lands. A store
     // whose rows lie refuses the boot here, by name.
@@ -331,7 +338,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 vd_terrain::artifact_world_tag(universe_seed),
                 body,
                 &vd_bins::solve_words_of(charter),
-                Box::new(vd_bins::artifact_worker::ThreadedWorker::default()),
+                Box::new(vd_bins::artifact_worker::ThreadedWorker::with_cores(
+                    solve_cores,
+                )),
             )
             .map_err(|reason| format!("this realm's store holds a wrong artifact: {reason}"))?,
         ),

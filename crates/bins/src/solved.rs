@@ -60,6 +60,7 @@ impl SolvedHome {
     ) -> vd_client::artifact_book::ArtifactCache {
         use vd_wire::channels::BulkMsg;
         let artifact = &self.artifact;
+        let drawn = artifact.drawn_range_m(&self.body.macro_lattice().expect("a lattice"));
         let mut rx = vd_client::artifact_book::ArtifactReceiver::default();
         rx.accept(BulkMsg::ArtifactHead {
             realm,
@@ -71,6 +72,8 @@ impl SolvedHome {
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
             coast_parts: 0,
+            low_m: drawn.0,
+            high_m: drawn.1,
         });
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
             rx.accept(BulkMsg::ArtifactPyramid {
@@ -126,8 +129,12 @@ pub fn solve_home(body: &BodyDefinition, label: &str) -> SolvedHome {
         artifact.digest(),
         artifact.sea()
     );
+    // ★ THE BODY THE CLIENT DRAWS (ruling B55): the solved sea and the band the head's drawn range
+    // sizes, as the client's lane takes them from the same head.
+    let wet = (*body).with_sea_m(artifact.sea());
+    let drawn = artifact.drawn_range_m(&wet.macro_lattice().expect("a lattice"));
     SolvedHome {
-        body: (*body).with_sea_m(artifact.sea()),
+        body: wet.with_band_m(drawn.0, drawn.1).unwrap_or(wet),
         artifact,
     }
 }

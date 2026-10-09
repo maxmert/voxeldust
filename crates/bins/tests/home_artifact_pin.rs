@@ -12,7 +12,7 @@ use vd_bins::artifact_worker::{SolveJob, run_solve};
 use vd_terrain::home::{home_planet, home_solve_words};
 
 /// The committed digest of the home planet's artifact on this build.
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x1eb5_3c78_2459_e0df, 0xc2cc_7661_57d2_a0e4];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x81c0_d090_3ce0_129b, 0xb29e_978b_3db0_1040];
 
 #[test]
 fn the_home_planets_artifact_digests_to_its_committed_words() {
@@ -76,7 +76,7 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
     // `ARTIFACT_KEY_GENERATION`, or every realm opens an artifact of the old solve.
     assert_eq!(
         vd_terrain::ARTIFACT_KEY_GENERATION,
-        21,
+        25,
         "the artifact's key generation belongs to the digest above: bump both together"
     );
     assert_eq!(

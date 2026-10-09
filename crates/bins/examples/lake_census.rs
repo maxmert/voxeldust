@@ -193,29 +193,37 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(default)
     };
+    let env_yr = |name: &str, default: u64| -> u64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
     let mut schedule = vd_terrain::solve::Schedule::standard(
         std::env::var("VD_CENSUS_AGE_YR")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(vd_terrain::home::HOME_SYSTEM_AGE_YR),
     );
-    schedule.passes = env("VD_CENSUS_PASSES", schedule.passes);
-    schedule.flood_every = env("VD_CENSUS_FLOOD_EVERY", schedule.flood_every);
+    // The axis's resolution (ruling B39's gate): the last pass, the longest pass, the sweeps a routing.
+    schedule.t_min_yr = env_yr("VD_CENSUS_T_MIN_YR", schedule.t_min_yr);
+    schedule.t_max_yr = env_yr("VD_CENSUS_T_MAX_YR", schedule.t_max_yr);
+    schedule.sub_sweeps = env("VD_CENSUS_SUB_SWEEPS", schedule.sub_sweeps);
     schedule.climate_every = env("VD_CENSUS_CLIMATE_EVERY", schedule.climate_every);
-    schedule.isostasy_every = env("VD_CENSUS_ISOSTASY_EVERY", schedule.isostasy_every);
     schedule.talus_passes = env("VD_CENSUS_TALUS_PASSES", schedule.talus_passes);
     println!("schedule: {schedule:?}");
     let started = std::time::Instant::now();
     let (state, facies_v, report) =
         vd_terrain::solve::solve_full(&body, &words, schedule).expect("the home planet solves");
     println!(
-        "solved in {:.1} s; envelope worst {} steps, clamped {}; ice: {} nodes under the line, thickest {:.0} m, deepest cut {} steps",
+        "solved in {:.1} s; the peak law: {} collapses, {} steps left over its cap; ice: {} nodes under the line, thickest {:.0} m, its cut summed {} steps over {} steps of time",
         started.elapsed().as_secs_f64(),
-        report.envelope.0,
-        report.envelope.1,
+        report.peak.0,
+        report.peak.1,
         report.ice.0,
         report.ice.1,
-        report.ice.2
+        report.ice.2,
+        report.ice_steps
     );
     println!(
         "sweeps: first cut {} steps over {} nodes, last cut {} steps; fills first {} last {} steps",
@@ -283,14 +291,27 @@ fn main() {
         );
     }
     println!(
-        "\ncraters stamped: {}; routes: {} (every {} of {} passes, plus the final); pits RAISED by each flood (= lake nodes at that route):",
+        "\ncraters stamped: {}; routes: {} (one a pass of {}, plus the final ones); pits RAISED by each flood (= lake nodes at that route), and the pass's {} sweeps summed:",
         report.craters,
         report.routes.len(),
-        vd_terrain::solve::FLOOD_EVERY,
-        vd_terrain::solve::PASSES
+        schedule.times().len() - 1,
+        schedule.sub_sweeps
     );
+    let sub = schedule.sub_sweeps.max(1) as usize;
     for (k, r) in report.routes.iter().enumerate() {
-        let sw = report.sweeps.get(k);
+        let pass_sweeps = report.sweeps.get(k * sub..(k + 1) * sub);
+        let sw = pass_sweeps.map(|s| {
+            s.iter()
+                .fold(vd_terrain::solve::SweepReport::default(), |mut a, b| {
+                    a.lowered += b.lowered;
+                    a.total_cut += b.total_cut;
+                    a.max_cut = a.max_cut.max(b.max_cut);
+                    a.skipped_lake += b.skipped_lake;
+                    a.filled += b.filled;
+                    a.total_fill += b.total_fill;
+                    a
+                })
+        });
         println!(
             "  route {k}: pits {} ({} steps), outlets {} | sweep: lowered {} cut {} max {} skipped {} | filled {} fill {}",
             r.raised,

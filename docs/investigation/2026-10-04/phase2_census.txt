@@ -1,0 +1,1146 @@
+# PHASE 2's CENSUS — generator 24, ARTIFACT_KEY_GENERATION 24 (2026-10-04; rulings B52–B53: "one change at a time with
+# its census"; the owner's look at the end). Headless; NOT committed.
+#
+# ★ GENERATOR 25 (2026-10-05; ruling B56: THE 414-PASS AXIS; the rock kept exactly, the rest passing each hollow once;
+# B55's band) — THE WORLD AS IT NOW STANDS. The bench's CONTROL (the copy with every law as the game runs it, the home
+# planet on the game's own axis) MATCHES the release pin's digest [0x81c0_d090_3ce0_129b, 0xb29e_978b_3db0_1040], and its
+# readings equal the 414-pass run of the gate section's item 14 line for line; the release pin gate passes; a cluster's
+# shard solved the same digest.
+#   reading                                generator 24 (214 passes)     generator 25 (414 passes)    Earth (a reading)
+#   land of the globe                      24.16 %                       24.12 %                      29 %
+#   the sea / the ocean of the globe       3 483 m / 75.84 %             3 487 m / 75.88 %
+#   mountains of the land                  5.33 %                        4.28 %                       2.39 %
+#   plains / tablelands of the land        29.59 / 65.07 %               33.69 / 62.03 %
+#   land over 1 000 m                      30.49 %                       29.69 %
+#   relief at 50 / 90 / 99 %               175 / 736 / 2 389 m           146 / 662 / 2 155 m
+#   the old plains, mean / median          611 / 361 m                   577 / 327 m                  485 / 349 m
+#   collision belt, mean / median          2 212 / 2 293 m               2 100 / 2 098 m
+#   the widened plateaus of the land       10.08 %                       10.03 % (mean 2 277 m)
+#   craters stamped                        368                           368                          ~190
+#   the rock without a way                 17 % of the cut lost          0 (no way refused)
+#   the peak law's collapses / left        30 / 0 m                      23 / 0 m
+#   THE MOUNTAINS BY CAUSE (generator 25): the widened plateaus 61.4 % of all mountains, the collision belts 18.3 %, the
+#   Andean belts 16.6 %, the old plains 1.7 %, the craters 0.9 %; THE SLOPES at 50 / 90 %: collision belts 5.9 / 11.4 %,
+#   Andean 3.8 / 8.7 %, the plateaus 4.8 / 15.5 %, the old plains 0.9 / 2.6 % (Earth's young belts 3.2 / 9.4 %);
+#   THE DRAINAGE: 73.7 % of the land drains to the sea, 25.0 % passes a standing lake on its way.
+#   FIRST SOLVES at generator 25 (a cluster on the development machine, beside other solves): the home planet 2 093 s, the
+#   desert world 4 174 s, a far planet 581 s, the moon 5 s; the recorder's lone home solve 1 998 s, the pin gate's 2 023 s.
+#
+# HOW EACH CHANGE IS MEASURED. The game has no switch (the owner, 2026-10-01: no test seams in the game). The bench's copy
+# of the solve (`crates/bins/src/solve_copy.rs`) was re-based on phase 2: it mirrors `vd_terrain::solve::solve_full`
+# line for line and calls the game's own law functions, and its CONTROL equals the game's solve bit for bit (MEASURED:
+# the home moon dry and wet, `the_control_is_the_games_own_solve`; the home planet below, `phase2`: the artifact's digest
+# MATCHES the release pin). Each other case takes ONE ruled law out (a MEASUREMENT of that law's own effect, never a
+# candidate — ruling B38 item 4). The bench's runs 9–30 (`docs/investigation/2026-10-02/phase0_belts_bench.txt`) measured
+# each law as it was added, in the bench's own form.
+#
+# THE GAME AGAINST THE BENCH'S RULED CASE (run 30, `b40-joint-kept-slow+base+icereb+reb+rebx+lt+lake+wedge+level+wrain~
+# mixed%2`), the home planet — the port within the gate's tolerance (ruling B47: every share within 2 points, every height
+# within 10 %):
+#   reading                              bench (run 30)        game (generator 24)
+#   land of the globe                    24.02 %               24.16 %
+#   mountains of the land (away)         5.41 % (5.80 %)       5.33 % (5.56 %)
+#   land over 1 000 m (away)             29.54 % (32.15 %)     30.49 % (32.73 %)
+#   relief at 50 / 90 / 99 %             183 / 750 / 2 309 m   175 / 736 / 2 389 m
+#   old plains, mean / median            593 / 356 m           611 / 361 m
+#   collision belt, mean / median        2 219 / 2 311 m       2 212 / 2 293 m
+#   the wedges' plateaus of the land     10.05 %               10.08 %
+#   closed basins' walls of the land     8.16 %                6.90 %
+#   craters stamped                      370                   368
+#   the belts' land (million km²)        14.16                 14.17
+#   the peak law's collapses / left      112 / 0 m             30 / 0 m
+# (The bench's printed belt-node count, 236 968, was its older bump belts' — a readout flaw of the bench: the wedge path
+# replaced the heights and left the bump's report; the game counts the wedge's own rising nodes, 417 241.)
+#
+# EACH LAW'S OWN EFFECT (the home planet, every other law in):
+#   case                     land     mountains   land >1 km   old plains (mean/median)   craters   peak collapses / left
+#   phase2 (every law)       24.16 %  5.33 %      30.49 %      611 / 361 m                368       30 / 0 m
+#   -water (water's paths)   24.37 %  5.61 %      24.76 %      467 / 297 m                368       24 / 0 m
+#   -lt (landscape's time)   16.04 %  7.24 %      20.68 %      159 / 71 m                 1 610     1 126 814 / 0 m
+#   -craters (own age)       25.70 %  6.92 %      25.50 %      463 / 226 m                1 610     36 693 142 / 976 m
+#   -wedge (critical wedge)  25.24 %  0.23 %      18.50 %      555 / 261 m                396       0 / 0 m
+#
+# THE CONVERGENCE GATE (rulings B39, B47; `phase2~fine`, the mixed axis twice as fine, the climate's spacing in years
+# kept): THE GATE FAILS AT 214 PASSES.
+#   reading (all land / away from closed basins)   214 passes x 2 sweeps   414 passes x 2 sweeps   difference   tolerance
+#   mountains                                      5.33 / 5.56 %           4.56 / 4.66 %           0.77 / 0.90  2 points  ok
+#   land over 1 000 m                              30.49 / 32.73 %         28.62 / 30.31 %         1.87 / 2.42  2 points  RED (away)
+#   plains                                         29.59 / 29.02 %         35.30 / 33.87 %         5.71 / 4.85  2 points  RED
+#   tablelands                                     65.07 / 65.41 %         60.15 / 61.47 %         4.92 / 3.94  2 points  RED
+#   old plains, mean / median                      611 / 361 m             566 / 313 m             -7.4 / -13.3 %  10 %   RED (median)
+#   relief at 50 / 90 / 99 %                       175 / 736 / 2 389 m     147 / 695 / 2 209 m     -16 / -5.6 / -7.5 %  RED (p50)
+# The bench's own twice-as-fine runs of this law set (414 passes x ONE sweep, so about the same number of sweeps) read
+# plains 32.08 / tablelands 62.63 % against its ruled case's 29.17 / 65.41 % — 2.9 and 2.8 points, also outside the
+# tolerance (`phase0_belts_bench.txt`, the cases at its lines 2904 and 3085); the record stated only the mountains for the
+# water's own paths. So the failure is the ruled law set's, not the port's. Ruling B39: the solve takes as many passes, or
+# as fine a step rule, as the gate needs (the slower first solve accepted). MEASURED NEXT: 
+# THE GATE'S CAUSE, MEASURED (2026-10-04/05, after the census; ruling B39: "the solve takes as many passes, or as fine a
+# step rule, as the gate needs"; B42's method: find the mechanism, then the cure with its numbers):
+#   1. THE SWEEPS CONVERGE. Four sweeps a routing at 214 passes (`phase2%4`, each sweep 6.25 Myr) against two: every
+#      share within 0.8 points and every height within 6 % (plains 29.55 / tablelands 65.63 / mountains 4.81 %, land
+#      over 1 km 31.30 %, relief 174 / 714 / 2 261 m, old plains 648 / 378 m). So the failure comes from a step done ONCE
+#      A PASS.
+#   2. MORE PASSES DO NOT CONVERGE. Four times as fine (`phase2~finer`, 814 passes, 3 336 s): plains 27.93 / tablelands
+#      67.37 / mountains 4.69 %, land over 1 km 27.40 %, relief 187 / 727 / 2 255 m, old plains 573 / 355 m. The readings
+#      swing back as the step shrinks — plains 29.59 → 35.30 → 27.93 %, the old plains' median 361 → 313 → 355 m, plate
+#      5's old plains 529 → 389 → 457 m — so no number of passes passes the gate.
+#   3. THE WATER'S OWN PATHS CARRY IT. Without that law (`phase2-water` against `phase2-water~fine`): plains 26.52 → 28.22,
+#      tablelands 67.86 → 66.75, mountains 5.61 → 5.03 %, land over 1 km 24.76 → 23.75 %, relief 165 / 758 / 2 653 →
+#      171 / 719 / 2 604 m, old plains 467 / 297 → 462 / 278 m — every share within 2 points and every height within
+#      10 %: THE GATE PASSES. Plate 5's old plains hold (309 → 304 m).
+#   4. THE PASS LEDGERS (214 against 414 passes): the axes part from the first 250 Myr of erosion (the landscape's time
+#      starts it near 2.3 Gyr); the fine axis cuts 11 % more land by 4 Gyr; on the coarse axis the sweeps take
+#      5 × 10¹⁵ m³ from the nodes under the sea's level (the inland pockets, closed hollows) in the first 500 Myr of
+#      erosion, against 0.6 × 10¹⁵ m³ on the fine axis.
+#   5. THE ROCK'S WAY (a read-only meter in the bench's copy: the deposit's flux replayed from the sweep's own cut and the
+#      water's own receivers; its check against the deposit's reported fill exact, 0): summed over the history, coarse /
+#      fine, 10¹⁵ m³ — cut 754.3 / 780.1; laid inside closed hollows 17.2 / 18.9; DROPPED PAST A CLOSED HOLLOW'S SPILL
+#      125.6 / 112.4; to the sea 611.0 / 648.4; dropped at an inland end 0 / 0. THE DEFECT: `level_fill` lays nothing
+#      over a closed hollow's spill and the rest VANISHED — 17 % of all the rock the rivers cut, more on the coarser axis.
+#      AND THE HOLLOWS CHURN: at every routing about 0.3 million km² of closed hollow opens and about as much closes again
+#      (summed over the history 72 / 129 million km² opened on the coarse / fine axis — nearly twice with twice the
+#      routings), against 0.9–6.7 million km² closed at any one time.
+#   6. THE FIRST CURE (in the game's deposit, ruling B51's own words "rock past a full hollow's spill … leave[s]"): a
+#      closed hollow full of rock passes the rest over its saddle by the water's own rule (the steepest side that is the
+#      ocean's or a closed hollow not yet full of rock, down the water's way from that side's gate), and where every side
+#      is full the rock rises into the parent's ring (the parent fills as one body with its full children) or leaves by
+#      the parent's own exit. MEASURED: the rock is kept EXACTLY (the meter's check against the
+#      game's own readings exact; dropped 0 on both axes, 2026-10-05) — and the gate STILL FAILS (214 against 414 passes:
+#      plains 32.51 → 35.04 %, land over 1 km 32.99 → 29.42 %, the old plains 658 / 400 → 571 / 327 m). A first form of
+#      the cure kept most of the dropped rock dropped (a closed hollow's parent ring that holds no water had no body); the
+#      form above gives every hollow that does not spill a body the rock can fill.
+#   7. A CANDIDATE MEASURED AND DROPPED (in the bench's copy only): a full lake passing its catchment's rain in the SHARE of
+#      its water that leaves it (the budget's own passed over held and passed) — no effect (plains 32.36 → 34.81 %; the old
+#      plains 660 / 400 → 565 / 312 m). And the share of the land that drains to the sea at the end is the same on both
+#      axes (73.4 against 73.2 %), so the closed hollows' final status is not the lever.
+#   8. WHEN THE AXES PART (the ledger): the land's mean height parts steadily from 2.7 to 3.9 Gyr (about 100 m) and then
+#      holds — the era when the oldest plates (2, 5, 13, 8, 1, 7) start to erode from freshly raised, flat ground; the
+#      closed area is 7 against 10–16 million km² in 3.0–4.5 Gyr: the drainage of fresh land integrates faster when the
+#      routing comes oftener.
+#   9. THE FINER AXES (the rock kept): 414 against 814 passes — the HEIGHTS AGREE (the old plains 571 / 327 against
+#      566 / 325 m, land over 1 km 29.42 against 28.31 %, mountains 4.29 against 4.19 %, relief at 90 / 99 % 665 / 2 188
+#      against 670 / 2 229 m); the PLAINS' SMALL RELIEF does not (plains 35.04 against 30.37 %, tablelands 60.68 against
+#      65.43 %, relief at 50 % 146 against 169 m). The texture agrees through the history (relief at 50 %: 75 / 73 m at
+#      4.0 Gyr, 58 / 58 m at 4.75 Gyr) and parts in the last 250 Myr (137 / 162 m), when the young plates start to erode
+#      (plate 10, raised 223 Myr ago, 20 million km² of land; its dissection is a transient in full progress at the
+#      present). Node by node the two fields differ widely (35 % of the land within 50 m; the rivers run in other places);
+#      per plate the heights differ by 5–15 % in directions that cancel in the mean (plate 5 +67 m, plate 10 −91 m).
+#  10. THE CHAOS TEST (one resolution, the axis's last pass 4 % longer — 0.26 against 0.25 Myr at 414 passes, 0.52 against
+#      0.5 Myr at 214): at 414 passes the plains 35.04 → 32.47 % (2.6 points), the relief at 50 % 146 → 156 m, plate 10's
+#      old plains 1 077 → 1 013 m, the old plains 571 / 327 → 565 / 324 m (1 %); at 214 passes the plains 32.51 → 33.26 %,
+#      the old plains 658 / 400 → 627 / 390 m (−5 % / −3 %), plate 5's old plains 715 → 572 m (−20 %).
+#  11. THE CHAOS TEST WITHOUT THE WATER'S OWN PATHS (ruling B54: the cure first; 414 passes, the last pass 0.25 against
+#      0.26 Myr): plains 28.22 → 28.55 % (0.33 points), tablelands 66.75 → 66.33 %, land over 1 km 23.75 → 24.47 %, the
+#      relief at 50 % 171 → 168 m, the old plains 462 / 278 → 469 / 276 m, plate 5's old plains 304 → 296 m — CALM. The
+#      sensitivity is the water's own paths' (with them the same change moves the plains 2.6 points).
+#   THEREFORE (2026-10-05): the solve is SENSITIVE at the scale of its drainage layout — the land's statistics stand, where
+#   each river runs does not. THE HEIGHTS NEED THE FINER AXIS (214 → 414 moves the old plains 13 % / 18 %, beyond their own
+#   noise of 5 % / 3 %; 414 → 814 moves them 1 %, inside it). THE PLAINS' SHARE CARRIES ITS OWN NOISE OF ABOUT 2.6 POINTS
+#   AT ONE RESOLUTION, over B47's 2-point tolerance, so no number of passes passes the gate on it as it stands. How the gate
+#   reads a reading with its own noise is the owner's (B47); the pins are NOT re-recorded (the release pin gate fails on
+#   the cured world until they are, at generator 25).
+#
+# B54 — THE CURE FIRST (2026-10-05; the owner: "Cure first, then noise rule"):
+#  12. A DEFECT IN THE ROCK'S WAYS, CURED IN THE GAME: a chaos run of the first candidate (item 13) spun 90 minutes in the
+#      deposit's work list (the disassembly of the stripped bench's hot loop: the walk down the water's way, the level
+#      fill, the push of the next body) — a full hollow's side whose water's way runs back into the hollow itself sent the
+#      rest round that one side for ever. THE CURE'S FIRST FORM judged a way by its end and refused every way that ended in
+#      a body full of rock: MEASURED (414 passes) 81 085 ways refused and 1.15 × 10¹⁶ m³ of rock DROPPED — a full body is
+#      no dead end, it passes the rock on — so it is gone. THE RULE NOW (`MacroSolve::pass_on`): the rest passes on at once
+#      along its whole way — into the sea, into a closed body not yet full of rock (which keeps it), or THROUGH a body
+#      already full of rock (which passes it on by its own way); only a way back to a body this rest already passed, an
+#      inland end and a ring are refused and counted (`rock_refused`, printed by the bench with the rock that found no
+#      way). The tests of a one-hollow and a two-hollow loop hang on the old rule (MEASURED: stopped by a 120 s limit) and
+#      pass in 0.4 s.
+#  13. THE FIRST CANDIDATE — the routing's own receivers on OPEN land (outside every hollow), a ring repaired by the water's
+#      own receiver: a DIAGNOSTIC, never a cure, because the routing's flat rule is the OLDER one (the nearest drain, ties
+#      by index — the lattice's lean) and phase 1's two fields live in the water's descent. Its first run (before item 12):
+#      plains 30.56 %, tablelands 64.95 %, relief at 50 % 168 m, land over 1 km 29.16 %, the old plains 590 / 334 m, plate
+#      10's mean 953 m; 301 nodes repaired over the passes — beside the water's paths' 35.04 % / 146 m at 414 passes and
+#      30.37 % / 169 m at 814. Its chaos twin is the one that spun (item 12); its pair waits behind item 14.
+#  14. THE NOISE AGAINST THE RESOLUTION, on the rule of item 12 (the water's paths; each axis with its chaos twin, the last
+#      pass 4 % longer; in all six runs NO way refused and NO rock without a way; each run against its twin, a / b):
+#        reading            214 a / b       414 a / b       814 a / b     twin spread 214/414/814   214→414    414→814
+#        land %           24.51 / 24.78   24.12 / 24.12   23.83 / 23.79      0.3 / 0.0 / 0.0       −0.53      −0.31
+#        plains %         32.38 / 33.81   33.69 / 32.12   30.70 / 35.68      1.4 / 1.6 / 5.0       −0.19      +0.28
+#        tablelands %     62.52 / 61.22   62.03 / 63.74   65.20 / 60.13      1.3 / 1.7 / 5.1       +1.02      −0.22
+#        mountains %       5.10 /  4.97    4.28 /  4.14    4.10 /  4.19      0.1 / 0.1 / 0.1       −0.83      −0.07
+#        over 1 km %      32.99 / 31.82   29.69 / 29.10   28.04 / 30.10      1.2 / 0.6 / 2.1       −3.01 RED  −0.33
+#        old plains mean    658 / 631       577 / 570       557 / 585        4.2 / 1.2 / 4.9 %     −11.0 % RED −0.4 %
+#        old plains median  397 / 387       327 / 328       321 / 319        2.6 / 0.3 / 0.6 %     −16.5 % RED −2.3 %
+#        relief at 50 %     160 / 150       146 / 157       167 / 144        6.5 / 7.3 / 14.8 %    −2.3 %     +2.6 %
+#        relief at 90 %     705 / 698       662 / 661       666 / 661        1.0 / 0.2 / 0.8 %     −5.7 %     +0.3 %
+#        relief at 99 %    2288 / 2274     2155 / 2136     2216 / 2270       0.6 / 0.9 / 2.4 %     −5.9 %     +4.5 %
+#        plate 10's mean   1017 / 1040     1030 / 972       936 / 1064       2.2 / 5.8 / 12.8 %    −2.7 %     −0.1 %
+#        plate 5's mean     854 / 731       601 / 611       615 / 609       15.5 / 1.7 / 1.0 %     −23.5 % RED +1.0 %
+#      (the axes compared by their pairs' means; RED where the change is over both B47's tolerance and the larger twin
+#      spread). THEREFORE: THE SENSITIVITY IS NOT NUMERICAL — the twins' spread does not shrink as the axis fines (the
+#      plains 1.4 / 1.6 / 5.0 points, plate 10's mean 2 / 6 / 13 %): it is the laws' own, on the young plateau (plate 10,
+#      raised 223 Myr ago), where each river runs. THE GATE UNDER THE NOISE RULE (B54 item 2: the tolerance the larger of
+#      B47's and the reading's own twin spread): 214 → 414 FAILS on the heights, beyond their noise (land over 1 km, the
+#      old plains, plate 5); 414 → 814 PASSES on every reading (every share within 0.4 points, every height within 4.5 %).
+#      So the solve's axis is 414 passes (B39: as many passes as the gate needs). The new rule's runs are not the old
+#      rule's (the rest now passes a full body at once, where the old rule queued it): the 414-pass run's plains 33.69
+#      against the old rule's 35.04 %.
+#
+# THE BAND (the belts' design L0; ruling B23): the old envelope also held every height inside the body's band (`relief_bound_m(0)`), which the far tile
+# reach, the client's ladder reach, the shadow casters' reach and the air's floor read as the ground's bound. Without it:
+#   body                 band at rung 0       the solved field over the body's radius   the datum
+#   the home planet      +-9 246 m            -9 862 .. +12 019 m (2 773 m over, 616 m under)   3 483 m (the sea)
+#   the home moon        +-12 385 m           -20 540 .. +14 776 m (2 391 m over, 8 155 m under)  0 m (the ladder's)
+#   the desert world     +-6 890 m            -6 622 .. +6 182 m (inside)                0 m (the ladder's)
+# The near ground is never cut (no reader clips a column); a far peak over the band can be fetched late (a pop at the
+# edge of sight), a tall far caster can miss its shadow, and the air under the floor in the deepest dry basins is wrong.
+# ★ AND IT IS VISIBLE (MEASURED 2026-10-04 on the pictures' own probe, `home_mountains_high_near`): every block on the
+# skyline is a rung-6 wall at one distance (21–24 km) standing 10 060 to 10 950 m over the body's radius, all of it over
+# the sample box's band top (+9 310 m): a halo cell over the top is air while the core cells read the ground, so each chunk
+# meshes a wall on its own edges and two neighbours disagree on their shared vertices (the cracks); the ladder builds no
+# chunk layer over the band (the lids). THREE CURES for the owner: (1) the top from the law (the datum the realm states
+# plus the relief cap plus the fine relief's bound, no new data) with the bottom from (2) or (3); (2) both ends from the
+# artifact, each host scanning the artifact it already holds — NO NEW DATA CROSSES; (3) both ends stated in the artifact's
+# head (an SL6 ask).
+#
+# Below: every case's full readout, the lake census, the artifact pin, and the stands tool.
+
+################ census_phase2 ################
+THE BELTS' BENCH (rulings B37, B38), generator 24; the cases: ["phase2"]
+
+== CASE phase2 (Laws { wedge: true, landscape_time: true, craters_at_own_age: true, water_paths: true }, 214 passes, 2 sweeps a routing): solved in 1361.7 s
+  the pass ledger: /private/tmp/claude-501/-Users-maxim-Projects-my-voxeldust--claude-worktrees-game/bd541c76-eaa9-41bb-9339-bca4b8f9a790/scratchpad/phase2/ledger/phase2.csv (214 passes)
+CONTROL the copy with every law as the game runs it: digest [0xe033ae9081f01680, 0x8ccaae2eb5b330f7] MATCHES the release gate's pin
+  THE BELTS' LAW (the critical wedges): 417241 nodes rise (95693 in collisions, 321548 at Andean margins, 337141 on a plateau at the end); the plates' turnover 225 Myr; the windows the risen nodes read at 10/50/90 %: 10.0 / 88.3 / 163.3 Myr; the rock raised by the end: collisions 2.120e16 m³, Andean margins 6.790e16 m³
+  THE PEAK LAW: 30 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  24.16 % | plains 29.59 tablelands 65.07 hills 0.01 mountains  5.33 % | relief p50  175 p90  736 p99  2389 m | land over 1 000 m 30.49 %
+  away from closed basins            land 100.00 % | plains 29.02 tablelands 65.41 hills 0.01 mountains  5.56 % | relief p50  176 p90  757 p99  2432 m | land over 1 000 m 32.73 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 173 / 1038 m; land with Rz over 1 000 m 1.13 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 29.31 tablelands 64.55 hills 0.01 mountains  6.14 % | relief p50  174 p90  773 p99  2612 m | land over 1 000 m 33.51 %
+  THE CRATERS STAMPED: 368 (G-CRATER: about 190 known on Earth); diameters at 50 / 90 / 100 %: 24 / 60 / 677 km
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   6.90 % | mountains   2.27 % of it |   2.93 % of all mountains
+    crater               land   1.44 % | mountains   4.45 % of it |   1.20 % of all mountains
+    collision belt       land   3.26 % | mountains  38.76 % of it |  23.68 % of all mountains
+    Andean belt          land   5.84 % | mountains  12.07 % of it |  13.21 % of all mountains
+    belt by the room     land   2.20 % | mountains   0.14 % of it |   0.06 % of all mountains
+    widened plateau      land  10.08 % | mountains  29.89 % of it |  56.51 % of all mountains
+    old plains           land  70.29 % | mountains   0.18 % of it |   2.41 % of all mountains
+    the widened plateau by its margin — collision: land 1.29 %, mountains 45.71 % of it, mean 2955 m | Andean: land 8.79 %, mountains 27.57 % of it, mean 2184 m | the room's: land 0.00 %
+  THE LAND'S HEIGHT BY CAUSE (over the sea: mean / median; the share over 1 000 m; Earth's old plains 485 / 349 m, 13 %):
+    closed basin's wall    -356 /   -251 m |   0.21 % over 1 000 m
+    crater                  762 /    327 m |  20.70 % over 1 000 m
+    collision belt         2212 /   2293 m |  79.30 % over 1 000 m
+    Andean belt            1466 /   1088 m |  53.03 % over 1 000 m
+    belt by the room        623 /    557 m |  14.13 % over 1 000 m
+    widened plateau        2283 /   2173 m |  78.19 % over 1 000 m
+    old plains              611 /    361 m |  23.20 % over 1 000 m
+  THE SLOPES BY CAUSE (the steepest slope to a land neighbour at 50 / 90 % of the cause's land; Earth's young belts 3.2 / 9.4 %):
+    closed basin's wall    1.3 /   4.0 %
+    crater                 1.3 /   5.1 %
+    collision belt         6.5 /  15.5 %
+    Andean belt            4.4 /   8.6 %
+    belt by the room       1.5 /   3.4 %
+    widened plateau        5.3 /  16.7 %
+    old plains             1.0 /   2.9 %
+  THE BELTS' MOUNTAINS BY HEIGHT (collision, Andean, widened plateau) at 0–1 / 1–2 / 2–3 / 3–4 / over 4 km: 2.6 / 22.1 / 33.2 / 43.0 / 66.8 % of each band (Earth's young belts 2.7 / 10.8 / 33.1 / 36.0 / 14.4 %); the bands' share of the belts' land 29.2 / 24.1 / 23.0 / 15.1 / 8.7 %
+  THE DRAINAGE of the belts (collision and Andean): 82.2 % of the land drains to the sea, 20.4 % passes a standing lake on its way; the mean rain 349 mm/yr
+  THE DRAINAGE of the plateaus: 76.3 % of the land drains to the sea, 27.2 % passes a standing lake on its way; the mean rain 278 mm/yr
+  THE DRAINAGE of the old plains: 69.6 % of the land drains to the sea, 27.1 % passes a standing lake on its way; the mean rain 372 mm/yr
+  THE DRAINAGE of all the land: 67.0 % of the land drains to the sea, 31.5 % passes a standing lake on its way; the mean rain 372 mm/yr
+  THE LANDSCAPE'S TIME (B45): each plate with land — its raise, Myr ago; its land, million km²; the land's mean height; the old plains' mean height:
+    plate 12: raised     9 Myr ago | land   0.45 million km² | mean   732 m | old plains   732 m on  0.45 million km²
+    plate  4: raised    51 Myr ago | land   0.71 million km² | mean   506 m | old plains   231 m on  0.16 million km²
+    plate 10: raised   223 Myr ago | land  20.06 million km² | mean  1014 m | old plains  1051 m on 18.19 million km²
+    plate  9: raised   407 Myr ago | land   0.13 million km² | mean  1748 m | old plains     0 m on  0.00 million km²
+    plate  0: raised   583 Myr ago | land  10.58 million km² | mean  1479 m | old plains  1171 m on  8.03 million km²
+    plate 11: raised   839 Myr ago | land   0.05 million km² | mean   547 m | old plains    25 m on  0.00 million km²
+    plate  7: raised  1153 Myr ago | land   5.84 million km² | mean   259 m | old plains   166 m on  3.96 million km²
+    plate  1: raised  1393 Myr ago | land  12.34 million km² | mean  1200 m | old plains   275 m on  5.93 million km²
+    plate  8: raised  1439 Myr ago | land   2.86 million km² | mean  1076 m | old plains   138 m on  1.29 million km²
+    plate 13: raised  1788 Myr ago | land  26.21 million km² | mean   497 m | old plains   332 m on 20.53 million km²
+    plate  5: raised  2628 Myr ago | land  35.63 million km² | mean   510 m | old plains   529 m on 25.42 million km²
+    plate  2: raised  2804 Myr ago | land   7.26 million km² | mean  1698 m | old plains   450 m on  1.86 million km²
+  THE BELTS' LAND (the folded belt's rock): 14.17 million km²; height over the sea at 50 / 90 / 100 %: 1070 / 3334 / 7708 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 52.15 / 30.78 / 14.91 / 0.94 %
+    of it, the collisions': 4.00 million km²; height over the sea at 50 / 90 / 100 %: 2285 / 3689 / 7708 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 79.21 / 57.51 / 27.06 / 1.30 %
+    of it, the Andean margins': 7.20 million km²; height over the sea at 50 / 90 / 100 %: 1106 / 3341 / 6235 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 53.33 / 28.42 / 14.23 / 1.13 %
+    of it, the room's: 2.96 million km²; height over the sea at 50 / 90 / 100 %: 517 / 1071 / 3507 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 12.80 / 0.46 / 0.19 / 0.00 %
+
+################ census_water ################
+THE BELTS' BENCH (rulings B37, B38), generator 24; the cases: ["phase2-water"]
+
+== CASE phase2-water (Laws { wedge: true, landscape_time: true, craters_at_own_age: true, water_paths: false }, 214 passes, 2 sweeps a routing): solved in 1010.9 s
+  THE BELTS' LAW (the critical wedges): 417241 nodes rise (95693 in collisions, 321548 at Andean margins, 337141 on a plateau at the end); the plates' turnover 225 Myr; the windows the risen nodes read at 10/50/90 %: 10.0 / 88.3 / 163.3 Myr; the rock raised by the end: collisions 2.120e16 m³, Andean margins 6.790e16 m³
+  THE PEAK LAW: 24 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  24.37 % | plains 26.52 tablelands 67.86 hills 0.00 mountains  5.61 % | relief p50  165 p90  758 p99  2653 m | land over 1 000 m 24.76 %
+  away from closed basins            land 100.00 % | plains 25.75 tablelands 68.91 hills 0.00 mountains  5.33 % | relief p50  167 p90  747 p99  2338 m | land over 1 000 m 25.21 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 155 / 1045 m; land with Rz over 1 000 m 1.15 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 25.85 tablelands 68.28 hills 0.00 mountains  5.87 % | relief p50  166 p90  765 p99  2514 m | land over 1 000 m 26.02 %
+  THE CRATERS STAMPED: 368 (G-CRATER: about 190 known on Earth); diameters at 50 / 90 / 100 %: 24 / 60 / 677 km
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   1.84 % | mountains  20.66 % of it |   6.77 % of all mountains
+    crater               land   1.79 % | mountains   2.37 % of it |   0.76 % of all mountains
+    collision belt       land   3.23 % | mountains  36.63 % of it |  21.10 % of all mountains
+    Andean belt          land   5.79 % | mountains  12.98 % of it |  13.39 % of all mountains
+    belt by the room     land   2.39 % | mountains   0.12 % of it |   0.05 % of all mountains
+    widened plateau      land   9.98 % | mountains  32.21 % of it |  57.26 % of all mountains
+    old plains           land  74.96 % | mountains   0.05 % of it |   0.66 % of all mountains
+    the widened plateau by its margin — collision: land 1.28 %, mountains 49.67 % of it, mean 2788 m | Andean: land 8.70 %, mountains 29.64 % of it, mean 2106 m | the room's: land 0.00 %
+  THE LAND'S HEIGHT BY CAUSE (over the sea: mean / median; the share over 1 000 m; Earth's old plains 485 / 349 m, 13 %):
+    closed basin's wall    -821 /    -24 m |   0.54 % over 1 000 m
+    crater                  567 /    326 m |  12.02 % over 1 000 m
+    collision belt         2167 /   2261 m |  79.26 % over 1 000 m
+    Andean belt            1445 /   1060 m |  52.18 % over 1 000 m
+    belt by the room        608 /    545 m |  13.94 % over 1 000 m
+    widened plateau        2194 /   2027 m |  77.28 % over 1 000 m
+    old plains              467 /    297 m |  14.54 % over 1 000 m
+  THE SLOPES BY CAUSE (the steepest slope to a land neighbour at 50 / 90 % of the cause's land; Earth's young belts 3.2 / 9.4 %):
+    closed basin's wall    0.5 /  43.2 %
+    crater                 1.2 /   4.4 %
+    collision belt         6.4 /  14.7 %
+    Andean belt            4.4 /   8.8 %
+    belt by the room       1.4 /   3.0 %
+    widened plateau        6.1 /  16.5 %
+    old plains             1.0 /   2.8 %
+  THE BELTS' MOUNTAINS BY HEIGHT (collision, Andean, widened plateau) at 0–1 / 1–2 / 2–3 / 3–4 / over 4 km: 3.1 / 20.2 / 34.9 / 51.3 / 76.3 % of each band (Earth's young belts 2.7 / 10.8 / 33.1 / 36.0 / 14.4 %); the bands' share of the belts' land 30.0 / 25.5 / 22.9 / 13.7 / 7.8 %
+  THE DRAINAGE of the belts (collision and Andean): 87.6 % of the land drains to the sea, 17.6 % passes a standing lake on its way; the mean rain 352 mm/yr
+  THE DRAINAGE of the plateaus: 89.8 % of the land drains to the sea, 23.7 % passes a standing lake on its way; the mean rain 283 mm/yr
+  THE DRAINAGE of the old plains: 81.7 % of the land drains to the sea, 22.3 % passes a standing lake on its way; the mean rain 378 mm/yr
+  THE DRAINAGE of all the land: 81.2 % of the land drains to the sea, 24.5 % passes a standing lake on its way; the mean rain 382 mm/yr
+  THE LANDSCAPE'S TIME (B45): each plate with land — its raise, Myr ago; its land, million km²; the land's mean height; the old plains' mean height:
+    plate 12: raised     9 Myr ago | land   0.45 million km² | mean   731 m | old plains   731 m on  0.45 million km²
+    plate  4: raised    51 Myr ago | land   0.70 million km² | mean   548 m | old plains   251 m on  0.15 million km²
+    plate 10: raised   223 Myr ago | land  20.05 million km² | mean   879 m | old plains   903 m on 18.21 million km²
+    plate  9: raised   407 Myr ago | land   0.13 million km² | mean  1694 m | old plains     0 m on  0.00 million km²
+    plate  0: raised   583 Myr ago | land  10.60 million km² | mean  1379 m | old plains  1045 m on  8.07 million km²
+    plate 11: raised   839 Myr ago | land   0.05 million km² | mean   538 m | old plains     8 m on  0.00 million km²
+    plate  7: raised  1153 Myr ago | land   5.86 million km² | mean   265 m | old plains   152 m on  4.27 million km²
+    plate  1: raised  1393 Myr ago | land  12.01 million km² | mean  1210 m | old plains   281 m on  5.74 million km²
+    plate  8: raised  1439 Myr ago | land   2.88 million km² | mean  1003 m | old plains   146 m on  1.34 million km²
+    plate 13: raised  1788 Myr ago | land  26.82 million km² | mean   428 m | old plains   241 m on 22.91 million km²
+    plate  5: raised  2628 Myr ago | land  36.36 million km² | mean   397 m | old plains   309 m on 29.32 million km²
+    plate  2: raised  2804 Myr ago | land   7.23 million km² | mean  1673 m | old plains   447 m on  1.86 million km²
+  THE BELTS' LAND (the folded belt's rock): 14.17 million km²; height over the sea at 50 / 90 / 100 %: 1061 / 3253 / 7337 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 51.97 / 29.90 / 13.92 / 0.80 %
+    of it, the collisions': 4.00 million km²; height over the sea at 50 / 90 / 100 %: 2248 / 3602 / 7337 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 79.27 / 56.86 / 26.10 / 0.56 %
+    of it, the Andean margins': 7.20 million km²; height over the sea at 50 / 90 / 100 %: 1078 / 3254 / 6202 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 52.50 / 27.06 / 12.84 / 1.26 %
+    of it, the room's: 2.97 million km²; height over the sea at 50 / 90 / 100 %: 539 / 1098 / 3501 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 13.87 / 0.47 / 0.09 / 0.00 %
+
+################ census_lt ################
+THE BELTS' BENCH (rulings B37, B38), generator 24; the cases: ["phase2-lt"]
+
+== CASE phase2-lt (Laws { wedge: true, landscape_time: false, craters_at_own_age: true, water_paths: true }, 214 passes, 2 sweeps a routing): solved in 1447.4 s
+  THE BELTS' LAW (the critical wedges): 417241 nodes rise (95693 in collisions, 321548 at Andean margins, 337141 on a plateau at the end); the plates' turnover 225 Myr; the windows the risen nodes read at 10/50/90 %: 10.0 / 88.3 / 163.3 Myr; the rock raised by the end: collisions 2.120e16 m³, Andean margins 6.790e16 m³
+  THE PEAK LAW: 1126814 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  16.04 % | plains 52.17 tablelands 40.58 hills 0.01 mountains  7.24 % | relief p50   80 p90  861 p99  2827 m | land over 1 000 m 20.68 %
+  away from closed basins            land 100.00 % | plains 50.41 tablelands 41.64 hills 0.01 mountains  7.95 % | relief p50   88 p90  908 p99  2892 m | land over 1 000 m 23.03 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 259 / 1169 m; land with Rz over 1 000 m 1.80 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 50.52 tablelands 40.56 hills 0.01 mountains  8.91 % | relief p50   87 p90  951 p99  3058 m | land over 1 000 m 24.19 %
+  THE CRATERS STAMPED: 1610 (G-CRATER: about 190 known on Earth); diameters at 50 / 90 / 100 %: 33 / 101 / 6342 km
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land  10.26 % | mountains   1.09 % of it |   1.54 % of all mountains
+    crater               land  29.71 % | mountains   6.70 % of it |  27.47 % of all mountains
+    collision belt       land   4.17 % | mountains  40.32 % of it |  23.19 % of all mountains
+    Andean belt          land   6.77 % | mountains   9.32 % of it |   8.72 % of all mountains
+    belt by the room     land   3.06 % | mountains   0.15 % of it |   0.06 % of all mountains
+    widened plateau      land   9.18 % | mountains  30.54 % of it |  38.73 % of all mountains
+    old plains           land  36.83 % | mountains   0.06 % of it |   0.29 % of all mountains
+    the widened plateau by its margin — collision: land 0.44 %, mountains 57.97 % of it, mean 2775 m | Andean: land 8.75 %, mountains 29.17 % of it, mean 2069 m | the room's: land 0.00 %
+  THE LAND'S HEIGHT BY CAUSE (over the sea: mean / median; the share over 1 000 m; Earth's old plains 485 / 349 m, 13 %):
+    closed basin's wall    -200 /    -20 m |   0.08 % over 1 000 m
+    crater                  742 /    164 m |  23.38 % over 1 000 m
+    collision belt         2158 /   2222 m |  76.77 % over 1 000 m
+    Andean belt            1195 /    881 m |  45.16 % over 1 000 m
+    belt by the room        407 /    328 m |   9.06 % over 1 000 m
+    widened plateau        2103 /   1772 m |  69.82 % over 1 000 m
+    old plains              159 /     71 m |   2.10 % over 1 000 m
+  THE SLOPES BY CAUSE (the steepest slope to a land neighbour at 50 / 90 % of the cause's land; Earth's young belts 3.2 / 9.4 %):
+    closed basin's wall    0.3 /   3.0 %
+    crater                 0.7 /   6.6 %
+    collision belt         6.3 /  15.6 %
+    Andean belt            3.8 /   8.0 %
+    belt by the room       1.2 /   2.8 %
+    widened plateau        5.2 /  20.5 %
+    old plains             0.3 /   1.4 %
+  THE BELTS' MOUNTAINS BY HEIGHT (collision, Andean, widened plateau) at 0–1 / 1–2 / 2–3 / 3–4 / over 4 km: 4.8 / 19.6 / 35.8 / 59.5 / 68.1 % of each band (Earth's young belts 2.7 / 10.8 / 33.1 / 36.0 / 14.4 %); the bands' share of the belts' land 37.0 / 24.8 / 19.7 / 9.9 / 8.6 %
+  THE DRAINAGE of the belts (collision and Andean): 89.0 % of the land drains to the sea, 23.2 % passes a standing lake on its way; the mean rain 414 mm/yr
+  THE DRAINAGE of the plateaus: 95.3 % of the land drains to the sea, 41.1 % passes a standing lake on its way; the mean rain 402 mm/yr
+  THE DRAINAGE of the old plains: 92.1 % of the land drains to the sea, 33.0 % passes a standing lake on its way; the mean rain 607 mm/yr
+  THE DRAINAGE of all the land: 83.4 % of the land drains to the sea, 28.4 % passes a standing lake on its way; the mean rain 453 mm/yr
+  THE LANDSCAPE'S TIME (B45): each plate with land — its raise, Myr ago; its land, million km²; the land's mean height; the old plains' mean height:
+    plate  0: raised  5000 Myr ago | land   4.72 million km² | mean   908 m | old plains   135 m on  0.60 million km²
+    plate  1: raised  5000 Myr ago | land  11.35 million km² | mean  1276 m | old plains   366 m on  4.29 million km²
+    plate  2: raised  5000 Myr ago | land   9.79 million km² | mean  1287 m | old plains   295 m on  2.98 million km²
+    plate  4: raised  5000 Myr ago | land   0.85 million km² | mean   333 m | old plains   147 m on  0.25 million km²
+    plate  5: raised  5000 Myr ago | land  17.69 million km² | mean   356 m | old plains   101 m on 10.12 million km²
+    plate  7: raised  5000 Myr ago | land   3.95 million km² | mean   204 m | old plains    77 m on  1.91 million km²
+    plate  8: raised  5000 Myr ago | land   2.53 million km² | mean  1227 m | old plains   106 m on  0.63 million km²
+    plate  9: raised  5000 Myr ago | land   0.17 million km² | mean  1630 m | old plains   387 m on  0.03 million km²
+    plate 10: raised  5000 Myr ago | land  13.07 million km² | mean    40 m | old plains   107 m on  8.80 million km²
+    plate 11: raised  5000 Myr ago | land   0.08 million km² | mean   507 m | old plains    30 m on  0.01 million km²
+    plate 12: raised  5000 Myr ago | land   0.02 million km² | mean    52 m | old plains     0 m on  0.00 million km²
+    plate 13: raised  5000 Myr ago | land  16.84 million km² | mean   522 m | old plains    23 m on  0.24 million km²
+  THE BELTS' LAND (the folded belt's rock): 13.84 million km²; height over the sea at 50 / 90 / 100 %: 1005 / 3119 / 7652 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 50.02 / 28.12 / 12.13 / 0.69 %
+    of it, the collisions': 3.98 million km²; height over the sea at 50 / 90 / 100 %: 2211 / 3636 / 7327 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 77.59 / 55.19 / 26.76 / 0.87 %
+    of it, the Andean margins': 7.14 million km²; height over the sea at 50 / 90 / 100 %: 1024 / 2878 / 7652 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 50.48 / 23.72 / 8.60 / 0.85 %
+    of it, the room's: 2.72 million km²; height over the sea at 50 / 90 / 100 %: 301 / 948 / 1628 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 8.42 / 0.00 / 0.00 / 0.00 %
+
+################ census_craters ################
+THE BELTS' BENCH (rulings B37, B38), generator 24; the cases: ["phase2-craters"]
+
+== CASE phase2-craters (Laws { wedge: true, landscape_time: true, craters_at_own_age: false, water_paths: true }, 214 passes, 2 sweeps a routing): solved in 1259.9 s
+  THE BELTS' LAW (the critical wedges): 417241 nodes rise (95693 in collisions, 321548 at Andean margins, 337141 on a plateau at the end); the plates' turnover 225 Myr; the windows the risen nodes read at 10/50/90 %: 10.0 / 88.3 / 163.3 Myr; the rock raised by the end: collisions 2.120e16 m³, Andean margins 6.790e16 m³
+  THE PEAK LAW: 36693142 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 976 m
+  all land                           land  25.70 % | plains 34.74 tablelands 58.33 hills 0.01 mountains  6.92 % | relief p50  169 p90  830 p99  2986 m | land over 1 000 m 25.50 %
+  away from closed basins            land 100.00 % | plains 34.97 tablelands 57.98 hills 0.01 mountains  7.05 % | relief p50  164 p90  843 p99  2927 m | land over 1 000 m 26.85 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 191 / 1032 m; land with Rz over 1 000 m 1.12 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 35.13 tablelands 57.28 hills 0.01 mountains  7.58 % | relief p50  161 p90  863 p99  3068 m | land over 1 000 m 27.69 %
+  THE CRATERS STAMPED: 1610 (G-CRATER: about 190 known on Earth); diameters at 50 / 90 / 100 %: 33 / 101 / 6342 km
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   5.28 % | mountains   4.65 % of it |   3.55 % of all mountains
+    crater               land  32.69 % | mountains   9.50 % of it |  44.85 % of all mountains
+    collision belt       land   2.59 % | mountains  41.95 % of it |  15.70 % of all mountains
+    Andean belt          land   4.26 % | mountains  10.75 % of it |   6.62 % of all mountains
+    belt by the room     land   2.08 % | mountains   0.13 % of it |   0.04 % of all mountains
+    widened plateau      land   5.77 % | mountains  33.79 % of it |  28.19 % of all mountains
+    old plains           land  47.32 % | mountains   0.15 % of it |   1.06 % of all mountains
+    the widened plateau by its margin — collision: land 0.27 %, mountains 62.07 % of it, mean 2879 m | Andean: land 5.50 %, mountains 32.39 % of it, mean 2100 m | the room's: land 0.00 %
+  THE LAND'S HEIGHT BY CAUSE (over the sea: mean / median; the share over 1 000 m; Earth's old plains 485 / 349 m, 13 %):
+    closed basin's wall    -737 /   -355 m |   1.18 % over 1 000 m
+    crater                  951 /    404 m |  27.25 % over 1 000 m
+    collision belt         2291 /   2407 m |  80.45 % over 1 000 m
+    Andean belt            1288 /    906 m |  46.11 % over 1 000 m
+    belt by the room        698 /    630 m |  19.98 % over 1 000 m
+    widened plateau        2137 /   1909 m |  73.11 % over 1 000 m
+    old plains              463 /    226 m |  16.57 % over 1 000 m
+  THE SLOPES BY CAUSE (the steepest slope to a land neighbour at 50 / 90 % of the cause's land; Earth's young belts 3.2 / 9.4 %):
+    closed basin's wall    2.2 /   4.8 %
+    crater                 1.5 /   7.7 %
+    collision belt         6.8 /  15.5 %
+    Andean belt            3.9 /   8.2 %
+    belt by the room       1.8 /   4.0 %
+    widened plateau        5.4 /  20.2 %
+    old plains             0.6 /   2.5 %
+  THE BELTS' MOUNTAINS BY HEIGHT (collision, Andean, widened plateau) at 0–1 / 1–2 / 2–3 / 3–4 / over 4 km: 1.8 / 21.9 / 38.7 / 61.3 / 76.3 % of each band (Earth's young belts 2.7 / 10.8 / 33.1 / 36.0 / 14.4 %); the bands' share of the belts' land 34.5 / 24.2 / 21.3 / 11.7 / 8.3 %
+  THE DRAINAGE of the belts (collision and Andean): 87.1 % of the land drains to the sea, 20.4 % passes a standing lake on its way; the mean rain 405 mm/yr
+  THE DRAINAGE of the plateaus: 93.9 % of the land drains to the sea, 34.4 % passes a standing lake on its way; the mean rain 396 mm/yr
+  THE DRAINAGE of the old plains: 85.5 % of the land drains to the sea, 23.9 % passes a standing lake on its way; the mean rain 588 mm/yr
+  THE DRAINAGE of all the land: 80.6 % of the land drains to the sea, 22.8 % passes a standing lake on its way; the mean rain 456 mm/yr
+  THE LANDSCAPE'S TIME (B45): each plate with land — its raise, Myr ago; its land, million km²; the land's mean height; the old plains' mean height:
+    plate 12: raised     9 Myr ago | land   0.52 million km² | mean   707 m | old plains   762 m on  0.45 million km²
+    plate  4: raised    51 Myr ago | land   1.51 million km² | mean   181 m | old plains   237 m on  0.22 million km²
+    plate 10: raised   223 Myr ago | land  20.14 million km² | mean   905 m | old plains  1023 m on 16.96 million km²
+    plate  9: raised   407 Myr ago | land   0.14 million km² | mean  1749 m | old plains   130 m on  0.01 million km²
+    plate  0: raised   583 Myr ago | land   9.08 million km² | mean  1330 m | old plains   877 m on  1.93 million km²
+    plate 11: raised   839 Myr ago | land   0.09 million km² | mean   481 m | old plains    18 m on  0.01 million km²
+    plate  7: raised  1153 Myr ago | land   6.35 million km² | mean   287 m | old plains   212 m on  4.67 million km²
+    plate  1: raised  1393 Myr ago | land  22.50 million km² | mean   707 m | old plains   168 m on 15.34 million km²
+    plate  8: raised  1439 Myr ago | land   4.08 million km² | mean   837 m | old plains   131 m on  2.20 million km²
+    plate 13: raised  1788 Myr ago | land  26.36 million km² | mean   738 m | old plains   100 m on  1.12 million km²
+    plate  5: raised  2628 Myr ago | land  26.46 million km² | mean   430 m | old plains   293 m on 13.26 million km²
+    plate  2: raised  2804 Myr ago | land  12.66 million km² | mean  1050 m | old plains   214 m on  5.30 million km²
+  THE BELTS' LAND (the folded belt's rock): 14.22 million km²; height over the sea at 50 / 90 / 100 %: 1103 / 3412 / 8842 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 53.50 / 31.27 / 16.23 / 1.19 %
+    of it, the collisions': 3.99 million km²; height over the sea at 50 / 90 / 100 %: 2400 / 3819 / 7251 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 80.95 / 61.12 / 31.19 / 1.09 %
+    of it, the Andean margins': 7.20 million km²; height over the sea at 50 / 90 / 100 %: 1077 / 3368 / 8842 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 52.74 / 27.58 / 14.75 / 1.74 %
+    of it, the room's: 3.03 million km²; height over the sea at 50 / 90 / 100 %: 594 / 1234 / 3504 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 19.08 / 0.66 / 0.02 / 0.00 %
+
+################ census_wedge ################
+THE BELTS' BENCH (rulings B37, B38), generator 24; the cases: ["phase2-wedge"]
+
+== CASE phase2-wedge (Laws { wedge: false, landscape_time: true, craters_at_own_age: true, water_paths: true }, 214 passes, 2 sweeps a routing): solved in 1171.1 s
+  THE PEAK LAW: 0 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  25.24 % | plains 52.15 tablelands 47.62 hills 0.00 mountains  0.23 % | relief p50   83 p90  346 p99   776 m | land over 1 000 m 18.50 %
+  away from closed basins            land 100.00 % | plains 52.44 tablelands 47.48 hills 0.00 mountains  0.08 % | relief p50   82 p90  335 p99   702 m | land over 1 000 m 19.19 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 0 / 132 m; land with Rz over 1 000 m 0.02 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 52.45 tablelands 47.46 hills 0.00 mountains  0.09 % | relief p50   82 p90  335 p99   707 m | land over 1 000 m 19.30 %
+  THE CRATERS STAMPED: 396 (G-CRATER: about 190 known on Earth); diameters at 50 / 90 / 100 %: 23 / 54 / 677 km
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.65 % | mountains   4.14 % of it |  66.21 % of all mountains
+    crater               land   1.42 % | mountains   1.58 % of it |   9.86 % of all mountains
+    collision belt       land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    Andean belt          land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    belt by the room     land   8.37 % | mountains   0.00 % of it |   0.04 % of all mountains
+    widened plateau      land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    old plains           land  86.55 % | mountains   0.06 % of it |  23.89 % of all mountains
+    the widened plateau by its margin — collision: land 0.00 %, mountains 0.00 % of it, mean 0 m | Andean: land 0.00 %, mountains 0.00 % of it, mean 0 m | the room's: land 0.00 %
+  THE LAND'S HEIGHT BY CAUSE (over the sea: mean / median; the share over 1 000 m; Earth's old plains 485 / 349 m, 13 %):
+    closed basin's wall    -365 /    -81 m |   0.12 % over 1 000 m
+    crater                  542 /    284 m |  10.49 % over 1 000 m
+    belt by the room        229 /    101 m |   4.79 % over 1 000 m
+    old plains              555 /    261 m |  20.73 % over 1 000 m
+  THE SLOPES BY CAUSE (the steepest slope to a land neighbour at 50 / 90 % of the cause's land; Earth's young belts 3.2 / 9.4 %):
+    closed basin's wall    1.0 /   5.5 %
+    crater                 1.0 /   2.3 %
+    belt by the room       0.4 /   1.8 %
+    old plains             0.7 /   2.5 %
+  THE BELTS' MOUNTAINS BY HEIGHT (collision, Andean, widened plateau) at 0–1 / 1–2 / 2–3 / 3–4 / over 4 km: 0.0 / 0.0 / 0.0 / 0.0 / 0.0 % of each band (Earth's young belts 2.7 / 10.8 / 33.1 / 36.0 / 14.4 %); the bands' share of the belts' land 0.0 / 0.0 / 0.0 / 0.0 / 0.0 %
+  THE DRAINAGE of the old plains: 79.5 % of the land drains to the sea, 28.0 % passes a standing lake on its way; the mean rain 427 mm/yr
+  THE DRAINAGE of all the land: 79.0 % of the land drains to the sea, 27.7 % passes a standing lake on its way; the mean rain 441 mm/yr
+  THE LANDSCAPE'S TIME (B45): each plate with land — its raise, Myr ago; its land, million km²; the land's mean height; the old plains' mean height:
+    plate 12: raised     9 Myr ago | land   0.45 million km² | mean   772 m | old plains   772 m on  0.45 million km²
+    plate  4: raised    51 Myr ago | land   0.24 million km² | mean   156 m | old plains    65 m on  0.12 million km²
+    plate 10: raised   223 Myr ago | land  20.12 million km² | mean  1041 m | old plains  1093 m on 18.31 million km²
+    plate  0: raised   583 Myr ago | land  10.51 million km² | mean  1092 m | old plains  1175 m on  9.03 million km²
+    plate 11: raised   839 Myr ago | land   0.01 million km² | mean    34 m | old plains    35 m on  0.01 million km²
+    plate  7: raised  1153 Myr ago | land   6.39 million km² | mean   160 m | old plains   178 m on  5.79 million km²
+    plate  1: raised  1393 Myr ago | land  20.67 million km² | mean    49 m | old plains    57 m on 16.93 million km²
+    plate  8: raised  1439 Myr ago | land   3.81 million km² | mean    66 m | old plains    80 m on  2.94 million km²
+    plate 13: raised  1788 Myr ago | land  29.56 million km² | mean   268 m | old plains   316 m on 26.08 million km²
+    plate  5: raised  2628 Myr ago | land  34.01 million km² | mean   587 m | old plains   662 m on 29.91 million km²
+    plate  2: raised  2804 Myr ago | land   1.79 million km² | mean    36 m | old plains    50 m on  0.84 million km²
+  THE BELTS' LAND (the folded belt's rock): 10.90 million km²; height over the sea at 50 / 90 / 100 %: 90 / 525 / 2675 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 4.70 / 0.88 / 0.00 / 0.00 %
+    of it, the room's: 10.90 million km²; height over the sea at 50 / 90 / 100 %: 90 / 525 / 2675 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 4.70 / 0.88 / 0.00 / 0.00 %
+
+################ census_fine ################
+THE BELTS' BENCH (rulings B37, B38), generator 24; the cases: ["phase2~fine"]
+
+== CASE phase2~fine (Laws { wedge: true, landscape_time: true, craters_at_own_age: true, water_paths: true }, 414 passes, 2 sweeps a routing): solved in 1897.2 s
+  THE BELTS' LAW (the critical wedges): 417241 nodes rise (95693 in collisions, 321548 at Andean margins, 337141 on a plateau at the end); the plates' turnover 225 Myr; the windows the risen nodes read at 10/50/90 %: 10.0 / 88.3 / 163.3 Myr; the rock raised by the end: collisions 2.120e16 m³, Andean margins 6.790e16 m³
+  THE PEAK LAW: 149 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  23.80 % | plains 35.30 tablelands 60.15 hills 0.00 mountains  4.56 % | relief p50  147 p90  695 p99  2209 m | land over 1 000 m 28.62 %
+  away from closed basins            land 100.00 % | plains 33.87 tablelands 61.47 hills 0.00 mountains  4.66 % | relief p50  154 p90  712 p99  2233 m | land over 1 000 m 30.31 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.2 Myr): Rz at 50 / 90 / 99 % of the land 0 / 164 / 1122 m; land with Rz over 1 000 m 1.52 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 34.01 tablelands 60.96 hills 0.00 mountains  5.04 % | relief p50  152 p90  721 p99  2315 m | land over 1 000 m 31.18 %
+  THE CRATERS STAMPED: 368 (G-CRATER: about 190 known on Earth); diameters at 50 / 90 / 100 %: 24 / 60 / 677 km
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   5.63 % | mountains   2.90 % of it |   3.58 % of all mountains
+    crater               land   1.46 % | mountains   2.29 % of it |   0.73 % of all mountains
+    collision belt       land   3.30 % | mountains  25.14 % of it |  18.22 % of all mountains
+    Andean belt          land   5.92 % | mountains  12.90 % of it |  16.76 % of all mountains
+    belt by the room     land   2.38 % | mountains   0.16 % of it |   0.08 % of all mountains
+    widened plateau      land  10.19 % | mountains  26.18 % of it |  58.51 % of all mountains
+    old plains           land  71.13 % | mountains   0.14 % of it |   2.11 % of all mountains
+    the widened plateau by its margin — collision: land 1.31 %, mountains 54.55 % of it, mean 2860 m | Andean: land 8.88 %, mountains 21.99 % of it, mean 2145 m | the room's: land 0.00 %
+  THE LAND'S HEIGHT BY CAUSE (over the sea: mean / median; the share over 1 000 m; Earth's old plains 485 / 349 m, 13 %):
+    closed basin's wall    -242 /   -142 m |   0.19 % over 1 000 m
+    crater                  578 /    311 m |  17.14 % over 1 000 m
+    collision belt         2116 /   2102 m |  77.65 % over 1 000 m
+    Andean belt            1326 /    952 m |  48.20 % over 1 000 m
+    belt by the room        591 /    517 m |  13.07 % over 1 000 m
+    widened plateau        2237 /   2117 m |  73.32 % over 1 000 m
+    old plains              566 /    313 m |  21.31 % over 1 000 m
+  THE SLOPES BY CAUSE (the steepest slope to a land neighbour at 50 / 90 % of the cause's land; Earth's young belts 3.2 / 9.4 %):
+    closed basin's wall    0.5 /   2.4 %
+    crater                 1.1 /   4.2 %
+    collision belt         6.1 /  11.9 %
+    Andean belt            3.8 /   8.8 %
+    belt by the room       1.6 /   3.8 %
+    widened plateau        4.9 /  15.6 %
+    old plains             0.8 /   2.7 %
+  THE BELTS' MOUNTAINS BY HEIGHT (collision, Andean, widened plateau) at 0–1 / 1–2 / 2–3 / 3–4 / over 4 km: 3.4 / 19.7 / 28.9 / 35.1 / 59.0 % of each band (Earth's young belts 2.7 / 10.8 / 33.1 / 36.0 / 14.4 %); the bands' share of the belts' land 33.6 / 22.3 / 21.1 / 13.6 / 9.3 %
+  THE DRAINAGE of the belts (collision and Andean): 83.2 % of the land drains to the sea, 13.3 % passes a standing lake on its way; the mean rain 463 mm/yr
+  THE DRAINAGE of the plateaus: 80.3 % of the land drains to the sea, 29.9 % passes a standing lake on its way; the mean rain 322 mm/yr
+  THE DRAINAGE of the old plains: 67.8 % of the land drains to the sea, 28.3 % passes a standing lake on its way; the mean rain 375 mm/yr
+  THE DRAINAGE of all the land: 67.0 % of the land drains to the sea, 31.1 % passes a standing lake on its way; the mean rain 389 mm/yr
+  THE LANDSCAPE'S TIME (B45): each plate with land — its raise, Myr ago; its land, million km²; the land's mean height; the old plains' mean height:
+    plate 12: raised     9 Myr ago | land   0.45 million km² | mean   729 m | old plains   729 m on  0.45 million km²
+    plate  4: raised    51 Myr ago | land   0.72 million km² | mean   470 m | old plains   237 m on  0.16 million km²
+    plate 10: raised   223 Myr ago | land  20.00 million km² | mean  1028 m | old plains  1073 m on 18.15 million km²
+    plate  9: raised   407 Myr ago | land   0.13 million km² | mean  2168 m | old plains     0 m on  0.00 million km²
+    plate  0: raised   583 Myr ago | land  10.52 million km² | mean  1517 m | old plains  1218 m on  7.98 million km²
+    plate 11: raised   839 Myr ago | land   0.05 million km² | mean   508 m | old plains    12 m on  0.00 million km²
+    plate  7: raised  1153 Myr ago | land   5.68 million km² | mean   218 m | old plains   149 m on  4.00 million km²
+    plate  1: raised  1393 Myr ago | land  12.42 million km² | mean  1138 m | old plains   291 m on  6.02 million km²
+    plate  8: raised  1439 Myr ago | land   2.70 million km² | mean  1161 m | old plains   157 m on  1.16 million km²
+    plate 13: raised  1788 Myr ago | land  24.70 million km² | mean   460 m | old plains   281 m on 20.34 million km²
+    plate  5: raised  2628 Myr ago | land  35.71 million km² | mean   433 m | old plains   389 m on 25.44 million km²
+    plate  2: raised  2804 Myr ago | land   7.22 million km² | mean  1653 m | old plains   384 m on  1.86 million km²
+  THE BELTS' LAND (the folded belt's rock): 14.17 million km²; height over the sea at 50 / 90 / 100 %: 974 / 3252 / 8831 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 49.14 / 27.74 / 13.25 / 0.23 %
+    of it, the collisions': 4.00 million km²; height over the sea at 50 / 90 / 100 %: 2095 / 3688 / 8831 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 77.51 / 52.65 / 26.11 / 0.71 %
+    of it, the Andean margins': 7.20 million km²; height over the sea at 50 / 90 / 100 %: 970 / 3119 / 6617 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 48.55 / 25.22 / 11.57 / 0.06 %
+    of it, the room's: 2.98 million km²; height over the sea at 50 / 90 / 100 %: 500 / 1074 / 3198 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 12.55 / 0.44 / 0.05 / 0.00 %
+
+################ the lake census (generator 24) ################
+WORLD generator 24 artifact 9 (vd_terrain::GENERATOR_VERSION, vd_terrain::artifact::ARTIFACT_VERSION)
+the octave table (wavelength, amplitude, kind), coarsest first:
+   0:     400000 m wavelength,   4029.4 m amplitude, smooth, coarse
+   1:     200000 m wavelength,   2067.7 m amplitude, smooth, coarse
+   2:     100000 m wavelength,   1061.1 m amplitude, smooth, coarse
+   3:      50000 m wavelength,    544.5 m amplitude, smooth, coarse
+   4:      25000 m wavelength,    496.1 m amplitude, smooth, fine
+   5:      12500 m wavelength,    401.6 m amplitude, RIDGED, fine
+   6:       6250 m wavelength,    319.4 m amplitude, RIDGED, fine
+   7:       3125 m wavelength,    198.8 m amplitude, RIDGED, fine
+   8:       1563 m wavelength,     79.8 m amplitude, RIDGED, fine
+   9:        781 m wavelength,     25.1 m amplitude, RIDGED, fine
+  10:        391 m wavelength,      7.8 m amplitude, smooth, fine
+  11:        195 m wavelength,      2.5 m amplitude, smooth, fine
+  12:         98 m wavelength,      0.9 m amplitude, smooth, fine
+  13:         49 m wavelength,      0.3 m amplitude, smooth, fine
+
+step 2, the basins against the inventory (the initial land, loaded):
+  continental crust 40.0 % of the area; the platform's median 4210 m, the floor's median -5611 m: a step of 9821 m
+  the basins under the platform hold 3.075e9 km³; the inventory is 2.736e9 km³ (0.89 × the basins); Earth: 1.37e9 km³ over basins of ~1.3e9 km³ (0.99 ×)
+  the solved sea stands 3365 m: -845 m OVER the platform (Earth: the sea at the shelf edge, 29 % land on 40 % crust)
+schedule: Schedule { age_yr: 5000000000, t_min_yr: 500000, t_max_yr: 25000000, climate_every: 10, talus_passes: 8, sub_sweeps: 2 }
+solved in 1282.4 s; the peak law: 30 collapses, 0 steps left over its cap; ice: 67913 nodes under the line, thickest 3748 m, its cut summed 662800275 steps over 931 steps of time
+sweeps: first cut 0 steps over 0 nodes, last cut 237721490 steps; fills first 0 last 1937549 steps
+
+the depression hierarchy: 7811 depressions (5133 leaves); 3751 water bodies — DRY 1581 (42.1 %), PARTIAL 376 (10.0 %), SPILLING 1794 (47.8 %)
+the standing water: 45328 nodes, 2.462e6 km², 7.0843e4 km³ (0.003 % of the inventory 2.7359e9 km³); the lakes' share of the land (every node that is not the ocean) by AREA 2.017 %
+THE DOUBLE COUNT: the sea was re-solved over the inventory less the lakes: 3483 m → 3483 m (55733 → 55730 sixteenths, -3)
+THE LAKES' SEA FIXED POINT (plan question 8): 1 re-solves, the sea stood still: true; a connected sea solve re-seeded from another body: false; a connected sea solve whose ocean does not hold its own level's water (review finding 4): false
+
+craters stamped: 368; routes: 216 (one a pass of 214, plus the final ones); pits RAISED by each flood (= lake nodes at that route), and the pass's 2 sweeps summed:
+  route 0: pits 39255 (1377193357 steps), outlets 6209234 | sweep: lowered 0 cut 0 max 0 skipped 6374 | filled 0 fill 0
+  route 1: pits 39255 (1377191823 steps), outlets 6209242 | sweep: lowered 0 cut 0 max 0 skipped 6374 | filled 0 fill 0
+  route 2: pits 39345 (1377189290 steps), outlets 6209254 | sweep: lowered 0 cut 0 max 0 skipped 6374 | filled 0 fill 0
+  route 3: pits 39520 (1377186823 steps), outlets 6211007 | sweep: lowered 0 cut 0 max 0 skipped 6406 | filled 0 fill 0
+  route 4: pits 39255 (1377183930 steps), outlets 6211831 | sweep: lowered 0 cut 0 max 0 skipped 6374 | filled 0 fill 0
+  route 5: pits 39446 (1377181494 steps), outlets 6212257 | sweep: lowered 0 cut 0 max 0 skipped 6552 | filled 0 fill 0
+  route 6: pits 39600 (1377179022 steps), outlets 6212527 | sweep: lowered 0 cut 0 max 0 skipped 6466 | filled 0 fill 0
+  route 7: pits 39451 (1377176253 steps), outlets 6212727 | sweep: lowered 0 cut 0 max 0 skipped 6566 | filled 0 fill 0
+  route 8: pits 39535 (1377173750 steps), outlets 6212871 | sweep: lowered 0 cut 0 max 0 skipped 6746 | filled 0 fill 0
+  route 9: pits 39669 (1377171285 steps), outlets 6212986 | sweep: lowered 0 cut 0 max 0 skipped 6604 | filled 0 fill 0
+  route 10: pits 39508 (1377168542 steps), outlets 6213584 | sweep: lowered 0 cut 0 max 0 skipped 6636 | filled 0 fill 0
+  route 11: pits 39568 (1377165965 steps), outlets 6213662 | sweep: lowered 0 cut 0 max 0 skipped 6870 | filled 0 fill 0
+  route 12: pits 39656 (1377163528 steps), outlets 6213710 | sweep: lowered 0 cut 0 max 0 skipped 6720 | filled 0 fill 0
+  route 13: pits 39547 (1377160786 steps), outlets 6213759 | sweep: lowered 0 cut 0 max 0 skipped 6778 | filled 0 fill 0
+  route 14: pits 39599 (1377158318 steps), outlets 6213803 | sweep: lowered 0 cut 0 max 0 skipped 6884 | filled 0 fill 0
+  route 15: pits 39648 (1377155749 steps), outlets 6213850 | sweep: lowered 0 cut 0 max 0 skipped 6940 | filled 0 fill 0
+  route 16: pits 39633 (1377153288 steps), outlets 6213879 | sweep: lowered 0 cut 0 max 0 skipped 6872 | filled 0 fill 0
+  route 17: pits 39611 (1377150635 steps), outlets 6213902 | sweep: lowered 0 cut 0 max 0 skipped 6930 | filled 0 fill 0
+  route 18: pits 39660 (1377148154 steps), outlets 6213933 | sweep: lowered 0 cut 0 max 0 skipped 7014 | filled 0 fill 0
+  route 19: pits 39690 (1377145741 steps), outlets 6213956 | sweep: lowered 0 cut 0 max 0 skipped 7004 | filled 0 fill 0
+  route 20: pits 39635 (1377143058 steps), outlets 6214496 | sweep: lowered 0 cut 0 max 0 skipped 6828 | filled 0 fill 0
+  route 21: pits 39658 (1377140560 steps), outlets 6214523 | sweep: lowered 0 cut 0 max 0 skipped 7028 | filled 0 fill 0
+  route 22: pits 39689 (1377138158 steps), outlets 6214539 | sweep: lowered 0 cut 0 max 0 skipped 6932 | filled 0 fill 0
+  route 23: pits 39652 (1377135519 steps), outlets 6214551 | sweep: lowered 0 cut 0 max 0 skipped 6948 | filled 0 fill 0
+  route 24: pits 39648 (1377133046 steps), outlets 6214567 | sweep: lowered 0 cut 0 max 0 skipped 6964 | filled 0 fill 0
+  route 25: pits 39688 (1377130677 steps), outlets 6214574 | sweep: lowered 0 cut 0 max 0 skipped 7000 | filled 0 fill 0
+  route 26: pits 39651 (1377128057 steps), outlets 6214588 | sweep: lowered 0 cut 0 max 0 skipped 6930 | filled 0 fill 0
+  route 27: pits 39577 (1373386323 steps), outlets 6220616 | sweep: lowered 0 cut 0 max 0 skipped 6990 | filled 0 fill 0
+  route 28: pits 39608 (1373384037 steps), outlets 6220635 | sweep: lowered 0 cut 0 max 0 skipped 7040 | filled 0 fill 0
+  route 29: pits 39579 (1373381629 steps), outlets 6220648 | sweep: lowered 0 cut 0 max 0 skipped 7022 | filled 0 fill 0
+  route 30: pits 39585 (1373379322 steps), outlets 6551162 | sweep: lowered 0 cut 0 max 0 skipped 7032 | filled 0 fill 0
+  route 31: pits 39602 (1373376961 steps), outlets 6551163 | sweep: lowered 0 cut 0 max 0 skipped 7024 | filled 0 fill 0
+  route 32: pits 39583 (1373374667 steps), outlets 6551163 | sweep: lowered 0 cut 0 max 0 skipped 7046 | filled 0 fill 0
+  route 33: pits 39584 (1373372334 steps), outlets 6551163 | sweep: lowered 0 cut 0 max 0 skipped 7046 | filled 0 fill 0
+  route 34: pits 39605 (1373370064 steps), outlets 6551164 | sweep: lowered 0 cut 0 max 0 skipped 7064 | filled 0 fill 0
+  route 35: pits 39604 (1373367800 steps), outlets 6551164 | sweep: lowered 0 cut 0 max 0 skipped 7036 | filled 0 fill 0
+  route 36: pits 39584 (1373365387 steps), outlets 6551164 | sweep: lowered 0 cut 0 max 0 skipped 7056 | filled 0 fill 0
+  route 37: pits 39603 (1373363223 steps), outlets 6551164 | sweep: lowered 0 cut 0 max 0 skipped 7110 | filled 0 fill 0
+  route 38: pits 39602 (1373360908 steps), outlets 6551165 | sweep: lowered 0 cut 0 max 0 skipped 7074 | filled 0 fill 0
+  route 39: pits 39588 (1373358625 steps), outlets 6551166 | sweep: lowered 0 cut 0 max 0 skipped 7074 | filled 0 fill 0
+  route 40: pits 39598 (1373356394 steps), outlets 6551187 | sweep: lowered 0 cut 0 max 0 skipped 7096 | filled 0 fill 0
+  route 41: pits 39606 (1373354245 steps), outlets 6551187 | sweep: lowered 0 cut 0 max 0 skipped 7100 | filled 0 fill 0
+  route 42: pits 39581 (1373351896 steps), outlets 6551187 | sweep: lowered 0 cut 0 max 0 skipped 7046 | filled 0 fill 0
+  route 43: pits 39604 (1373349741 steps), outlets 6551187 | sweep: lowered 0 cut 0 max 0 skipped 7148 | filled 0 fill 0
+  route 44: pits 39600 (1373347521 steps), outlets 6551188 | sweep: lowered 0 cut 0 max 0 skipped 7068 | filled 0 fill 0
+  route 45: pits 39583 (1373345295 steps), outlets 6551188 | sweep: lowered 0 cut 0 max 0 skipped 7062 | filled 0 fill 0
+  route 46: pits 39600 (1373343093 steps), outlets 6551190 | sweep: lowered 0 cut 0 max 0 skipped 7106 | filled 0 fill 0
+  route 47: pits 39603 (1373340940 steps), outlets 6551190 | sweep: lowered 0 cut 0 max 0 skipped 7130 | filled 0 fill 0
+  route 48: pits 39597 (1373338803 steps), outlets 6551190 | sweep: lowered 0 cut 0 max 0 skipped 7162 | filled 0 fill 0
+  route 49: pits 39605 (1373336492 steps), outlets 6551193 | sweep: lowered 0 cut 0 max 0 skipped 7144 | filled 0 fill 0
+  route 50: pits 39602 (1373334426 steps), outlets 6551214 | sweep: lowered 0 cut 0 max 0 skipped 7168 | filled 0 fill 0
+  route 51: pits 39603 (1373332250 steps), outlets 6551215 | sweep: lowered 0 cut 0 max 0 skipped 7114 | filled 0 fill 0
+  route 52: pits 39587 (1373330110 steps), outlets 6551216 | sweep: lowered 0 cut 0 max 0 skipped 7110 | filled 0 fill 0
+  route 53: pits 39605 (1373328004 steps), outlets 6551218 | sweep: lowered 0 cut 0 max 0 skipped 7142 | filled 0 fill 0
+  route 54: pits 39600 (1373325883 steps), outlets 6551233 | sweep: lowered 0 cut 0 max 0 skipped 7134 | filled 0 fill 0
+  route 55: pits 39587 (1373323659 steps), outlets 6551235 | sweep: lowered 0 cut 0 max 0 skipped 7068 | filled 0 fill 0
+  route 56: pits 39604 (1373321632 steps), outlets 6551235 | sweep: lowered 0 cut 0 max 0 skipped 7184 | filled 0 fill 0
+  route 57: pits 39604 (1373319565 steps), outlets 6551236 | sweep: lowered 0 cut 0 max 0 skipped 7162 | filled 0 fill 0
+  route 58: pits 39588 (1373317368 steps), outlets 6551236 | sweep: lowered 0 cut 0 max 0 skipped 7094 | filled 0 fill 0
+  route 59: pits 39600 (1373315342 steps), outlets 6551236 | sweep: lowered 0 cut 0 max 0 skipped 7160 | filled 0 fill 0
+  route 60: pits 39598 (1373313202 steps), outlets 6551260 | sweep: lowered 0 cut 0 max 0 skipped 7142 | filled 0 fill 0
+  route 61: pits 39599 (1373311220 steps), outlets 6551260 | sweep: lowered 0 cut 0 max 0 skipped 7182 | filled 0 fill 0
+  route 62: pits 39597 (1373309040 steps), outlets 6551260 | sweep: lowered 0 cut 0 max 0 skipped 7134 | filled 0 fill 0
+  route 63: pits 39601 (1373307002 steps), outlets 6551261 | sweep: lowered 0 cut 0 max 0 skipped 7194 | filled 0 fill 0
+  route 64: pits 39598 (1373304949 steps), outlets 6551262 | sweep: lowered 0 cut 0 max 0 skipped 7146 | filled 0 fill 0
+  route 65: pits 39598 (1373302915 steps), outlets 6551262 | sweep: lowered 0 cut 0 max 0 skipped 7188 | filled 0 fill 0
+  route 66: pits 39598 (1373300883 steps), outlets 6551262 | sweep: lowered 0 cut 0 max 0 skipped 7150 | filled 0 fill 0
+  route 67: pits 39596 (1373298898 steps), outlets 6551266 | sweep: lowered 0 cut 0 max 0 skipped 7200 | filled 0 fill 0
+  route 68: pits 39598 (1373296886 steps), outlets 6551266 | sweep: lowered 0 cut 0 max 0 skipped 7186 | filled 0 fill 0
+  route 69: pits 39598 (1373294827 steps), outlets 6551268 | sweep: lowered 0 cut 0 max 0 skipped 7210 | filled 0 fill 0
+  route 70: pits 39599 (1373292877 steps), outlets 6551306 | sweep: lowered 0 cut 0 max 0 skipped 7192 | filled 0 fill 0
+  route 71: pits 39596 (1373290791 steps), outlets 6551307 | sweep: lowered 0 cut 0 max 0 skipped 7146 | filled 0 fill 0
+  route 72: pits 39602 (1373288877 steps), outlets 6551308 | sweep: lowered 0 cut 0 max 0 skipped 7230 | filled 0 fill 0
+  route 73: pits 39596 (1373286811 steps), outlets 6551311 | sweep: lowered 0 cut 0 max 0 skipped 7156 | filled 0 fill 0
+  route 74: pits 39599 (1373284875 steps), outlets 6551313 | sweep: lowered 0 cut 0 max 0 skipped 7230 | filled 0 fill 0
+  route 75: pits 39596 (1373282884 steps), outlets 6551312 | sweep: lowered 0 cut 0 max 0 skipped 7194 | filled 0 fill 0
+  route 76: pits 39599 (1373280936 steps), outlets 6551313 | sweep: lowered 0 cut 0 max 0 skipped 7238 | filled 0 fill 0
+  route 77: pits 39593 (1373279038 steps), outlets 6551312 | sweep: lowered 0 cut 0 max 0 skipped 7196 | filled 0 fill 0
+  route 78: pits 39597 (1373277042 steps), outlets 6551312 | sweep: lowered 0 cut 0 max 0 skipped 7222 | filled 0 fill 0
+  route 79: pits 39593 (1373275112 steps), outlets 6551312 | sweep: lowered 0 cut 0 max 0 skipped 7206 | filled 0 fill 0
+  route 80: pits 39593 (1373273274 steps), outlets 6551336 | sweep: lowered 0 cut 0 max 0 skipped 7228 | filled 0 fill 0
+  route 81: pits 39593 (1373271385 steps), outlets 6551336 | sweep: lowered 0 cut 0 max 0 skipped 7240 | filled 0 fill 0
+  route 82: pits 39594 (1373269472 steps), outlets 6551337 | sweep: lowered 0 cut 0 max 0 skipped 7232 | filled 0 fill 0
+  route 83: pits 39591 (1373267688 steps), outlets 6551337 | sweep: lowered 0 cut 0 max 0 skipped 7240 | filled 0 fill 0
+  route 84: pits 39590 (1373265728 steps), outlets 6551338 | sweep: lowered 0 cut 0 max 0 skipped 7202 | filled 0 fill 0
+  route 85: pits 39590 (1373263938 steps), outlets 6551339 | sweep: lowered 0 cut 0 max 0 skipped 7252 | filled 0 fill 0
+  route 86: pits 39587 (1373262054 steps), outlets 6551339 | sweep: lowered 0 cut 0 max 0 skipped 7214 | filled 0 fill 0
+  route 87: pits 39587 (1373260240 steps), outlets 6551339 | sweep: lowered 0 cut 0 max 0 skipped 7258 | filled 0 fill 0
+  route 88: pits 39587 (1373258515 steps), outlets 6551339 | sweep: lowered 0 cut 0 max 0 skipped 7234 | filled 0 fill 0
+  route 89: pits 39591 (1373256676 steps), outlets 6551341 | sweep: lowered 0 cut 0 max 0 skipped 7270 | filled 0 fill 0
+  route 90: pits 39583 (1373254879 steps), outlets 6551374 | sweep: lowered 0 cut 0 max 0 skipped 7264 | filled 0 fill 0
+  route 91: pits 39590 (1373253066 steps), outlets 6551375 | sweep: lowered 0 cut 0 max 0 skipped 7254 | filled 0 fill 0
+  route 92: pits 39586 (1373251322 steps), outlets 6551374 | sweep: lowered 0 cut 0 max 0 skipped 7286 | filled 0 fill 0
+  route 93: pits 39587 (1373249564 steps), outlets 6551374 | sweep: lowered 0 cut 0 max 0 skipped 7246 | filled 0 fill 0
+  route 94: pits 39586 (1373247748 steps), outlets 6551374 | sweep: lowered 0 cut 0 max 0 skipped 7286 | filled 0 fill 0
+  route 95: pits 39588 (1373245993 steps), outlets 6551375 | sweep: lowered 1031584 cut 8185598718 max 124637 skipped 4960 | filled 44168 fill 3248665679
+  route 96: pits 228948 (1562233926 steps), outlets 6549258 | sweep: lowered 1196159 cut 6894487764 max 114957 skipped 5017 | filled 132373 fill 760101760
+  route 97: pits 214766 (942515569 steps), outlets 6550077 | sweep: lowered 1228045 cut 3875876285 max 80260 skipped 10094 | filled 141401 fill 77191072
+  route 98: pits 215069 (1217901246 steps), outlets 6547286 | sweep: lowered 1294046 cut 3025281794 max 66687 skipped 8699 | filled 58741 fill 9674950
+  route 99: pits 219842 (1213259263 steps), outlets 6545049 | sweep: lowered 1289962 cut 2597537816 max 70170 skipped 10797 | filled 35079 fill 2834843
+  route 100: pits 221420 (1106924125 steps), outlets 6546862 | sweep: lowered 1316632 cut 2901833603 max 58963 skipped 10805 | filled 16144 fill 3507591
+  route 101: pits 232126 (1213559048 steps), outlets 6546310 | sweep: lowered 1275556 cut 2454376553 max 49438 skipped 11286 | filled 79884 fill 5152281
+  route 102: pits 237119 (1206923701 steps), outlets 6545855 | sweep: lowered 1319522 cut 2255970991 max 47312 skipped 11015 | filled 33041 fill 5929397
+  route 103: pits 240432 (1404148377 steps), outlets 6545487 | sweep: lowered 1296178 cut 2094802627 max 54474 skipped 11229 | filled 62967 fill 2002490
+  route 104: pits 237451 (1285237478 steps), outlets 6545165 | sweep: lowered 1333292 cut 1969791809 max 52292 skipped 11163 | filled 9709 fill 2006504
+  route 105: pits 234487 (1222450587 steps), outlets 6544897 | sweep: lowered 1304207 cut 1858341108 max 50226 skipped 10449 | filled 55326 fill 2586866
+  route 106: pits 232597 (1205542519 steps), outlets 6544618 | sweep: lowered 1307647 cut 1752238966 max 58185 skipped 10319 | filled 67805 fill 14867856
+  route 107: pits 231171 (1170304123 steps), outlets 6544412 | sweep: lowered 1316629 cut 1677961663 max 53671 skipped 10071 | filled 51574 fill 2337947
+  route 108: pits 228141 (1120354379 steps), outlets 6544205 | sweep: lowered 1321659 cut 1607849912 max 51242 skipped 9653 | filled 45581 fill 1603569
+  route 109: pits 225826 (1118481142 steps), outlets 6544008 | sweep: lowered 1324823 cut 1547757136 max 49034 skipped 9506 | filled 42660 fill 3074379
+  route 110: pits 222648 (1098101391 steps), outlets 6544620 | sweep: lowered 1326735 cut 1926761253 max 54125 skipped 9450 | filled 40551 fill 5866385
+  route 111: pits 220774 (1058506781 steps), outlets 6544418 | sweep: lowered 1330238 cut 1747358989 max 52313 skipped 9316 | filled 37617 fill 1039770
+  route 112: pits 219197 (1083616764 steps), outlets 6544248 | sweep: lowered 1332754 cut 1653458816 max 55987 skipped 9361 | filled 33742 fill 883315
+  route 113: pits 218390 (1124872430 steps), outlets 6544114 | sweep: lowered 1335845 cut 1596960344 max 58230 skipped 9177 | filled 33210 fill 2676563
+  route 114: pits 135555 (338176915 steps), outlets 6621898 | sweep: lowered 1194939 cut 1380452322 max 53397 skipped 8408 | filled 21945 fill 4049414
+  route 115: pits 131809 (332610345 steps), outlets 6619175 | sweep: lowered 1202667 cut 1314111371 max 42395 skipped 8083 | filled 22377 fill 1130964
+  route 116: pits 129545 (337851637 steps), outlets 6617310 | sweep: lowered 1202266 cut 1270631133 max 44625 skipped 7620 | filled 25265 fill 403909
+  route 117: pits 128021 (349119471 steps), outlets 6615870 | sweep: lowered 1212486 cut 1237793461 max 40317 skipped 7313 | filled 20994 fill 15508135
+  route 118: pits 125867 (334733464 steps), outlets 6614666 | sweep: lowered 1211226 cut 1206841762 max 40260 skipped 6960 | filled 22174 fill 1146872
+  route 119: pits 123776 (336227935 steps), outlets 6613623 | sweep: lowered 1216876 cut 1180806191 max 33701 skipped 6619 | filled 19552 fill 594369
+  route 120: pits 122724 (348599241 steps), outlets 6611924 | sweep: lowered 1219994 cut 1417843760 max 30992 skipped 6493 | filled 23187 fill 2463617
+  route 121: pits 121689 (351447475 steps), outlets 6610928 | sweep: lowered 1223718 cut 1332664336 max 28970 skipped 6610 | filled 17475 fill 219510
+  route 122: pits 119328 (347252968 steps), outlets 6610078 | sweep: lowered 1227725 cut 1271207616 max 32149 skipped 6617 | filled 15134 fill 2155620
+  route 123: pits 118448 (352791962 steps), outlets 6609350 | sweep: lowered 1227641 cut 1224562789 max 46232 skipped 6268 | filled 17209 fill 2248842
+  route 124: pits 113634 (333512643 steps), outlets 6608749 | sweep: lowered 1231108 cut 1187781298 max 27883 skipped 5991 | filled 22018 fill 12798564
+  route 125: pits 110915 (318999182 steps), outlets 6608164 | sweep: lowered 1231626 cut 1150111120 max 28634 skipped 5732 | filled 18738 fill 2598268
+  route 126: pits 110707 (332839379 steps), outlets 6607688 | sweep: lowered 1233109 cut 1116302806 max 23961 skipped 5413 | filled 17993 fill 948254
+  route 127: pits 110562 (346894884 steps), outlets 6607226 | sweep: lowered 1235607 cut 1089303379 max 23354 skipped 5219 | filled 14839 fill 188646
+  route 128: pits 109314 (348929288 steps), outlets 6606804 | sweep: lowered 1952915 cut 1329640907 max 39125 skipped 4900 | filled 16908 fill 6623562
+  route 129: pits 306333 (362447097 steps), outlets 6604772 | sweep: lowered 2142134 cut 1642820452 max 36406 skipped 14243 | filled 127491 fill 5225750
+  route 130: pits 300192 (368843656 steps), outlets 6603352 | sweep: lowered 2205599 cut 1761216166 max 31378 skipped 12748 | filled 143837 fill 1382752
+  route 131: pits 298677 (380889676 steps), outlets 6601749 | sweep: lowered 2234456 cut 1617732023 max 38799 skipped 12414 | filled 129872 fill 2703409
+  route 132: pits 295655 (391557609 steps), outlets 6600417 | sweep: lowered 2250390 cut 1597091907 max 34467 skipped 10559 | filled 57955 fill 4420385
+  route 133: pits 293861 (422543719 steps), outlets 6599277 | sweep: lowered 2276209 cut 1565679344 max 71862 skipped 8885 | filled 49399 fill 4317328
+  route 134: pits 289885 (427420323 steps), outlets 6598273 | sweep: lowered 2283716 cut 1491143995 max 69558 skipped 8704 | filled 40181 fill 2588319
+  route 135: pits 285245 (429831284 steps), outlets 6597324 | sweep: lowered 2300482 cut 1432186949 max 64825 skipped 8616 | filled 41222 fill 11382986
+  route 136: pits 279775 (424219329 steps), outlets 6596451 | sweep: lowered 2301933 cut 1385068260 max 51140 skipped 8775 | filled 40255 fill 4830179
+  route 137: pits 273692 (435718172 steps), outlets 6595667 | sweep: lowered 2309121 cut 1348460688 max 49343 skipped 9157 | filled 45286 fill 7640002
+  route 138: pits 265688 (438223295 steps), outlets 6594936 | sweep: lowered 2317502 cut 1324475836 max 49351 skipped 9523 | filled 27356 fill 963457
+  route 139: pits 261674 (470366873 steps), outlets 6594268 | sweep: lowered 2322248 cut 1298326996 max 45503 skipped 9999 | filled 23990 fill 2193478
+  route 140: pits 254983 (476949214 steps), outlets 6595107 | sweep: lowered 2323867 cut 1487166635 max 47265 skipped 10185 | filled 24482 fill 8033446
+  route 141: pits 246324 (468334072 steps), outlets 6594321 | sweep: lowered 2332110 cut 1425069928 max 49088 skipped 9828 | filled 21140 fill 2517281
+  route 142: pits 237428 (462421814 steps), outlets 6593641 | sweep: lowered 2460969 cut 1655345512 max 57230 skipped 5086 | filled 20490 fill 3869102
+  route 143: pits 228381 (389185023 steps), outlets 6594602 | sweep: lowered 2479154 cut 2103926850 max 43164 skipped 4731 | filled 21514 fill 1915954
+  route 144: pits 226729 (412777304 steps), outlets 6592827 | sweep: lowered 3033463 cut 2169794746 max 47942 skipped 4619 | filled 24758 fill 2444013
+  route 145: pits 309188 (455261922 steps), outlets 6588373 | sweep: lowered 3149633 cut 2194625715 max 43912 skipped 25323 | filled 21234 fill 840950
+  route 146: pits 259912 (407716823 steps), outlets 6588098 | sweep: lowered 3208628 cut 2003717990 max 48004 skipped 11373 | filled 39019 fill 4093973
+  route 147: pits 227168 (416120093 steps), outlets 6582575 | sweep: lowered 3239942 cut 1902245075 max 58632 skipped 6666 | filled 38364 fill 10251128
+  route 148: pits 211231 (322895350 steps), outlets 6585386 | sweep: lowered 3247706 cut 1780727663 max 53682 skipped 6803 | filled 27218 fill 4413543
+  route 149: pits 256104 (852111378 steps), outlets 6527285 | sweep: lowered 3353792 cut 2008422388 max 47846 skipped 6097 | filled 42582 fill 11570834
+  route 150: pits 262237 (903851821 steps), outlets 6536578 | sweep: lowered 3346701 cut 2320554638 max 50710 skipped 4885 | filled 36142 fill 3876583
+  route 151: pits 179239 (278552253 steps), outlets 6610012 | sweep: lowered 3208619 cut 1891563635 max 50042 skipped 4500 | filled 30330 fill 13481085
+  route 152: pits 179754 (304554512 steps), outlets 6604151 | sweep: lowered 3219698 cut 1760874507 max 53738 skipped 4495 | filled 31646 fill 14649918
+  route 153: pits 176560 (303350189 steps), outlets 6600566 | sweep: lowered 3235356 cut 1649770207 max 42616 skipped 4447 | filled 26045 fill 3456565
+  route 154: pits 174384 (315888320 steps), outlets 6597852 | sweep: lowered 3432832 cut 2173586338 max 41382 skipped 4418 | filled 27425 fill 4139995
+  route 155: pits 177643 (334945951 steps), outlets 6594933 | sweep: lowered 3462754 cut 2265642621 max 54997 skipped 4889 | filled 30381 fill 5523683
+  route 156: pits 173658 (344574297 steps), outlets 6592740 | sweep: lowered 3467748 cut 2048902207 max 52703 skipped 5143 | filled 36850 fill 3406379
+  route 157: pits 173306 (376776600 steps), outlets 6590879 | sweep: lowered 3479817 cut 1988374611 max 63645 skipped 5989 | filled 31304 fill 15108796
+  route 158: pits 169314 (401767682 steps), outlets 6589242 | sweep: lowered 3485369 cut 1937647746 max 43800 skipped 5177 | filled 29380 fill 3773719
+  route 159: pits 168093 (442096329 steps), outlets 6587838 | sweep: lowered 3491239 cut 1864141904 max 55766 skipped 5257 | filled 27080 fill 5650708
+  route 160: pits 166255 (454740789 steps), outlets 6591164 | sweep: lowered 3484905 cut 2016746383 max 63587 skipped 5226 | filled 36722 fill 19978095
+  route 161: pits 166240 (472313694 steps), outlets 6589038 | sweep: lowered 3491729 cut 1866867161 max 59997 skipped 5291 | filled 38244 fill 15542444
+  route 162: pits 166957 (492124911 steps), outlets 6587565 | sweep: lowered 3495624 cut 1752003613 max 59946 skipped 6118 | filled 38448 fill 12706359
+  route 163: pits 164780 (491356859 steps), outlets 6586510 | sweep: lowered 3496561 cut 1657986324 max 52712 skipped 6312 | filled 30642 fill 9842123
+  route 164: pits 165344 (508493793 steps), outlets 6585626 | sweep: lowered 3500066 cut 1569974031 max 51701 skipped 6064 | filled 30718 fill 15823956
+  route 165: pits 165863 (512618985 steps), outlets 6584838 | sweep: lowered 3502099 cut 1487955379 max 38245 skipped 6302 | filled 46471 fill 16898452
+  route 166: pits 160344 (507461444 steps), outlets 6586251 | sweep: lowered 3500865 cut 1441224497 max 38165 skipped 6072 | filled 47993 fill 23483411
+  route 167: pits 159122 (506639342 steps), outlets 6583572 | sweep: lowered 3504797 cut 1395272101 max 34174 skipped 5778 | filled 37065 fill 11324768
+  route 168: pits 155747 (504475295 steps), outlets 6582960 | sweep: lowered 3508201 cut 1352129869 max 34664 skipped 5541 | filled 33395 fill 6207410
+  route 169: pits 146119 (472084086 steps), outlets 6584962 | sweep: lowered 3504206 cut 1324091864 max 52271 skipped 5433 | filled 30507 fill 15744314
+  route 170: pits 142117 (467415261 steps), outlets 6591419 | sweep: lowered 3493251 cut 1446449286 max 59438 skipped 5299 | filled 32066 fill 20835568
+  route 171: pits 138883 (450458236 steps), outlets 6588728 | sweep: lowered 3497943 cut 1355875818 max 45248 skipped 5345 | filled 35937 fill 17840581
+  route 172: pits 136301 (439404496 steps), outlets 6586550 | sweep: lowered 3503365 cut 1298818801 max 48165 skipped 5469 | filled 39215 fill 20982315
+  route 173: pits 133645 (443228076 steps), outlets 6584413 | sweep: lowered 3507568 cut 1239000543 max 42658 skipped 5131 | filled 31659 fill 11987618
+  route 174: pits 131344 (442284290 steps), outlets 6583978 | sweep: lowered 3509211 cut 1200347572 max 47148 skipped 5105 | filled 33347 fill 13168344
+  route 175: pits 128586 (438982132 steps), outlets 6585415 | sweep: lowered 3507604 cut 1185690514 max 51958 skipped 4960 | filled 39314 fill 49703587
+  route 176: pits 127480 (408499013 steps), outlets 6584556 | sweep: lowered 3508828 cut 1162916028 max 58833 skipped 5130 | filled 30456 fill 21166222
+  route 177: pits 117399 (376129533 steps), outlets 6589961 | sweep: lowered 3739573 cut 1546510468 max 60328 skipped 4894 | filled 23254 fill 19430366
+  route 178: pits 152982 (381499243 steps), outlets 6582132 | sweep: lowered 3812992 cut 1495157360 max 57423 skipped 4915 | filled 36673 fill 13744484
+  route 179: pits 149355 (376418001 steps), outlets 6582228 | sweep: lowered 3814988 cut 1421137366 max 47807 skipped 5192 | filled 39183 fill 9501923
+  route 180: pits 146352 (386094373 steps), outlets 6592442 | sweep: lowered 3810491 cut 1544481126 max 54897 skipped 5142 | filled 24962 fill 6665665
+  route 181: pits 147314 (424454897 steps), outlets 6588831 | sweep: lowered 3817271 cut 1465733705 max 42534 skipped 5268 | filled 25106 fill 22108244
+  route 182: pits 149032 (449263071 steps), outlets 6585649 | sweep: lowered 3823845 cut 1427902901 max 57938 skipped 5134 | filled 24743 fill 21729128
+  route 183: pits 148977 (458503844 steps), outlets 6585200 | sweep: lowered 3827152 cut 1366652654 max 51023 skipped 5160 | filled 35968 fill 44011140
+  route 184: pits 145932 (453093792 steps), outlets 6585588 | sweep: lowered 3829164 cut 1324439841 max 50031 skipped 5260 | filled 35464 fill 20450280
+  route 185: pits 145624 (474766069 steps), outlets 6586932 | sweep: lowered 3826886 cut 1274031968 max 50829 skipped 5705 | filled 27479 fill 6472325
+  route 186: pits 145288 (505514578 steps), outlets 6587101 | sweep: lowered 3823994 cut 1239719260 max 45614 skipped 7036 | filled 23509 fill 9252774
+  route 187: pits 147557 (547354722 steps), outlets 6583618 | sweep: lowered 3832279 cut 1216247564 max 51886 skipped 6585 | filled 24998 fill 16268072
+  route 188: pits 142375 (547094603 steps), outlets 6587587 | sweep: lowered 3824687 cut 1222123797 max 66446 skipped 6237 | filled 34950 fill 25031835
+  route 189: pits 147427 (574412509 steps), outlets 6583413 | sweep: lowered 3833214 cut 1229716328 max 49155 skipped 6135 | filled 38801 fill 20450269
+  route 190: pits 149071 (614473836 steps), outlets 6601427 | sweep: lowered 3796952 cut 1324221865 max 46902 skipped 6552 | filled 27431 fill 13427763
+  route 191: pits 148678 (626098976 steps), outlets 6596724 | sweep: lowered 4333182 cut 2113314116 max 52444 skipped 3685 | filled 31627 fill 17607515
+  route 192: pits 221519 (649309158 steps), outlets 6589889 | sweep: lowered 4451338 cut 2661733227 max 56884 skipped 4029 | filled 82585 fill 29478336
+  route 193: pits 214474 (694252493 steps), outlets 6588788 | sweep: lowered 4458365 cut 2767313827 max 92535 skipped 4585 | filled 69416 fill 29786056
+  route 194: pits 212131 (655805531 steps), outlets 6586276 | sweep: lowered 4469364 cut 2944669590 max 95281 skipped 3757 | filled 60602 fill 21812497
+  route 195: pits 213993 (655406130 steps), outlets 6571222 | sweep: lowered 4486130 cut 3476184308 max 121253 skipped 3621 | filled 77791 fill 37177117
+  route 196: pits 252973 (703773441 steps), outlets 6547853 | sweep: lowered 4501732 cut 4091245441 max 129679 skipped 48245 | filled 87886 fill 40053902
+  route 197: pits 229008 (694089820 steps), outlets 6531249 | sweep: lowered 4575261 cut 3850800827 max 128260 skipped 8857 | filled 78280 fill 28178156
+  route 198: pits 229322 (699441628 steps), outlets 6500628 | sweep: lowered 4624734 cut 3850943679 max 123343 skipped 7916 | filled 71114 fill 13683898
+  route 199: pits 232866 (817227317 steps), outlets 6477021 | sweep: lowered 4681673 cut 3504658550 max 113052 skipped 5935 | filled 83288 fill 27446021
+  route 200: pits 212626 (814694720 steps), outlets 6741447 | sweep: lowered 4162114 cut 2254403373 max 84673 skipped 5547 | filled 75163 fill 12482118
+  route 201: pits 213720 (794740773 steps), outlets 6723911 | sweep: lowered 4196506 cut 1979103983 max 80509 skipped 4089 | filled 73027 fill 24669842
+  route 202: pits 230224 (820469807 steps), outlets 6694086 | sweep: lowered 4246342 cut 1869729968 max 107873 skipped 11733 | filled 74362 fill 13633496
+  route 203: pits 227483 (834385915 steps), outlets 6677573 | sweep: lowered 4287588 cut 1680037653 max 121301 skipped 10842 | filled 78239 fill 11527197
+  route 204: pits 223309 (844718899 steps), outlets 6665613 | sweep: lowered 4320930 cut 1541940563 max 131959 skipped 7834 | filled 79470 fill 9658205
+  route 205: pits 221529 (848202533 steps), outlets 6656040 | sweep: lowered 4344801 cut 1551234538 max 92587 skipped 11066 | filled 69294 fill 8463030
+  route 206: pits 220203 (867442000 steps), outlets 6646886 | sweep: lowered 4364963 cut 1612136008 max 81243 skipped 7038 | filled 81514 fill 9792527
+  route 207: pits 420608 (2333913888 steps), outlets 6567806 | sweep: lowered 4488651 cut 1682398940 max 76272 skipped 33789 | filled 89490 fill 36083519
+  route 208: pits 419089 (2385988462 steps), outlets 6559084 | sweep: lowered 4508083 cut 1604467257 max 76265 skipped 23625 | filled 101359 fill 35546120
+  route 209: pits 415752 (2421086534 steps), outlets 6554753 | sweep: lowered 4518493 cut 1355345044 max 74117 skipped 17664 | filled 105293 fill 17431949
+  route 210: pits 409721 (2413521877 steps), outlets 6694508 | sweep: lowered 4232097 cut 1452904795 max 102488 skipped 14050 | filled 93623 fill 7661219
+  route 211: pits 420995 (2537901219 steps), outlets 6690746 | sweep: lowered 4241942 cut 828684282 max 43140 skipped 21029 | filled 98594 fill 65990739
+  route 212: pits 417272 (2469504315 steps), outlets 6687805 | sweep: lowered 4249319 cut 635806735 max 33605 skipped 15891 | filled 89576 fill 22072766
+  route 213: pits 416670 (2466459473 steps), outlets 6685362 | sweep: lowered 4255601 cut 495703617 max 56579 skipped 15680 | filled 92992 fill 10826976
+  route 214: pits 415506 (2467104127 steps), outlets 6698184 | sweep: lowered 0 cut 0 max 0 skipped 0 | filled 0 fill 0
+  route 215: pits 415506 (2467104127 steps), outlets 6697320 | sweep: lowered 0 cut 0 max 0 skipped 0 | filled 0 fill 0
+
+G-BUZZSAW: the highest peak stands 5535 m over its own snowline; 16095 of 2174616 land nodes stand over 1 500 m of it (0.740 %) — Egholm 2009: about 1 500 m, everywhere on Earth
+  the snowline over the land: lowest 3996 m, median 7008 m, highest 7910 m (the sea stands at 3483 m)
+G-CRATER: 368 craters kept of 144967 the production function drew; 261 wider than 20 km; median 23.7 km — Earth: 190 structures, 43 over 20 km, median 8 km
+  the age histogram: 111 younger than 200 Ma (30 %), median 434 Ma, oldest 2574 Ma — Earth: 45 % younger than 200 Ma, which is 4.4 % of its history
+the hierarchy and the budget cost 1.0 s of the solve, and found 3751 water bodies
+
+G-ICE: 67913 nodes under ice, 3.12 % of the land (2174616 land nodes) — Earth: about 10 % today, about 30 % at a glacial maximum. The solve's own reading: 67913 nodes under the line, thickest 3748 m, deepest cut 662800275 steps
+
+nodes 8871936 of 8192 m (67.1 km²): sea 6697320 (75.49 %), lake 45328 (0.51 %), dry land 2129288 (24.00 %)
+the lakes' share of the LAND by NODE COUNT (every node that is not the ocean; the share by AREA is G-LAKE-SHARE's, below): 2.08 % — Earth 3.7 % (glacial shields included), under 1 % elsewhere
+lakes: 2425 patches; median 2 nodes (134 km²), p90 10 nodes, largest 14874 nodes (998177 km²); mean 18.7 nodes
+  size classes (nodes): 1:1133 2-3:636 4-7:330 8-15:182 16-31:79 32-63:28 64+:37
+  G-GRID's valleys by the STEP-1 RULE (the rain over the shipped receivers at least 100 times the node's own), for a like-for-like reading against generator 19: 85395 trunks: 0°:24796 45°:21048 90°:19061 135°:20490 | FLATNESS 1.161
+  G-GRID's valleys by the area rule OUTSIDE every hollow the routing filled (the node's own pit zero): 64145 trunks: 0°:18412 45°:16230 90°:14286 135°:15217 | FLATNESS 1.148
+  G-GRID's valleys by the area rule BY THE WATER'S CLASS (plan step 2b): dry ground off the flats 85660 trunks: 0°:24456 45°:21382 90°:19173 135°:20649 | FLATNESS 1.142; on a flat of the ground 2602 trunks: 0°:699 45°:551 90°:676 135°:676 | FLATNESS 1.075; across a spilling lake 3697 trunks: 0°:1308 45°:894 90°:763 135°:732 | FLATNESS 1.415
+CENSUS G-GRID-VALLEYS-BY-CLASS 1.142dry/1.075flats/1.415spilling-lakes ~1.006(<=1.05-on-the-flats-and-the-spilling-lakes)[W13.3;plan-step-2b:a-flat's-directions-do-not-lean-on-the-lattice] RED
+CENSUS G-GRID-VALLEYS 1.151area-rule/1.161step1-rule/1.148outside-filled-hollows ~1.006[W13.3:a-router-with-no-direction-of-its-own] RED
+
+G-GRID: the long axes against the face grid (0° and 90° are the stencil's rows, 45° and 135° its diagonals)
+  lakes   (656 patches of 4+ nodes): 0°:188 45°:158 90°:169 135°:141 | FLATNESS 1.146
+    0°:87 15°:47 30°:43 45°:71 60°:43 75°:40 90°:82 105°:47 120°:43 135°:56 150°:42 165°:55 | flatness 1.591
+  valleys (91959 trunks over 100 nodes of drainage): 0°:26463 45°:22827 90°:20612 135°:22057 | FLATNESS 1.151
+    0°:13432 15°:6495 30°:5896 45°:11254 60°:5672 75°:5985 90°:9817 105°:4814 120°:5495 135°:11368 150°:5190 165°:6541 | flatness 1.753
+  a router with no direction of its own reads 1.000; a spike at 45° or 135° names the tie-break
+
+G-HYPSO (ruling B3), the FINAL solved field, every node by its own area; heights over the sea's level (3483 m over the ladder radius)
+  the whole surface in 1000 m bins over the sea, % of the surface:
+    under -12000 m: 0.01 %
+    -12000..-11000 m  0.01 % | -11000..-10000 m  0.01 % | -10000.. -9000 m 47.13 % |  -9000.. -8000 m  6.98 % |  -8000.. -7000 m  2.14 % |  -7000.. -6000 m  1.47 % |
+     -6000.. -5000 m  1.18 % |  -5000.. -4000 m  1.05 % |  -4000.. -3000 m  0.97 % |  -3000.. -2000 m  3.24 % |  -2000.. -1000 m  1.25 % |  -1000..    +0 m 11.68 % |
+        +0.. +1000 m 15.52 % |  +1000.. +2000 m  4.63 % |  +2000.. +3000 m  1.56 % |  +3000.. +4000 m  0.77 % |  +4000.. +5000 m  0.24 % |  +5000.. +6000 m  0.13 % |
+     +6000.. +7000 m  0.04 % |  +7000.. +8000 m  0.01 % |  +8000.. +9000 m  0.00 % |  +9000..+10000 m  0.00 % | +10000..+11000 m  0.00 % | +11000..+12000 m  0.00 % |
+    over 12000 m: 0.00 %
+  the two-hump test (G-LAND-HYPSOMETRY's own rule: 250 m bins smoothed 1-2-1, a hump is a local maximum at least a tenth of the largest bin, the two largest count): humps at -8970 m and +30 m over the sea; the shallowest bin between them stands at 0.03 of the lower hump
+CENSUS G-HYPSO-HUMPS 2humps@-8970m,+30m 2humps,the-lower-under-the-sea[ruling-B3-G-HYPSO;rule:land::humps] GREEN
+  the basins' hypsometric integrals (gate G-AGE's own reading over 1813 basins of 100 land nodes or more): the median 0.344, against Strahler's maturity band 0.35 to 0.60
+CENSUS G-HYPSO-AGE 0.344integral 0.35-0.60[Strahler-1952;solve.rs-HI_MATURE] RED
+  the land (over the sea) is 22.88 % of the surface and its mean stands 891 m over the sea; the ground under the sea is 77.12 % and its mean stands -7028 m (01_reference_target.md §6.3 states Earth's +840 m and -3 800 m WITHOUT a source, so neither is a band)
+  the land's share over 1000 m: 32.20 % of the land. NO BAND YET: ruling B3 names Earth's share over 1 000 m, and the repo holds no Earth number for it with a published source. OWED: a cited Earth hypsometric table in the G-HYPSO row of ruling B3
+CENSUS G-HYPSO-LAND-OVER-1000M 32.20%of-land no-band-yet[owed:a-cited-Earth-table-in-ruling-B3] NO-BAND
+
+THE INLAND POCKETS (status §6 T7; ruling B7 item 1): nodes at or under the sea's level (3483 m) that no path through the lattice's own neighbours (the cube seams included) joins to the OCEAN, the largest such body (3.8327e8 km²) — each a CLOSED BASIN since plan step 2
+  79 pockets, 122139 nodes, 6468143 km², 3.2070e6 km³ under the sea's level; by the budget over each deepest node: DRY 9 PARTIAL 28 SPILLING 42 (the ocean's own root 0); the FIRST land held 3 pockets of 17799 nodes (plan question 9). The largest ten:
+      70443 nodes    3710058 km², deepest   1099 m under the sea at node 4582767 — SPILLING — aim 0.283120 -0.775204 -0.564714
+       4609 nodes     270498 km², deepest   1477 m under the sea at node 6473015 — PARTIAL — aim -0.441821 -0.170912 0.880672
+       5053 nodes     259350 km², deepest   1008 m under the sea at node 6882590 — PARTIAL — aim -0.667841 0.179265 0.722394
+       4925 nodes     257045 km², deepest    445 m under the sea at node 4519367 — PARTIAL — aim 0.102543 -0.762701 -0.638570
+       3565 nodes     198416 km², deepest    363 m under the sea at node 6851105 — PARTIAL — aim -0.536501 0.175700 0.825407
+       3589 nodes     179051 km², deepest     74 m under the sea at node 2113355 — PARTIAL — aim -0.750607 -0.084199 0.655363
+       2936 nodes     153833 km², deepest    368 m under the sea at node 5985729 — PARTIAL — aim -0.029880 -0.651539 0.758027
+       2599 nodes     149862 km², deepest    659 m under the sea at node 6178994 — PARTIAL — aim -0.123696 -0.479044 0.869032
+       2925 nodes     142985 km², deepest   2903 m under the sea at node 8041438 — PARTIAL — aim -0.070692 -0.677139 -0.732452
+       2638 nodes     142334 km², deepest    393 m under the sea at node 8743376 — SPILLING — aim 0.580365 -0.279370 -0.764937
+CENSUS INLAND-POCKETS 6468143km2/122139nodes/79pockets no-band[ruling-B7:each-a-closed-basin-by-its-budget] NO-BAND
+CENSUS CHECK-OCEAN 0nodes 0[the-census's-own-labelling-is-the-solve's] GREEN
+CENSUS CHECK-POCKET-NOT-SEA 0nodes 0[ruling-B7:a-pocket-is-never-the-sea] GREEN
+
+G-RIVER (ruling B3): a river is a land node whose DRAINAGE AREA over the SHIPPED receivers is at least 100 times its own (G-GRID's valley threshold, about 6711 km²); 5653 channel heads, each walked down the SHIPPED receivers to its end
+  the ends, in heads: the ocean 3528, a node the facies call sea that is not the ocean 0 (0 by construction since plan step 2), a closed lake 1539, a dry closed basin 586; DEFECTS: an end the budget does not name 0, a ring of receivers 0
+  (since plan step 2b the shipped receivers are the water's own: a river ENDS where it meets a closed lake's water or a dry hollow's pit — an inland pocket included — and crosses a spilling lake to its spill)
+  along the trunks: 108113 steps; the GROUND rises on 2094 of them (2094 under a water's flat surface); the FLOOR (the ground, or the water's surface where water stands) rises on 0 steps, 0 of them in a hollow the ROUTING filled (a reading of the erosion's scratch surface)
+CENSUS G-RIVER-END 0heads-without-an-end 0heads[ruling-B3-G-RIVER] GREEN
+CENSUS G-RIVER-DESCENT 0rising-steps 0steps[ruling-B3-G-RIVER] GREEN
+CENSUS G-RIVER-ENDS ocean3528/closed-lake1539/dry-basin586/not-ocean-sea0 no-band[a-reading;the-plan's-gen-20-prediction:0-pocket-ends] NO-BAND
+
+G-RIVER:step1-rule (ruling B3): a river is a land node (THE STEP-1 RULE, for comparison) whose RAIN over the SHIPPED receivers is at least 100 times its own (G-GRID's valley threshold, about 6711 km²); 5500 channel heads, each walked down the SHIPPED receivers to its end
+  the ends, in heads: the ocean 3448, a node the facies call sea that is not the ocean 0 (0 by construction since plan step 2), a closed lake 1486, a dry closed basin 566; DEFECTS: an end the budget does not name 0, a ring of receivers 0
+  (since plan step 2b the shipped receivers are the water's own: a river ENDS where it meets a closed lake's water or a dry hollow's pit — an inland pocket included — and crosses a spilling lake to its spill)
+  along the trunks: 101071 steps; the GROUND rises on 1899 of them (1899 under a water's flat surface); the FLOOR (the ground, or the water's surface where water stands) rises on 0 steps, 0 of them in a hollow the ROUTING filled (a reading of the erosion's scratch surface)
+CENSUS G-RIVER-END:step1-rule 0heads-without-an-end 0heads[ruling-B3-G-RIVER] GREEN
+CENSUS G-RIVER-DESCENT:step1-rule 0rising-steps 0steps[ruling-B3-G-RIVER] GREEN
+CENSUS G-RIVER-ENDS:step1-rule ocean3448/closed-lake1486/dry-basin566/not-ocean-sea0 no-band[a-reading;the-plan's-gen-20-prediction:0-pocket-ends] NO-BAND
+
+THE DISCHARGE ROW AND ITS TREE (status §7 W10, W11; ruling B8 item 2: the budget's own water over the water's own receivers)
+  the classes the budget names: dry ground 2126468, a spilling lake's hollow 13596, a spill 1768, under a closed lake's water 32784, the ocean or a root 6697320; dry nodes and closed-lake nodes whose shipped receiver is not the budget's (the descent, or none) 0; spills that do not point at their exit 0; nodes left out of the order 0
+  the tree's own counts: 13596 nodes of spilling lakes' hollows, 1768 spills, 32784 closed-lake ends; the flat steps across the lakes: split 7262, straight 6167, nearest 167; exits that disagree at one saddle 0, rings 0, short sinks 0
+  the climate's runoff accumulated again over the shipped tree, less the 1768 sinks at their spills: 0 nodes differ (the worst by 1.0 times), 0 of them in the SHIPPED byte (the row's log class); 0 sinks short; the shipped row FALLS downstream with no sink at 0 nodes, which no tree can hold
+CENSUS W10-DISCHARGE-TREE 0nodes 0nodes[ruling-B8-item-2:the-budget's-water-over-the-water's-receivers] GREEN
+CENSUS CHECK-DRY-FOLLOWS-DESCENT 0nodes 0[plan-step-2b:the-dry-ground-takes-the-budget's-descent] GREEN
+CENSUS CHECK-EXIT-AGREES 0spills/0disagree 0[plan-step-2b:a-spill-points-where-the-cascade-pours] GREEN
+CENSUS CHECK-TREE-CYCLIC 0nodes/0falls/0short 0[plan-step-2b:one-tree,no-ring] GREEN
+
+THE STORED LEVEL-1 WATER WORD: the shipped word disagrees with `block_water` over the rows at 0 of 2217984 level-1 nodes (0 expected)
+CENSUS CHECK-LEVEL1-WORD 0nodes 0[plan-step-2-part-5:the-stored-word-is-the-rows-own-fold] GREEN
+
+THE LAKE BUDGET (plan step 2; ruling B7; status §7 W3, W4): each hollow fed from its whole WATERSHED down the ground, every full hollow's overflow passed on (Fill–Spill–Merge, Barnes, Callaghan & Wickert 2021)
+  5133 leaf hollows; the watershed's supply over the runoff of the hollow's own nodes (the rule before step 2): median 17.26 times, p90 120.50 times, largest 58234.0 times; 186 hollows with no runoff of their own take water only from above their brim
+  the water bodies: DRY 1581 PARTIAL 376 SPILLING 1794; the leaves by the body over them: DRY 1581 PARTIAL 1037 SPILLING 2515
+  the cascade: 3081 pours into another hollow's side of a saddle, 5272 into the ocean's side that the ground leads into a lower hollow (plan step 2b, question 1), 301 off saddles of three sides or more (question 2); its walk visited 15236 rings over 5133 leaves (the skip over full rings, review finding 6); the books, km³/yr: runoff 7526.2505 = held and evaporated 1284.4312 + to the ocean 6241.8193 + stranded 0.0000
+  the standing water: 45328 nodes, 2.462e6 km², 7.0843e4 km³; the lakes cover 2.017 % of the land (every node that is not the ocean) — G-LAKE-SHARE's ceiling 4 % (Verpoorter et al. 2014), W11 names 0.2 to 0.8 % for dry interiors
+  the ten hollows the watershed feeds most beyond their own nodes:
+         107 km², it spills -838 m over the sea; its own nodes' runoff 0.0066 km³/yr, its watershed's 385.5010 km³/yr; SPILLING — aim 0.265818 -0.761138 -0.591617
+        1338 km², it spills -13 m over the sea; its own nodes' runoff 0.1145 km³/yr, its watershed's 30.0346 km³/yr; SPILLING — aim -0.133805 -0.860345 -0.491835
+         185 km², it spills 1428 m over the sea; its own nodes' runoff 0.0165 km³/yr, its watershed's 27.4350 km³/yr; SPILLING — aim -0.921266 0.157920 -0.355431
+         187 km², it spills 306 m over the sea; its own nodes' runoff 0.0276 km³/yr, its watershed's 20.9482 km³/yr; SPILLING — aim -0.931315 -0.149768 -0.331997
+         185 km², it spills 1489 m over the sea; its own nodes' runoff 0.0139 km³/yr, its watershed's 20.8882 km³/yr; SPILLING — aim -0.919879 0.000594 -0.392203
+         112 km², it spills 3 m over the sea; its own nodes' runoff 0.0270 km³/yr, its watershed's 20.4007 km³/yr; SPILLING — aim -0.543323 -0.819516 -0.182190
+          63 km², it spills 368 m over the sea; its own nodes' runoff 0.0080 km³/yr, its watershed's 20.0092 km³/yr; SPILLING — aim -0.944578 -0.065377 -0.321712
+         247 km², it spills 1428 m over the sea; its own nodes' runoff 0.0209 km³/yr, its watershed's 19.3708 km³/yr; SPILLING — aim -0.922439 0.107092 -0.370995
+          62 km², it spills 343 m over the sea; its own nodes' runoff 0.0079 km³/yr, its watershed's 17.4141 km³/yr; SPILLING — aim -0.917255 -0.197725 -0.345758
+          52 km², it spills -839 m over the sea; its own nodes' runoff 0.0026 km³/yr, its watershed's 17.0056 km³/yr; PARTIAL — aim 0.421773 -0.665781 -0.615503
+  THE ROW AGAINST THE BUDGET (review finding 3; ruling B8 item 2): the discharge row delivers 6241.8193 km³/yr from the land to the ocean, the cascade 6241.8193 km³/yr (a gap of 0.0000 km³/yr; 1284.4312 km³/yr held); of the 962 hollows that spill into the sea and are NOT full (the budget holds all their water), 0 have a row leaving them; the largest row out of one is 0.0000 km³/yr, out of a 99221237 km² hollow whose own water is DRY (the rows out of them sum to 0.0 km³/yr)
+  THE ROW AT THE ENDS (plan step 2b): of 1957 water bodies that are not full, 0 have ends whose rows do not sum to the water they hold (off by 0.0000 km³/yr in all); ends inside a spilling body 0, ends under no body 0
+CENSUS ROW-SEA 6241819311123920row-to-ocean/6241819311123920budget-to-ocean equal[ruling-B8-item-2:the-row's-sum-into-the-sea-is-the-cascade's] GREEN
+CENSUS ROW-OUT-OF-CLOSED-HOLLOWS 6241.8km3/yr-row-to-ocean/6241.8km3/yr-budget/0-of-962-closed-hollows-leak 0-leak[ruling-B8-item-2:a-closed-body-passes-nothing-on] GREEN
+CENSUS ROW-HELD 0of1957bodies/0ends-in-spilling/0ends-in-none 0[plan-step-2b:the-ends-of-a-closed-body-carry-what-it-holds] GREEN
+CENSUS CHECK-BUDGET-STALE 0nodes 0[the-budget-run-here-is-the-solve's-own] GREEN
+CENSUS CHECK-BUDGET-CONSERVE 7526250520327676runoff-1284431209203756held-6241819311123920ocean-0stranded exact[ruling-B7:nothing-is-lost] GREEN
+CENSUS G-LAKE-SHARE 2.017%of-land <=4%[ruling-B3;Verpoorter-et-al-2014] GREEN
+CENSUS BUDGET-LEAVES DRY1581/PARTIAL1037/SPILLING2515/transfers3081 no-band[a-reading] NO-BAND
+
+PLAN STEP 2b, W0 (ruling B8 item 2): the three readings before the cascade or the descent moves
+  M1 OCEAN-SIDE-POURS (question 1): 1493 full hollows pour 1497.4917 km³/yr into the sea; the ground's descent from the ocean-side gate of 906 of them (852.4125 km³/yr) ends in a lower hollow that met the sea earlier, 14 of them (0.2643 km³/yr) in one that is NOT full
+CENSUS M1-OCEAN-SIDE-POURS 906pours/852.4125km3/yr-into-a-hollow/14/0.2643km3/yr-into-a-hollow-not-full no-band[plan-step-2b-question-1] NO-BAND
+  M2 SADDLE-SIDES (question 2): saddles by their sides (the ocean's side counted): 2:4997 3:68 4:0 5:0 6:0 7:0 8+:0; at the saddles of three sides or more 96 full depressions pour on, and 40 of them (71.5595 km³/yr) pour today into a side that is not the steepest side that is the ocean or not full
+CENSUS M2-SADDLE-SIDES 68multi-way-saddles/40pours/71.5595km3/yr-not-the-steepest-open-side no-band[plan-step-2b-question-2] NO-BAND
+  M3 GROUND-PLATEAUS (question 3): 12712 plateaus of two nodes or more — 12124 drain (76019 nodes), 588 are closed (2808 nodes); 0 leaves of ZERO depth (pit at the spill's height), 0 of them hold water, 0.0000 km³/yr in all
+  the budget's DESCENT tree (100 nodes of drainage area or more): 102555 trunk nodes, 5283 on a plateau; the grid lean of their 8-step axes ON a plateau: 0°:859 45°:797 90°:771 135°:686 | FLATNESS 1.104; OFF the plateaus: 0°:23302 45°:20441 90°:18369 135°:19874 | FLATNESS 1.137
+CENSUS M3-GROUND-PLATEAUS 76019draining-nodes/2808closed-nodes/0zero-depth-leaves/5283of102555descent-trunks-on-a-plateau/flatness1.104on/1.137off no-band[plan-step-2b-question-3] NO-BAND
+
+THE WALK ACROSS A SPILLING LAKE (plan step 2b, question 4): 7846 six-step walks from the same starts inside their lake's hollow toward its spill; the bearing error against the straight line to the spill, SHIPPED (the split): mean 10.65°, p90 26.57°, exact lattice runs 17.7 %, the walks' axes 0°:3360 45°:1687 90°:1456 135°:1343 | FLATNESS 1.713; THE CONTROL (the nearest by the summed chord, the rule before the split): mean 13.39°, p90 29.31°, exact runs 43.2 %, axes 0°:3758 45°:1285 90°:1470 135°:1333 | FLATNESS 1.916; the straight lines to the spills themselves: 0°:3509 45°:1757 90°:1203 135°:1377 | FLATNESS 1.789
+CENSUS G-LAKE-WALK 10.65deg-mean/17.7%runs/flatness1.713/control13.39deg/43.2%runs/flatness1.916/lines-flatness1.789/7846walks <=12deg-mean[plan-step-2b-question-4:test-T9's-bound;the-owner's-word-owed-for-node-square-lakes] GREEN
+
+the map around the aim: face NegZ node (151, 1193); 121 nodes a side = 991 km; '~' sea, 'L' lake, '#' land, ':' coast band
+#########################################################################################################################
+#########################################################################################################################
+######################################################################L##################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+######################L##################################################################################################
+##################L##L###################################################################################################
+################LL##LL###################################################################################################
+#################L###L###################################################################################################
+#################L###############################################L#######################################################
+################L#L#####################################################################################################L
+#################L#################################################L#######LLL###########################################
+################L#########L################################LLLL###########LLL############################################
+###############L#########L##L#############################LLL############L##L############################################
+##############LL#L###LL#LL#L############################LLLLL##############LL##########################################LL
+################L###LLLLLLL###L##########################L#LL###########################################################L
+###############L##LLLLLLLLLL#L#LLL#####################################################################################L#
+################LLLLLLLLLL##L#L######################L###L####L##########################################################
+#################LL#LLL####L##L############################L#LL##LL######################################################
+###################LLL#################################L####LLLLL########################################################
+##################L###L#####################################LL###L#######################################################
+##################L###L#####################################LLL#L########################################################
+#############################################################L###############################L###########################
+#############################################################L###############################L###########################
+###############################################################################L##L####LL#####L##########################
+#####################################LL##################################L#L##L#LL####LL#################################
+########################################################################LL#L#L#L#L#####L#################################
+####################################################################L#L##LLLL###L########################################
+#################L###################################################L#LL#######L########################################
+###############################################################################L#########################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#######################################L#################################################################################
+#########################################################################################################################
+##############################################################################################L##########################
+##########################################################################################L###L##########################
+###L##############################################################################L######LL###L##########################
+##############################################################################LLLL########LLL#L##########################
+###############################################################L#L######LLL##L#LL##########L#L###########################
+###############################################################L#L##L####L###LLLL##L#####L#LL############################
+################################################################LL#L#####L###LLLL########L#L#############################
+################################################################LLL##LL#LLL##LLL#########L###############################
+###########################################################L###LLL###L##LLL##LL##########################################
+########################################################L#L##LLLL##LLLLLLLLLL############################################
+########################################################LLL#LLLLLL#######################################################
+##################################################L######################################################################
+#####################L###########################LL######################################################################
+#######################L#################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+################################################################L########################################################
+#########################################################################################################################
+#########################################################################################################################
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+
+################ the artifact pin gate ################
+
+running 1 test
+test the_home_planets_artifact_digests_to_its_committed_words has been running for over 60 seconds
+home_artifact_pin: edge 1216, 8871936 nodes, 6 pyramid levels, 96850524 bytes, digest [0xe033ae9081f01680, 0x8ccaae2eb5b330f7]
+home_artifact_pin: G-SEA the sea stands 3483 m over the ladder radius; ocean share 75.84 % (7584 / 10 000)
+test the_home_planets_artifact_digests_to_its_committed_words ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1298.72s
+
+
+################ the stands tool (family_stands) ################
+family_stands: the picture stands of phase 2 (ruling B53), generator 24; bodies {"home", "moon", "third"}
+
+== the home planet (Planet(4030111653607004909)): solved in 1300.5 s; the star at genesis -0.029643 -0.999269 -0.024121; THE BAND at rung 0 ±9246 m over the body's radius, the solved field -9862..12019 m (the datum 3483 m); the peak law: 30 collapses, 0 m left
+  the collision wedge: 27871 nodes in 24 patches (the largest 10258)
+    low star (12°–18°): no patch's middle stands under it
+    high star: the patch of 2044 nodes; its middle node 5385633 (0.669649 -0.724350 0.163975) 43 km from its edge, the star 44.4° up; its highest node 5650727, 1173 m over the sea; NEAR account 1001, ALOFT account 1002
+      1001=Planet(4030111653607004909):4002099.0215142984,-4308551.581945484,2389631.6494498667@-0.4594962610975118,-0.00818928773091687,0.7894129590441454,-0.40696842837870645
+      1002=Planet(4030111653607004909):4109712.704349731,-4844209.884726098,1366593.636582686@-0.291341247358988,-0.19564230842826297,0.8369322890567025,-0.41998655725448863
+  the Andean plateau: 269585 nodes in 17 patches (the largest 60826)
+    low star (12°–18°): no patch's middle stands under it
+    high star: the patch of 2873 nodes; its middle node 4627996 (0.541616 -0.702436 -0.461775) 179 km from its edge, the star 44.2° up; its highest node 4601234, 2814 m over the sea; NEAR account 1003, ALOFT account 1004
+      1003=Planet(4030111653607004909):3337974.385158277,-4447287.651506309,-3063125.7387903784@0.08051608171489194,-0.24090291682301607,0.9175021531729195,-0.30606003361187223
+      1004=Planet(4030111653607004909):3609661.638026087,-4705863.493789314,-2626958.918564233@0.10540809511834423,-0.3655862348649929,0.8758898530474946,-0.29673692673679647
+  the mountains: 110569 nodes in 464 patches (the largest 37679)
+    low star: the patch of 76 nodes; its middle node 6406122 (-0.450767 -0.231694 0.862048) 7 km from its edge, the star 12.9° up; its highest node 6403688, 1728 m over the sea; NEAR account 1005, ALOFT account 1006
+      1005=Planet(4030111653607004909):-2903725.134417985,-1501441.3794933637,5442213.260267495@0.744113699975911,-0.4343335276899069,-0.23852153675775614,0.44805877375107755
+      1006=Planet(4030111653607004909):-3222811.074186616,-1687837.073976135,5381639.099162106@0.6695140687961867,-0.3946329706490416,-0.30024266554299117,0.5530552160031829
+    high star: the patch of 5636 nodes; its middle node 4720108 (0.232672 -0.861258 -0.451773) 74 km from its edge, the star 59.8° up; its highest node 4717674, 7708 m over the sea; NEAR account 1007, ALOFT account 1008
+      1007=Planet(4030111653607004909):1482049.6207509553,-5476461.828041924,-2852440.251952779@0.2337210671278999,-0.16266964128704145,0.9409186799836374,-0.18326234812964243
+      1008=Planet(4030111653607004909):1715851.1276609497,-5692506.202654153,-2593653.72490718@0.26028996652713926,-0.33197570212151734,0.8961179248263951,-0.13789101251010388
+  the old plains: 597449 nodes in 11696 patches (the largest 92351)
+    low star: the patch of 4678 nodes; its middle node 6395039 (-0.600131 -0.216565 0.770027) 109 km from its edge, the star 12.5° up; its highest node 6431535, 433 m over the sea; NEAR account 1009, ALOFT account 1010
+      1009=Planet(4030111653607004909):-3754839.704855461,-1216851.1547466686,4970647.544243523@0.7475076556365747,-0.48230312685751314,-0.1752515724002706,0.4217853541309967
+      1010=Planet(4030111653607004909):-4150826.1436777925,-1590071.1757166442,4736511.217242347@0.6879191395961946,-0.4473917311095062,-0.2393021227670835,0.518982071319654
+    high star: the patch of 87120 nodes; its middle node 4853205 (-0.535221 -0.796032 -0.282616) 220 km from its edge, the star 54.9° up; its highest node 4853467, 611 m over the sea; NEAR account 1011, ALOFT account 1012
+      1011=Planet(4030111653607004909):-1466907.7928907874,-5819412.125018021,-2067726.5447701016@0.7198987037781791,-0.21388376794029196,0.6597668585377746,-0.02659478304775317
+      1012=Planet(4030111653607004909):-3161962.094791142,-5281419.846856219,-2073580.8280836064@0.8209499930234322,-0.38806446530100147,0.3955040258855185,0.13792623113034672
+  the coast: 112339 nodes in 451 patches (the largest 35996)
+    low star: the patch of 399 nodes; its middle node 6391934 (0.037877 -0.274260 0.960909) 0 km from its edge, the star 14.5° up; its highest node 6413856, 48 m over the sea; NEAR account 1013, ALOFT account 1014
+      1013=Planet(4030111653607004909):475695.9416857443,-1613237.8928830873,6120304.9444639655@0.6505097597927127,-0.28212889495916965,-0.43904674076327876,0.551795522334757
+      1014=Planet(4030111653607004909):-116720.50279885242,-1963950.4956748602,6188125.407646047@0.5854586883461333,-0.2277518426071432,-0.4647568375706662,0.6239938335916387
+    high star: the patch of 5944 nodes; its middle node 997120 (0.693953 -0.693064 0.195169) 0 km from its edge, the star 41.9° up; its highest node 5981400, 767 m over the sea; NEAR account 1015, ALOFT account 1016
+      1015=Planet(4030111653607004909):3133482.5489781834,-3623361.5949656917,4165346.350230095@-0.572838228265777,0.08145329496930603,0.6696216948600243,-0.4656484841044339
+      1016=Planet(4030111653607004909):4263018.906547671,-4646299.775702884,1562917.0565415802@-0.29838943564862713,-0.18849600395669425,0.8245250916246298,-0.44225713614033135
+  VD_SPAWN_POSES for the home planet (16 stands): 1001=Planet(4030111653607004909):4002099.0215142984,-4308551.581945484,2389631.6494498667@-0.4594962610975118,-0.00818928773091687,0.7894129590441454,-0.40696842837870645;1002=Planet(4030111653607004909):4109712.704349731,-4844209.884726098,1366593.636582686@-0.291341247358988,-0.19564230842826297,0.8369322890567025,-0.41998655725448863;1003=Planet(4030111653607004909):3337974.385158277,-4447287.651506309,-3063125.7387903784@0.08051608171489194,-0.24090291682301607,0.9175021531729195,-0.30606003361187223;1004=Planet(4030111653607004909):3609661.638026087,-4705863.493789314,-2626958.918564233@0.10540809511834423,-0.3655862348649929,0.8758898530474946,-0.29673692673679647;1005=Planet(4030111653607004909):-2903725.134417985,-1501441.3794933637,5442213.260267495@0.744113699975911,-0.4343335276899069,-0.23852153675775614,0.44805877375107755;1006=Planet(4030111653607004909):-3222811.074186616,-1687837.073976135,5381639.099162106@0.6695140687961867,-0.3946329706490416,-0.30024266554299117,0.5530552160031829;1007=Planet(4030111653607004909):1482049.6207509553,-5476461.828041924,-2852440.251952779@0.2337210671278999,-0.16266964128704145,0.9409186799836374,-0.18326234812964243;1008=Planet(4030111653607004909):1715851.1276609497,-5692506.202654153,-2593653.72490718@0.26028996652713926,-0.33197570212151734,0.8961179248263951,-0.13789101251010388;1009=Planet(4030111653607004909):-3754839.704855461,-1216851.1547466686,4970647.544243523@0.7475076556365747,-0.48230312685751314,-0.1752515724002706,0.4217853541309967;1010=Planet(4030111653607004909):-4150826.1436777925,-1590071.1757166442,4736511.217242347@0.6879191395961946,-0.4473917311095062,-0.2393021227670835,0.518982071319654;1011=Planet(4030111653607004909):-1466907.7928907874,-5819412.125018021,-2067726.5447701016@0.7198987037781791,-0.21388376794029196,0.6597668585377746,-0.02659478304775317;1012=Planet(4030111653607004909):-3161962.094791142,-5281419.846856219,-2073580.8280836064@0.8209499930234322,-0.38806446530100147,0.3955040258855185,0.13792623113034672;1013=Planet(4030111653607004909):475695.9416857443,-1613237.8928830873,6120304.9444639655@0.6505097597927127,-0.28212889495916965,-0.43904674076327876,0.551795522334757;1014=Planet(4030111653607004909):-116720.50279885242,-1963950.4956748602,6188125.407646047@0.5854586883461333,-0.2277518426071432,-0.4647568375706662,0.6239938335916387;1015=Planet(4030111653607004909):3133482.5489781834,-3623361.5949656917,4165346.350230095@-0.572838228265777,0.08145329496930603,0.6696216948600243,-0.4656484841044339;1016=Planet(4030111653607004909):4263018.906547671,-4646299.775702884,1562917.0565415802@-0.29838943564862713,-0.18849600395669425,0.8245250916246298,-0.44225713614033135
+
+== the home moon (Planet(2918819812335288845)): solved in 2.3 s; the star at genesis -0.029643 -0.999269 -0.024121; THE BAND at rung 0 ±12385 m over the body's radius, the solved field -20540..14776 m (the datum 0 m); the peak law: 0 collapses, 0 m left
+  the collision wedge: 0 nodes in 0 patches (the largest 0)
+    low star (12°–18°): no patch's middle stands under it
+    high star (40°–60°): no patch's middle stands under it
+  the Andean plateau: 0 nodes in 0 patches (the largest 0)
+    low star (12°–18°): no patch's middle stands under it
+    high star (40°–60°): no patch's middle stands under it
+  the mountains: 7052 nodes in 17 patches (the largest 6384)
+    low star: the patch of 52 nodes; its middle node 20015 (-0.231993 -0.255076 0.938678) 19 km from its edge, the star 13.8° up; its highest node 19877, 10099 m over the sea; NEAR account 1017, ALOFT account 1018
+      1017=Planet(2918819812335288845):-131905.69529967126,-125450.7851920004,316849.61205055134@0.7526907739415619,-0.38362392862978983,-0.30252075400986905,0.441328079323307
+      1018=Planet(2918819812335288845):-426085.88418515417,-260661.2831077307,53183.549175575135@0.7870495743590009,-0.4195097524741673,-0.26344493732911606,0.3676428974916237
+    high star (40°–60°): no patch's middle stands under it
+  the old plains: 427 nodes in 15 patches (the largest 135)
+    low star: the patch of 1 nodes; its middle node 20094 (0.011212 -0.239915 0.970729) 0 km from its edge, the star 12.5° up; its highest node 20094, 8704 m over the sea; NEAR account 1019, ALOFT account 1020
+      1019=Planet(2918819812335288845):-32206.936785760146,-106044.66133421836,348269.63810535264@0.6751650249663803,-0.31441572132218776,-0.4068334241384291,0.5289437666249566
+      1020=Planet(2918819812335288845):-405807.390759881,-265575.6692361232,165234.53005148948@0.7456026623512427,-0.370819334442742,-0.3561793116032884,0.4239174319180426
+    high star: the patch of 1 nodes; its middle node 16117 (-0.682286 -0.731037 -0.008444) 0 km from its edge, the star 48.7° up; its highest node 16117, 169 m over the sea; NEAR account 1021, ALOFT account 1022
+      1021=Planet(2918819812335288845):-224701.58689258198,-268433.4219924503,-37794.93242452856@0.9051718109398708,-0.34016170244525296,0.2535685742897281,0.025631757685669828
+      1022=Planet(2918819812335288845):13451.815812631097,-300665.2072446014,-398445.9901587171@0.9041040401397549,-0.31753907509049817,0.2813821982081472,-0.050881027163320804
+  the coast: 0 nodes in 0 patches (the largest 0)
+    low star (12°–18°): no patch's middle stands under it
+    high star (40°–60°): no patch's middle stands under it
+  VD_SPAWN_POSES for the home moon (6 stands): 1017=Planet(2918819812335288845):-131905.69529967126,-125450.7851920004,316849.61205055134@0.7526907739415619,-0.38362392862978983,-0.30252075400986905,0.441328079323307;1018=Planet(2918819812335288845):-426085.88418515417,-260661.2831077307,53183.549175575135@0.7870495743590009,-0.4195097524741673,-0.26344493732911606,0.3676428974916237;1019=Planet(2918819812335288845):-32206.936785760146,-106044.66133421836,348269.63810535264@0.6751650249663803,-0.31441572132218776,-0.4068334241384291,0.5289437666249566;1020=Planet(2918819812335288845):-405807.390759881,-265575.6692361232,165234.53005148948@0.7456026623512427,-0.370819334442742,-0.3561793116032884,0.4239174319180426;1021=Planet(2918819812335288845):-224701.58689258198,-268433.4219924503,-37794.93242452856@0.9051718109398708,-0.34016170244525296,0.2535685742897281,0.025631757685669828;1022=Planet(2918819812335288845):13451.815812631097,-300665.2072446014,-398445.9901587171@0.9041040401397549,-0.31753907509049817,0.2813821982081472,-0.050881027163320804
+
+== the third body (the desert world) (Planet(17782101822166660494)): solved in 2121.5 s; the star at genesis 0.936844 0.349555 0.011579; THE BAND at rung 0 ±6890 m over the body's radius, the solved field -6622..6182 m (the datum 0 m); the peak law: 977356 collapses, 0 m left
+  the collision wedge: 27770 nodes in 16 patches (the largest 7977)
+    low star: the patch of 2521 nodes; its middle node 6983486 (0.538622 -0.842027 0.029602) 22 km from its edge, the star 12.2° up; its highest node 1124992, 6182 m over the sea; NEAR account 1023, ALOFT account 1024
+      1023=Planet(17782101822166660494):5201226.8190885205,-5168249.04061752,519450.7329592227@0.891455329699277,0.37557411297727195,0.24896968486297896,-0.04759807592033288
+      1024=Planet(17782101822166660494):4210706.146823213,-6200302.693217778,-130612.11078669722@0.9226531564334192,0.22968219166572273,0.2960752195135241,0.09108626759889445
+    high star (40°–60°): no patch's middle stands under it
+  the Andean plateau: 217415 nodes in 22 patches (the largest 28441)
+    low star: the patch of 150 nodes; its middle node 11465642 (0.394310 -0.401124 -0.826813) 0 km from its edge, the star 12.7° up; its highest node 11465642, 6182 m over the sea; NEAR account 1025, ALOFT account 1026
+      1025=Planet(17782101822166660494):2904571.313866764,-2910640.232802603,-6089378.898630992@0.8003585643141912,0.12272670650347212,0.18623933214176555,-0.5564883064388025
+      1026=Planet(17782101822166660494):3024646.9534657463,-2627197.807017191,-6331056.681172049@0.8882623669566455,0.08678649996735498,0.20546298145703945,-0.4015507864800894
+    high star: the patch of 23247 nodes; its middle node 9801058 (0.583357 0.521277 0.622869) 272 km from its edge, the star 47.4° up; its highest node 1603396, 6125 m over the sea; NEAR account 1027, ALOFT account 1028
+      1027=Planet(17782101822166660494):6042140.437345169,2749573.357737958,3153566.0394972195@0.537202086346565,0.6036228014450504,-0.1503741996389759,0.5695972542801312
+      1028=Planet(17782101822166660494):4632131.811501469,3592092.886284602,4678230.290820646@0.3605847399859694,0.503408269821888,0.012305847183820069,0.7851161221687354
+  the mountains: 63594 nodes in 76 patches (the largest 11135)
+    low star: the patch of 1289 nodes; its middle node 11447351 (0.384120 -0.390917 -0.836442) 19 km from its edge, the star 12.3° up; its highest node 11464236, 6182 m over the sea; NEAR account 1029, ALOFT account 1030
+      1029=Planet(17782101822166660494):2898302.151015619,-2895997.33078513,-6093631.50283795@0.7651353133721627,0.13323660479173594,0.17841906124015078,-0.604137896477813
+      1030=Planet(17782101822166660494):2947991.131313413,-2549083.047898597,-6398729.844711494@0.8873591132932076,0.08153585126531109,0.20199295984715943,-0.40637981395009914
+    high star: the patch of 6649 nodes; its middle node 1154824 (0.876689 -0.467221 0.114546) 22 km from its edge, the star 41.2° up; its highest node 1047552, 6182 m over the sea; NEAR account 1031, ALOFT account 1032
+      1031=Planet(17782101822166660494):5210533.405086338,-5176575.749751402,200219.7195149333@0.8886229431616021,0.3793244348320855,0.2353696629683743,-0.10518250700703467
+      1032=Planet(17782101822166660494):6680764.43506254,-3364333.901291697,490177.99047471717@0.8284868179626145,0.4705822381100252,0.29497804836223734,0.07176280806899371
+  the old plains: 3593242 nodes in 1465 patches (the largest 427120)
+    low star: the patch of 26053 nodes; its middle node 4926542 (-0.017868 0.744812 0.667035) 432 km from its edge, the star 14.6° up; its highest node 4768895, 2303 m over the sea; NEAR account 1033, ALOFT account 1034
+      1033=Planet(17782101822166660494):-747552.6443284864,5150573.791172246,5185573.0076407725@0.3205852566099411,0.3234875888527049,0.19401281496761527,0.8688727759177081
+      1034=Planet(17782101822166660494):146709.39174308267,5380325.899106003,5216415.364153991@0.18279639905985892,0.31516599981046983,0.19374971389449452,0.9108879829155818
+    high star: the patch of 54108 nodes; its middle node 5683503 (0.541541 0.834183 0.104268) 799 km from its edge, the star 53.1° up; its highest node 5411936, 1382 m over the sea; NEAR account 1035, ALOFT account 1036
+      1035=Planet(17782101822166660494):2495836.5337476456,6545587.94013875,2212724.4405423384@0.19033550603710367,0.33896076591509045,-0.10442169797726997,0.9154092545432336
+      1036=Planet(17782101822166660494):4239664.555914556,6080589.782900723,1104749.3457865892@-0.013236601277770156,0.32647575971763204,-0.2026581738352548,0.9231294791529345
+  the coast: 0 nodes in 0 patches (the largest 0)
+    low star (12°–18°): no patch's middle stands under it
+    high star (40°–60°): no patch's middle stands under it
+  VD_SPAWN_POSES for the third body (the desert world) (14 stands): 1023=Planet(17782101822166660494):5201226.8190885205,-5168249.04061752,519450.7329592227@0.891455329699277,0.37557411297727195,0.24896968486297896,-0.04759807592033288;1024=Planet(17782101822166660494):4210706.146823213,-6200302.693217778,-130612.11078669722@0.9226531564334192,0.22968219166572273,0.2960752195135241,0.09108626759889445;1025=Planet(17782101822166660494):2904571.313866764,-2910640.232802603,-6089378.898630992@0.8003585643141912,0.12272670650347212,0.18623933214176555,-0.5564883064388025;1026=Planet(17782101822166660494):3024646.9534657463,-2627197.807017191,-6331056.681172049@0.8882623669566455,0.08678649996735498,0.20546298145703945,-0.4015507864800894;1027=Planet(17782101822166660494):6042140.437345169,2749573.357737958,3153566.0394972195@0.537202086346565,0.6036228014450504,-0.1503741996389759,0.5695972542801312;1028=Planet(17782101822166660494):4632131.811501469,3592092.886284602,4678230.290820646@0.3605847399859694,0.503408269821888,0.012305847183820069,0.7851161221687354;1029=Planet(17782101822166660494):2898302.151015619,-2895997.33078513,-6093631.50283795@0.7651353133721627,0.13323660479173594,0.17841906124015078,-0.604137896477813;1030=Planet(17782101822166660494):2947991.131313413,-2549083.047898597,-6398729.844711494@0.8873591132932076,0.08153585126531109,0.20199295984715943,-0.40637981395009914;1031=Planet(17782101822166660494):5210533.405086338,-5176575.749751402,200219.7195149333@0.8886229431616021,0.3793244348320855,0.2353696629683743,-0.10518250700703467;1032=Planet(17782101822166660494):6680764.43506254,-3364333.901291697,490177.99047471717@0.8284868179626145,0.4705822381100252,0.29497804836223734,0.07176280806899371;1033=Planet(17782101822166660494):-747552.6443284864,5150573.791172246,5185573.0076407725@0.3205852566099411,0.3234875888527049,0.19401281496761527,0.8688727759177081;1034=Planet(17782101822166660494):146709.39174308267,5380325.899106003,5216415.364153991@0.18279639905985892,0.31516599981046983,0.19374971389449452,0.9108879829155818;1035=Planet(17782101822166660494):2495836.5337476456,6545587.94013875,2212724.4405423384@0.19033550603710367,0.33896076591509045,-0.10442169797726997,0.9154092545432336;1036=Planet(17782101822166660494):4239664.555914556,6080589.782900723,1104749.3457865892@-0.013236601277770156,0.32647575971763204,-0.2026581738352548,0.9231294791529345

@@ -94,6 +94,31 @@ impl Ladder {
         if top > u32::from(RUNG_MAX) || n > N_MAX {
             return None;
         }
+        Ladder::banded(n, top, crust_m, above_m)
+    }
+
+    /// ★ THE SAME LADDER WITH ANOTHER BAND (ruling B55, 2026-10-05): the band's floor `crust_m` under
+    /// the surface and its top `above_m` over it, rounded as [`Ladder::for_radius`] rounds them. The
+    /// edge and the rungs stay, so every cell keeps its place on the face and only the radial range
+    /// moves. `None` for a crust as deep as the body or a band past the address's word.
+    ///
+    /// **Example.** The home planet's solved belts stand 12 km over its radius against a recipe band
+    /// that ends 9.3 km over it: the body asks for a top of 12.1 km plus its margins, and the ladder
+    /// gives every rung the cells to hold it; the floor, a whole top-rung cell under the surface,
+    /// stays where it was.
+    #[must_use]
+    pub fn with_band(&self, crust_m: u32, above_m: u32) -> Option<Ladder> {
+        Ladder::banded(
+            u64::from(self.n),
+            u32::from(self.rungs) - 1,
+            crust_m,
+            above_m,
+        )
+    }
+
+    /// The ladder of edge `n` and top rung `top` with the band `crust_m` under its surface and
+    /// `above_m` over it ([`Ladder::for_radius`], [`Ladder::with_band`]).
+    fn banded(n: u64, top: u32, crust_m: u32, above_m: u32) -> Option<Ladder> {
         let radius = (n as f64) * FRAC_2_PI;
         let surface = radius.round() as u64;
         // ★ THE FLOOR SITS ON A CELL BOUNDARY OF EVERY RUNG (2026-09-15, with the extended ladder):
@@ -128,6 +153,19 @@ impl Ladder {
     #[must_use]
     pub fn radius_m(&self) -> f64 {
         f64::from(self.n) * FRAC_2_PI
+    }
+
+    /// The band's depth under the surface, whole metres: a whole number of top-rung cells, as
+    /// [`Ladder::for_radius`] rounds it.
+    #[must_use]
+    pub fn crust_m(&self) -> u32 {
+        (self.radius_m().round() as u64 - u64::from(self.floor_m)) as u32
+    }
+
+    /// The band's room over the surface, whole metres.
+    #[must_use]
+    pub fn above_m(&self) -> u32 {
+        self.band_m - self.crust_m()
     }
 
     /// Cells along a face edge at a rung.
@@ -226,6 +264,42 @@ mod tests {
         reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
     )]
     use super::*;
+
+    /// ★ ANOTHER BAND ON THE SAME LADDER (ruling B55): the edge and the rungs stay; the band is
+    /// rounded as the radius's own ladder rounds it — the same crust and room give the same ladder, a
+    /// taller room moves only the top, a crust past one top-rung cell moves the floor by a whole top
+    /// cell, and a crust as deep as the body or a band past the word is refused.
+    #[test]
+    fn another_band_keeps_the_edge_and_rounds_the_crust_as_the_radius_does() {
+        let earth = Ladder::for_radius(6_371_000.0, 8_283, 8_283).expect("earth");
+        assert_eq!(earth.with_band(8_283, 8_283), Some(earth));
+        assert_eq!(
+            (earth.crust_m(), earth.above_m()),
+            (cell_m(earth.rungs - 1), 8_283)
+        );
+        let taller = earth.with_band(8_283, 12_400).expect("a taller top");
+        assert_eq!(
+            (taller.n, taller.rungs, taller.floor_m),
+            (earth.n, earth.rungs, earth.floor_m)
+        );
+        assert_eq!(taller.band_m, earth.band_m + (12_400 - 8_283));
+        let top_cell = cell_m(earth.rungs - 1);
+        let deeper = earth
+            .with_band(top_cell + 1, 8_283)
+            .expect("a deeper floor");
+        assert_eq!(deeper.floor_m, earth.floor_m - top_cell);
+        assert_eq!(deeper.band_m, 2 * top_cell + 8_283);
+        assert_eq!(
+            earth.with_band(u32::MAX - 1, 8_283),
+            None,
+            "deeper than the body"
+        );
+        assert_eq!(
+            earth.with_band(8_283, u32::MAX),
+            None,
+            "past the band's word"
+        );
+    }
 
     #[test]
     fn the_ladder_snaps_a_body_and_refuses_what_the_address_cannot_name() {

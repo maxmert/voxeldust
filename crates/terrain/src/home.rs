@@ -28,16 +28,20 @@ const HOME_GOLDEN_Z: &str = include_str!("../tests/golden_home_z.txt");
 /// ★ THE MEASURED HALF OF THE HOME WORLD'S IDENTITY (slice 8c stage C4c): the eight self-check
 /// chunks read through the golden fields, folded. Recorded with the fields; a host that folds another
 /// word has drifted, and its world hello is refused by name.
-pub const HOME_IDENTITY_MEASURED: u64 = 0xb6f9_2217_376b_80de;
+pub const HOME_IDENTITY_MEASURED: u64 = 0xf182_f5ca_7c79_b497;
 
 /// ★ THE HOME PLANET'S SEA (slice 8c stage C5; gate G-SEA): the level the solve finds for the
 /// planet's water inventory over its eroded field, whole metres over the ladder radius, and the
 /// share of the globe under it in 1/10 000. Recorded by the artifact pin; a change is a change of
 /// the solve and is re-recorded on purpose. ★ Since generator 20 (ruling B7 item 1) the level is
 /// solved over the CONNECTED ocean and the share is the ocean's own SEA bit, never `z ≤ sea`:
-/// 3 566 m and 7 859 at generator 19, recorded again by `golden_z_record` at generator 20.
-pub const HOME_PLANET_SEA_M: i32 = 3_591;
-pub const HOME_PLANET_OCEAN_SHARE_Q4: u32 = 7_811;
+/// 3 566 m and 7 859 at generator 19, recorded again by `golden_z_record` at generator 20; 3 591 m
+/// and 7 811 at generator 22; 3 593 m and 7 808 at generator 23 (the smooth rebound and the flats'
+/// potential, phase 1 of the ground step); 3 483 m and 7 584 at generator 24 (phase 2's macro change:
+/// the belts' wedges, the joint law on the mixed axis, the landscape's time, the water's own paths);
+/// 3 487 m and 7 588 at generator 25 (the rock kept exactly and the 414-pass axis, ruling B56).
+pub const HOME_PLANET_SEA_M: i32 = 3_487;
+pub const HOME_PLANET_OCEAN_SHARE_Q4: u32 = 7_588;
 
 /// The golden fields, parsed from the literal in the build. A torn literal is a defect, not a
 /// refusal: the build carries it, so it panics here and never ships.

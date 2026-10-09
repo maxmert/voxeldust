@@ -44,6 +44,12 @@ pub mod shore_shape;
 // stations and the reference stand read one rule, so our number and the reference's are one
 // instrument.
 pub mod skyline;
+// ★ THE ONE COPY OF THE BELTS' LAW FOR THE BENCHES (ruling B60 item 3: the second cliff's cause): the wedge by the
+// node's crust and the Andean coast, switched in the copy only; the game's law is untouched.
+pub mod belts_copy;
+// ★ THE ONE COPY OF THE INITIAL LAND FOR THE BENCHES (ruling B58 item 2: the stepped coasts' cause): the cell's
+// mean of the plate terms, switched in the copy only; the game's land is untouched.
+pub mod land_copy;
 // ★ THE ONE COPY OF THE MACRO SOLVE FOR THE BENCHES (rulings B10, B37, B38): the routing variants and the belts'
 // laws, switched in the copy only; the game's solve is untouched.
 pub mod solve_copy;

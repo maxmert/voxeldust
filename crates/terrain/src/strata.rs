@@ -205,7 +205,9 @@ impl Province {
     /// ★ THE ERODIBILITY OF A PROVINCE as a share of `K₀` in 1/256 (W7 step 3): the inverse
     /// square of its four rocks' mean tensile strength over shale's ([`tensile_strength_mpa`]),
     /// so a shield of granite and quartzite cuts about a tenth as fast as a shale shelf. An
-    /// integer, one answer on every host; never over 256.
+    /// integer, one answer on every host. A province of shale reads 256; no province holds a
+    /// softer rock, so none reads more — and one that did would, by the law itself (the ceiling at
+    /// 256 went on 2026-10-08: it never bound, and ruling B23 takes every clamp out of an operator).
     #[must_use]
     #[allow(
         clippy::integer_division,
@@ -222,8 +224,7 @@ impl Province {
         // Shale's strength, squared, times 256, over the mean's square — the mean is `sum / 4`,
         // so the square of the sum carries 16.
         let shale = tensile_strength_mpa(Stratum::Shale);
-        let q8 = 256 * 16 * shale * shale / (sum * sum);
-        if q8 > 256 { 256 } else { q8 }
+        256 * 16 * shale * shale / (sum * sum)
     }
 
     pub const ALL: [Province; 5] = [
@@ -454,6 +455,9 @@ mod tests {
         // The shale-only reading: four shales would give exactly 256.
         let shale = tensile_strength_mpa(Stratum::Shale);
         assert_eq!(256 * 16 * shale * shale / ((4 * shale) * (4 * shale)), 256);
+        // Salt, which no province holds, is softer than shale: a province of it would read over
+        // 256 by the law itself, and no ceiling cuts it (ruling B23).
+        assert!(tensile_strength_mpa(Stratum::Salt) < shale);
     }
 
     #[test]

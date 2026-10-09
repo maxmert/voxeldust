@@ -2890,7 +2890,7 @@ fn handover_stand(tick: u64) -> Option<Handover> {
         let Some(terms) = vd_client::sky::sky_terms(
             &charter,
             planet.ladder().radius_m(),
-            planet.relief_bound_m(0),
+            -planet.ground_range_m().0,
         ) else {
             continue;
         };
@@ -3058,7 +3058,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         )
         .expect("the home planet states a charter");
         let terms =
-            vd_client::sky::sky_terms(&charter, body.ladder().radius_m(), body.relief_bound_m(0))
+            vd_client::sky::sky_terms(&charter, body.ladder().radius_m(), -body.ground_range_m().0)
                 .expect("the home planet has air");
         terms.top_radius_m - terms.bottom_radius_m
     };

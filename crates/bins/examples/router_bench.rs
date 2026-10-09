@@ -12,14 +12,14 @@
 //! 1. `--cone`: the home moon under Tarboton's cone at two poles (a face's middle, near a face's
 //!    corner), each router's upslope-area error inward and outward (Tarboton's Table 2 quantity, in
 //!    nodes²), Hyväluoma's rotation score at 15° and 45°, and the fourfold amplitude.
-//! 2. `--planet <d8|rho8|dinf>`: the HOME PLANET solved by a line-for-line COPY of
-//!    `vd_terrain::solve::solve_full` in which only the drains after each routing, the accumulation
-//!    and (for D∞) the cut and the deposit follow the variant. The final routing, the lakes, the
-//!    water's tree and the artifact are the solve's own, read over the variant's eroded field.
-//!    ★ THE CONTROL: `--planet d8` must give the artifact the pin records
-//!    (`crates/bins/tests/home_artifact_pin.rs`, generator 21) bit for bit, or the copy is not the
-//!    solve and nothing the variants print can be trusted (`--check-stock` also runs the real solve and
-//!    compares every height and every lake level).
+//! 2. `--planet d8`: the HOME PLANET solved by the bench's copy of `vd_terrain::solve::solve_full`
+//!    (`vd_bins::solve_copy`, every law as the game runs it), and its readings.
+//!    ★ THE CONTROL: it must give the artifact the pin records (`crates/bins/tests/home_artifact_pin.rs`)
+//!    bit for bit (`--check-stock` also runs the real solve and compares every height and every lake
+//!    level). ★ SINCE PHASE 2 (2026-10-04) the variants' own cut and deposit were the old stream-power
+//!    law, so the copy no longer routes by them: Rho8, D∞, the fills and the fans return on the joint
+//!    law when R2 measures D∞ (ruling B12; DEFERRED D-TERRAIN-10). Stage 1 reads the routers alone and
+//!    stands.
 //!
 //! **WHAT IT PRINTS (stage 2)**, each a `CENSUS <GATE>.<variant> …` line: G-GRID's valleys (the census's
 //! own rule — a land node of at least a hundred nodes of drainage area, its long axis over eight
@@ -32,7 +32,7 @@
 //!
 //! ```text
 //! cargo run --release -p vd-bins --example router_bench -- --cone
-//! cargo run --release -p vd-bins --example router_bench -- --planet rho8 --write-artifact rho8.art
+//! cargo run --release -p vd-bins --example router_bench -- --planet d8 --write-artifact d8.art
 //! ```
 //!
 //! **Example.** Over the second pocket's floor, D8's furrows run north-east one node apart; the census
@@ -46,16 +46,34 @@ use vd_bins::grid_bias::{
     AZIMUTHS, AxisHistogram, ConeError, cone_error, cone_z, patch_axis, polar_map, trunk_axis, unit,
 };
 use vd_bins::router_variants::{dinf, dinf_accumulate, facing, paola_braided, rho8, units};
-use vd_bins::solve_copy::{Laws, Router as Variant, artifact_of, solve_copy};
+use vd_bins::solve_copy::{Laws, artifact_of, solve_copy};
 use vd_terrain::home::{home_moon, home_planet, home_solve_words};
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
 use vd_terrain::solve::{DRY, MacroSolve, Schedule};
 
-/// The artifact the pin records at generator 21 (`crates/bins/tests/home_artifact_pin.rs`).
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x1eb5_3c78_2459_e0df, 0xc2cc_7661_57d2_a0e4];
+/// The artifact the pin records (`crates/bins/tests/home_artifact_pin.rs`).
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x81c0_d090_3ce0_129b, 0xb29e_978b_3db0_1040];
 
 /// The cone's slope (grid_bias's own).
 const CONE_SLOPE: f64 = 0.05;
+
+/// The routers stage 1 compares (the washboard bench's own; ruling B10 item 2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Variant {
+    D8,
+    Rho8,
+    Dinf,
+}
+
+impl Variant {
+    fn name(self) -> &'static str {
+        match self {
+            Variant::D8 => "d8",
+            Variant::Rho8 => "rho8",
+            Variant::Dinf => "dinf",
+        }
+    }
+}
 
 // ── STAGE 1: THE CONE ────────────────────────────────────────────────────────────────────────
 
@@ -82,7 +100,7 @@ fn cone_stage() {
             state.z = cone_z(&lattice, apex, radius_m, CONE_SLOPE);
             let _ = state.route();
             match v {
-                Variant::D8 | Variant::Fill | Variant::Fan | Variant::FanNoSkip => {
+                Variant::D8 => {
                     state.accumulate();
                 }
                 Variant::Rho8 => {
@@ -90,7 +108,7 @@ fn cone_stage() {
                     let _ = rho8(&mut state, &u, radius_m, seed);
                     state.accumulate();
                 }
-                Variant::Dinf | Variant::DinfFill | Variant::DinfFan => {
+                Variant::Dinf => {
                     let d = dinf(&state, &u, radius_m);
                     dinf_accumulate(&mut state, &d);
                 }
@@ -125,139 +143,6 @@ fn cone_stage() {
                 map.fourfold_pct()
             );
         }
-    }
-}
-
-// ── THE STAGE TRACE: WHERE DOES THE WASHBOARD COME FROM? ──────────────────────────────────────
-
-/// ★ A WINDOW OF THE FACE GRID around an aim, shaded after each stage of the copy, with the window's
-/// fine texture as numbers — so the stage whose picture first shows the 45° ridges names the step
-/// that makes them (2026-09-26: neither routing cure removed them from the second pocket's floor).
-struct Trace {
-    lattice: MacroLattice,
-    face: vd_seed::bend::Face,
-    ci: i32,
-    cj: i32,
-    half: i32,
-    dir: String,
-}
-
-impl Trace {
-    fn new(lattice: &MacroLattice, aim: vd_core::glam::DVec3, half: i32, dir: &str) -> Trace {
-        let aim = aim.normalize();
-        let mut best = (f64::MIN, 0u32);
-        for node in 0..lattice.node_count() as u32 {
-            let d = unit(lattice, node).dot(aim);
-            if d > best.0 {
-                best = (d, node);
-            }
-        }
-        let (face, ci, cj) = lattice.split(best.1);
-        let _ = std::fs::create_dir_all(dir);
-        println!(
-            "TRACE: node {} (face {:?}, {ci}, {cj}), a window of {} × {} nodes, pictures in {dir}",
-            best.1,
-            face,
-            2 * half + 1,
-            2 * half + 1
-        );
-        Trace {
-            lattice: *lattice,
-            face,
-            ci,
-            cj,
-            half,
-            dir: dir.to_string(),
-        }
-    }
-
-    /// The node at window offset `(a, b)`, or `None` off the face.
-    fn node(&self, a: i32, b: i32) -> Option<u32> {
-        let (i, j) = (self.ci + a, self.cj + b);
-        let edge = self.lattice.edge as i32;
-        ((0..edge).contains(&i) && (0..edge).contains(&j))
-            .then(|| self.lattice.index(self.face, i, j))
-    }
-
-    /// The shaded picture and the texture numbers of `z` (sixteenths) at one stage.
-    fn shot(&self, name: &str, z: &[i32]) {
-        const PX: u32 = 4;
-        let size = (2 * self.half + 1) as u32;
-        let node_m = self.lattice.node_m();
-        let mut img = image::RgbImage::new(size * PX, size * PX);
-        // The light: from the north-west, 45° up (the panels' own light).
-        let (az, alt) = (315f64.to_radians(), 45f64.to_radians());
-        let light = [alt.cos() * az.cos(), alt.cos() * az.sin(), alt.sin()];
-        let at = |a: i32, b: i32| self.node(a, b).map(|n| f64::from(z[n as usize]) / 16.0);
-        let (mut rms, mut count) = (0.0f64, 0usize);
-        let (mut c4, mut s4, mut sum) = (0.0f64, 0.0f64, 0.0f64);
-        for b in -self.half..=self.half {
-            for a in -self.half..=self.half {
-                let (Some(c), Some(e), Some(w), Some(n), Some(so)) = (
-                    at(a, b),
-                    at(a + 1, b),
-                    at(a - 1, b),
-                    at(a, b + 1),
-                    at(a, b - 1),
-                ) else {
-                    continue;
-                };
-                let gx = (e - w) / (2.0 * node_m);
-                let gy = (n - so) / (2.0 * node_m);
-                let len = (gx * gx + gy * gy + 1.0).sqrt();
-                let shade = ((-gx * light[0] - gy * light[1] + light[2]) / len).clamp(0.0, 1.0);
-                let g = (40.0 + 215.0 * shade) as u8;
-                let (x0, y0) = (((a + self.half) as u32) * PX, ((self.half - b) as u32) * PX);
-                for dy in 0..PX {
-                    for dx in 0..PX {
-                        img.put_pixel(x0 + dx, y0 + dy, image::Rgb([g, g, g]));
-                    }
-                }
-                // The fine texture: the height less the mean of the eight neighbours.
-                let ring: Vec<f64> = [
-                    (-1, -1),
-                    (0, -1),
-                    (1, -1),
-                    (-1, 0),
-                    (1, 0),
-                    (-1, 1),
-                    (0, 1),
-                    (1, 1),
-                ]
-                .iter()
-                .filter_map(|&(da, db)| at(a + da, b + db))
-                .collect();
-                if ring.len() == 8 {
-                    let fine = c - ring.iter().sum::<f64>() / 8.0;
-                    rms += fine * fine;
-                    count += 1;
-                }
-                let s = gx.hypot(gy);
-                if s > 0.0 {
-                    let th = gy.atan2(gx);
-                    c4 += s * (4.0 * th).cos();
-                    s4 += s * (4.0 * th).sin();
-                    sum += s;
-                }
-            }
-        }
-        let path = format!("{}/{name}.png", self.dir);
-        let ok = img.save(&path).is_ok();
-        println!(
-            "TRACE {name}: fine texture RMS {:.1} m over {count} nodes; the slopes' fourfold {:.1} % at phase {:.1}° (45° = the diagonals); {}",
-            (rms / count.max(1) as f64).sqrt(),
-            if sum > 0.0 {
-                100.0 * c4.hypot(s4) / sum
-            } else {
-                f64::NAN
-            },
-            (s4.atan2(c4).to_degrees() / 4.0).rem_euclid(90.0),
-            if ok {
-                path
-            } else {
-                format!("{path} NOT WRITTEN")
-            }
-        );
     }
 }
 
@@ -362,65 +247,32 @@ fn readings(tag: &str, state: &MacroSolve) {
     );
 }
 
-fn planet_stage(
-    v: Variant,
-    write: Option<&str>,
-    check_stock: bool,
-    trace: Option<(vd_core::glam::DVec3, i32, String)>,
-) {
+fn planet_stage(write: Option<&str>, check_stock: bool) {
     let body = home_planet();
     let words = home_solve_words();
     let schedule = Schedule::standard(words.age_yr);
-    println!("== STAGE 2: THE HOME PLANET, variant {} ==", v.name());
+    println!("== STAGE 2: THE HOME PLANET, d8 (the copy, every law as the game runs it) ==");
     println!(
         "  Paola, Heller & Angevine 1992's braided inlet slope over the load-to-water ratio: {:.3}",
         paola_braided()
     );
     let t = Instant::now();
-    let tracer = trace.map(|(aim, half, dir)| {
-        let lattice = body.macro_lattice().expect("a lattice");
-        Trace::new(&lattice, aim, half, &dir)
-    });
-    let shot = tracer
-        .as_ref()
-        .map(|t| move |name: &str, z: &[i32]| t.shot(name, z));
-    let solved = solve_copy(
-        &body,
-        &words,
-        schedule,
-        v,
-        &Laws::default(),
-        shot.as_ref().map(|f| f as &dyn Fn(&str, &[i32])),
-        false,
-    )
-    .expect("the home planet solves");
+    let solved = solve_copy(&body, &words, schedule, &Laws::default(), false)
+        .expect("the home planet solves");
     println!("the copy solved in {:.1} s", t.elapsed().as_secs_f64());
-    let (fills, routes): (Vec<&String>, Vec<&String>) = solved
-        .rewrites
-        .iter()
-        .partition(|l| l.contains("basin fill"));
-    for line in routes.iter().take(3).chain(fills.iter()) {
-        println!("  {line}");
-    }
-    if routes.len() > 3 {
-        println!("  … and {} more routings", routes.len() - 3);
-    }
     let artifact = artifact_of(&body, &words, &solved);
     let digest = artifact.digest();
     println!(
-        "ARTIFACT {} digest [{:#018x}, {:#018x}]",
-        v.name(),
-        digest[0],
-        digest[1]
+        "ARTIFACT d8 digest [{:#018x}, {:#018x}]",
+        digest[0], digest[1]
     );
-    if v == Variant::D8 {
-        let ok = digest == HOME_ARTIFACT_DIGEST;
-        println!(
-            "CENSUS CHECK-COPY-IS-THE-SOLVE.d8 {} =the-pin[home_artifact_pin,generator-21] {}",
-            if ok { "equal" } else { "DIFFERS" },
-            if ok { "GREEN" } else { "RED" }
-        );
-    }
+    let ok = digest == HOME_ARTIFACT_DIGEST;
+    println!(
+        "CENSUS CHECK-COPY-IS-THE-SOLVE.d8 {} =the-pin[home_artifact_pin,generator-{}] {}",
+        if ok { "equal" } else { "DIFFERS" },
+        vd_terrain::GENERATOR_VERSION,
+        if ok { "GREEN" } else { "RED" }
+    );
     if check_stock {
         let t = Instant::now();
         let (stock, _, _) =
@@ -438,24 +290,17 @@ fn planet_stage(
             .filter(|(a, b)| a != b)
             .count();
         println!(
-            "CENSUS CHECK-STOCK.{} {}heights/{}levels-differ-from-solve_full ({:.1} s) {}",
-            v.name(),
+            "CENSUS CHECK-STOCK.d8 {}heights/{}levels-differ-from-solve_full ({:.1} s) {}",
             dz,
             dw,
             t.elapsed().as_secs_f64(),
-            if v == Variant::D8 && dz == 0 && dw == 0 {
-                "GREEN"
-            } else if v == Variant::D8 {
-                "RED"
-            } else {
-                "NO-BAND"
-            }
+            if dz == 0 && dw == 0 { "GREEN" } else { "RED" }
         );
     }
-    readings(v.name(), &solved.state);
+    readings("d8", &solved.state);
     if let Some(path) = write {
         match vd_bins::artifact_file::write(path, &artifact) {
-            Ok(()) => println!("wrote the {} artifact to {path}", v.name()),
+            Ok(()) => println!("wrote the d8 artifact to {path}"),
             Err(e) => println!("could not write {path}: {e}"),
         }
     }
@@ -535,48 +380,28 @@ fn artifact_readings(path: &str, tag: &str) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut cone = false;
-    let mut planet: Option<Variant> = None;
+    let mut planet = false;
     let mut write: Option<String> = None;
     let mut check_stock = false;
     let mut readings_done = false;
-    let mut trace: Option<(vd_core::glam::DVec3, i32, String)> = None;
     let mut k = 0;
     while k < args.len() {
         match args[k].as_str() {
             "--cone" => cone = true,
             "--planet" => {
                 k += 1;
-                planet = Some(match args.get(k).map(String::as_str) {
-                    Some("d8") => Variant::D8,
-                    Some("rho8") => Variant::Rho8,
-                    Some("dinf") => Variant::Dinf,
-                    Some("fill") => Variant::Fill,
-                    Some("dinf+fill") => Variant::DinfFill,
-                    Some("fan") => Variant::Fan,
-                    Some("fan-noskip") => Variant::FanNoSkip,
-                    Some("dinf+fan") => Variant::DinfFan,
+                match args.get(k).map(String::as_str) {
+                    Some("d8") => planet = true,
                     other => panic!(
-                        "--planet d8|rho8|dinf|fill|dinf+fill|fan|fan-noskip|dinf+fan, not {other:?}"
+                        "--planet d8 (the variants left with the old erosion, DEFERRED D-TERRAIN-10), not {other:?}"
                     ),
-                });
+                }
             }
             "--write-artifact" => {
                 k += 1;
                 write = args.get(k).cloned();
             }
             "--check-stock" => check_stock = true,
-            "--trace" => {
-                let num = |o: usize| -> f64 {
-                    args.get(k + o)
-                        .and_then(|a| a.parse().ok())
-                        .expect("--trace DX DY DZ HALF DIR")
-                };
-                let aim = vd_core::glam::DVec3::new(num(1), num(2), num(3));
-                let half = num(4) as i32;
-                let dir = args.get(k + 5).cloned().expect("--trace DX DY DZ HALF DIR");
-                trace = Some((aim, half, dir));
-                k += 5;
-            }
             "--artifact-readings" => {
                 let path = args
                     .get(k + 1)
@@ -597,12 +422,12 @@ fn main() {
     if cone {
         cone_stage();
     }
-    if let Some(v) = planet {
-        planet_stage(v, write.as_deref(), check_stock, trace.clone());
+    if planet {
+        planet_stage(write.as_deref(), check_stock);
     }
-    if !cone && planet.is_none() && !readings_done {
+    if !cone && !planet && !readings_done {
         println!(
-            "usage: router_bench [--cone] [--planet d8|rho8|dinf] [--write-artifact FILE] [--check-stock]"
+            "usage: router_bench [--cone] [--planet d8] [--write-artifact FILE] [--check-stock]"
         );
     }
 }

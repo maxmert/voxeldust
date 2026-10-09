@@ -951,9 +951,10 @@ pub fn field_step_m(
     let mut step = 0.0;
     let mut level = here + 1;
     while level <= next {
-        if let Some(coarse) = lattice.coarser(level) {
-            step += slope * coarse.node_m() / (2.0 * std::f64::consts::SQRT_2);
-        }
+        // A level the lattice cannot halve to adds nothing (the pyramid never holds one).
+        step += lattice.coarser(level).map_or(0.0, |coarse| {
+            slope * coarse.node_m() / (2.0 * std::f64::consts::SQRT_2)
+        });
         level += 1;
     }
     step
@@ -1565,6 +1566,54 @@ impl Artifact {
     #[must_use]
     pub fn sea(&self) -> Option<i32> {
         (self.sea_m != DRY_M).then_some(i32::from(self.sea_m))
+    }
+
+    /// ★ THE MACRO FIELD'S DRAWN RANGE (ruling B55, 2026-10-05): the lowest and the highest `Z` any
+    /// column can read, whole metres over the ladder radius — over the rows and every pyramid level,
+    /// each through its own sixteen-node stencils ([`sample_z`]'s gather, [`node_at`] across the
+    /// seams). A Catmull-Rom read stands at most 9/32 of its sixteen nodes' range outside them (the
+    /// weights' negative mass at mid-cell on both axes, `2 · (1/8) · (9/8)`), and the kernel's
+    /// truncation adds under a metre. The shard states the range in the artifact's head and every
+    /// host's band reads it from there (`BodyDefinition::with_band_m`): no host but the shard holds
+    /// every row.
+    ///
+    /// **Example.** A belt's summit node stands at 12 019 m among neighbours a kilometre lower: a
+    /// column halfway to the next node can read up to 9/32 of the stencil's spread over the summit,
+    /// and the range's top says so, so the band holds the drawn peak and not only the node.
+    #[must_use]
+    pub fn drawn_range_m(&self, lattice: &MacroLattice) -> (i32, i32) {
+        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+        for level in 0..=self.pyramid.len() {
+            // Every level the pyramid holds was folded from this lattice's own halving.
+            let at = lattice
+                .coarser(level as u32)
+                .expect("a level the pyramid holds is a halving of its lattice");
+            let word = |node: u32| -> i32 {
+                match level.checked_sub(1) {
+                    None => i32::from(self.rows[node as usize].z_m),
+                    Some(k) => i32::from(self.pyramid[k][node as usize]),
+                }
+            };
+            let edge = i64::from(at.edge);
+            for face in Face::ALL {
+                for nj in -1..edge {
+                    for ni in -1..edge {
+                        let (mut a, mut b) = (i32::MAX, i32::MIN);
+                        for row in -1..=2 {
+                            for col in -1..=2 {
+                                let z = word(node_at(&at, face, ni + col, nj + row));
+                                a = a.min(z);
+                                b = b.max(z);
+                            }
+                        }
+                        let over = (9 * (b - a) + 31) >> 5;
+                        lo = lo.min(a - over - 1);
+                        hi = hi.max(b + over + 1);
+                    }
+                }
+            }
+        }
+        (lo, hi)
     }
 
     /// The nodes.
@@ -2389,15 +2438,24 @@ mod tests {
         // The digest is a function of the artifact.
         let (_, again) = moon_artifact(&home_moon_solve_words());
         assert_eq!(again.digest(), artifact.digest());
-        let (wet_state, wet) = moon_artifact(&SolveWords {
+        let wet_words = SolveWords {
             water_km3: 3_000_000,
             ..home_solve_words()
-        });
-        assert_ne!(wet.digest(), artifact.digest());
-        assert!(wet.rows.iter().any(|r| r.water_m != DRY_M));
+        };
+        let (_, solved_wet) = moon_artifact(&wet_words);
+        assert_ne!(solved_wet.digest(), artifact.digest());
         // ★ THE ROWS FOLLOW THE WATER, NEVER THE ROUTING FILL (ruling W11): a row states water
         // exactly where the state states a level, and a node the flood raised whose budget put no
-        // water in it states DRY. Before W11 every raised node carried the fill's own level.
+        // water in it states DRY. Before W11 every raised node carried the fill's own level. Since
+        // phase 2 the solved wet field holds no hollow (ruling B51 item 2), so the rows are read
+        // over the same field with two hollows dug into it (`crate::solve::dug`).
+        let moon = home_moon();
+        let (mut wet_state, _, _) =
+            solve_full(&moon, &wet_words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let (wet_climate, _) = crate::solve::dug::two_hollows(&moon, &wet_words, &mut wet_state);
+        let wet_facies = wet_state.facies(&vec![false; wet_state.node_count()], 0, true);
+        let wet = Artifact::of(&wet_state, &wet_facies, &wet_climate, true);
+        assert!(wet.rows.iter().any(|r| r.water_m != DRY_M));
         let mut raised_and_dry = 0usize;
         for (i, r) in wet.rows.iter().enumerate() {
             let level = wet_state.water_level(i as u32);
@@ -2788,10 +2846,10 @@ mod tests {
         assert_eq!(rung, 9);
         let step = body.step_bound_m(rung) + field_step_m(&body, &lattice, levels, rung);
         // The floor stands PAST the tier rule's own switch distance: that is the defect's cure.
+        let floor = switch_floor_m(step, pixel);
         assert!(
-            switch_floor_m(step, pixel) > switch_m(rung, pixel),
-            "the step {step} floors at {}",
-            switch_floor_m(step, pixel)
+            floor > switch_m(rung, pixel),
+            "the step {step} floors at {floor}"
         );
         // A zero step floors nothing, and the reach is the one every flight before W17 flew.
         assert_eq!(switch_floor_m(0.0, pixel), 0.0);
@@ -3007,6 +3065,70 @@ mod tests {
         assert!(all.len() <= 6 * per_edge * per_edge, "{}", all.len());
     }
 
+    /// ★ THE DRAWN RANGE HOLDS EVERY READ (ruling B55): on the moon's field with a 6 km spike and a
+    /// 7 km pit dug into it — the pit on a face's edge, so its stencils cross the seam — every `Z`
+    /// a column reads near them, through the rows at the node's rung and at the half and quarter
+    /// node, and through pyramid levels 1 and 2 at their own rungs, stands inside the artifact's
+    /// drawn range; and the range reaches past the spike and the pit by the spline's overshoot.
+    #[test]
+    fn the_drawn_range_holds_every_read_at_every_level() {
+        let moon = home_moon();
+        let lattice = MacroLattice::of(&moon).expect("a lattice");
+        let words = home_moon_solve_words();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let spike = lattice.index(Face::PosX, 40, 40);
+        let pit = lattice.index(Face::NegY, 0, 30);
+        state.z[spike as usize] += 6_000 * crate::solve::Z_STEPS_PER_M;
+        state.z[pit as usize] -= 7_000 * crate::solve::Z_STEPS_PER_M;
+        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, None);
+        let facies = vec![0u8; state.node_count()];
+        let artifact = Artifact::of(&state, &facies, &climate, false);
+        let (lo, hi) = artifact.drawn_range_m(&lattice);
+        let row_max = artifact
+            .rows
+            .iter()
+            .map(|r| i32::from(r.z_m))
+            .max()
+            .expect("rows");
+        let row_min = artifact
+            .rows
+            .iter()
+            .map(|r| i32::from(r.z_m))
+            .min()
+            .expect("rows");
+        assert!(hi > row_max, "{hi} against the highest node {row_max}");
+        assert!(lo < row_min, "{lo} against the lowest node {row_min}");
+        let unit = f64::from(1u32 << LENGTH_BITS) * STEPS_PER_M as f64;
+        let inside = |z: Gi| {
+            let m = z.raw() as f64 / unit;
+            assert!(m >= f64::from(lo), "{m} under {lo}");
+            assert!(m <= f64::from(hi), "{m} over {hi}");
+        };
+        let counts = artifact.coast_counts();
+        let reads =
+            |at: &MacroLattice, field: &dyn ZField, rung: u8, (face, i, j): (Face, i32, i32)| {
+                // The cells of `rung` over the node block around (i, j), every one of them.
+                let per = 1i32 << (13 - i32::from(rung.min(13)));
+                for dj in -3 * per..3 * per {
+                    for di in -3 * per..3 * per {
+                        let ci = (i * per + di).clamp(0, (at.edge as i32) * per - 1);
+                        let cj = (j * per + dj).clamp(0, (at.edge as i32) * per - 1);
+                        inside(sample_z(at, field, face, rung, ci, cj).expect("a read"));
+                    }
+                }
+            };
+        for rung in [11u8, 12, 13] {
+            reads(&lattice, &artifact, rung, (Face::PosX, 40, 40));
+            reads(&lattice, &artifact, rung, (Face::NegY, 0, 30));
+        }
+        for level in 1..=2u32 {
+            let at = lattice.coarser(level).expect("a level");
+            let field = PyramidField::of(&artifact, level, &counts).expect("the level");
+            reads(&at, &field, 13, (Face::PosX, 40 >> level, 40 >> level));
+            reads(&at, &field, 13, (Face::NegY, 0, 30 >> level));
+        }
+    }
+
     /// ★ A BODY THAT HOLDS WATER WHOSE SOLVE SETTLED NO LEVEL states a DRY artifact (2026-09-21):
     /// the body's own word is not enough — the state must name a sea as well.
     ///
@@ -3069,15 +3191,9 @@ mod tests {
             .iter()
             .map(|&(i, j)| f64::from(artifact.rows[lattice.index(Face::PosZ, i, j) as usize].z_m))
             .collect();
-        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-        for &b in &block {
-            if b < lo {
-                lo = b;
-            }
-            if b > hi {
-                hi = b;
-            }
-        }
+        let mut sorted = block.clone();
+        sorted.sort_by(f64::total_cmp);
+        let (lo, hi) = (sorted[0], sorted[sorted.len() - 1]);
         assert!(level_m >= lo - 1.0, "{level_m} under {lo}");
         assert!(level_m <= hi + 1.0, "{level_m} over {hi}");
     }

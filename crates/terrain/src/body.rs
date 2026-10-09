@@ -496,6 +496,11 @@ pub(crate) mod salt {
     /// a NAMED SCATTER around a computed direction, T9). Read by the solve once per body, never by
     /// the draw of the body itself, so no draw above it moves.
     pub const FLOW: u64 = 0x5e_ed_0c;
+    /// ★ THE OLDER LANDSCAPE's stream (generator 26, ruling B60): the relief a plate carried when
+    /// its erosion began (`land::older_landscape_m`). Read by the solve once per body, never by the
+    /// draw of the body itself. Its number is the bench's own stream (the ASCII of "SPECTR"), kept
+    /// so that the world the bench measured is the world the game solves.
+    pub const OLDER_LANDSCAPE: u64 = 0x5350_4543_5452;
 }
 
 /// The cave parameters, as the kernels read them.
@@ -699,6 +704,12 @@ pub struct BodyDefinition {
     /// ★ THE MACRO LATTICE'S EDGE (slice 8c stage C4): the divisor rule's answer for this body, so
     /// a column finds its macro node without the search; zero where the rule finds no edge.
     pub(crate) macro_edge: u32,
+    /// ★ THE DRAWN GROUND'S RANGE (ruling B55, 2026-10-05): the lowest and the highest a drawn
+    /// surface can stand from the ladder radius, in gap steps at [`LENGTH_BITS`] — the recipe's own
+    /// bound on both sides (`±relief_bound(0)`) for a body built from its seed, the solved field's
+    /// range with the fine relief's bound when the artifact's head states it
+    /// ([`BodyDefinition::with_band_m`]).
+    pub(crate) ground: [Gi; 2],
 }
 
 /// A draw in `[lo, hi)` metres as a whole number.
@@ -1298,7 +1309,7 @@ impl BodyDefinition {
             inv_n[rung] = inv_n_of(ladder.cells_per_edge(rung as u8));
             rung += 1;
         }
-        Some(BodyDefinition {
+        let mut body = BodyDefinition {
             seed,
             facts,
             ladder,
@@ -1331,7 +1342,11 @@ impl BodyDefinition {
             caves,
             biome,
             macro_edge: crate::macro_lattice::macro_edge(ladder.n).unwrap_or(0),
-        })
+            ground: [Gi::ZERO; 2],
+        };
+        let bound = body.relief_bound(0);
+        body.ground = [Gi::ZERO - bound, bound];
+        Some(body)
     }
 
     /// ★ THE BIOME CHARTER — the biome field's own numbers as the recipe's kernel reads them. One
@@ -1393,6 +1408,61 @@ impl BodyDefinition {
             None => Gi::ZERO,
         };
         self
+    }
+
+    /// ★ THE SAME BODY WITH ITS SOLVED BAND (ruling B55, 2026-10-05): `low_m` and `high_m` are the
+    /// macro field's lowest and highest DRAWN height over the ladder radius, whole metres, as the
+    /// artifact's head states them (the shard reads them off every row and level with the spline's
+    /// own overshoot, `Artifact::drawn_range_m`). The body adds the fine relief's bound on both sides
+    /// ([`BodyDefinition::fine_relief_bound`]), keeps the strata, the caves and 64 m of room under the
+    /// lowest ground and 64 m over the highest, and widens its ladder's band to hold them — never
+    /// narrower than the band it had, so a key the body built stays a key. Every host reads the
+    /// same two words from the same head, so every host builds the same ladder. `None` where the
+    /// ladder refuses the band (a crust as deep as the body, a band past its word).
+    ///
+    /// **Example.** The home planet's belts stand 12 019 m over its radius; with the fine relief's
+    /// bound and the room the band's top moves from 9.3 km to about 13.6 km, every summit is built
+    /// whole, and the floor — one top-rung cell, 262 km under the surface — does not move.
+    #[must_use]
+    pub fn with_band_m(mut self, low_m: i32, high_m: i32) -> Option<BodyDefinition> {
+        let fine = self.fine_relief_bound();
+        // Whole metres, rounded up: a length is metres × STEPS_PER_M at LENGTH_BITS, a power of two.
+        let shift = STEPS_PER_M.trailing_zeros() + LENGTH_BITS;
+        let fine_m = (fine.raw() + (1 << shift) - 1) >> shift;
+        let under = i64::from(self.strata.max_depth_m()) + i64::from(self.caves.max_depth_m) + 64;
+        let crust = i64::from(self.ladder.crust_m()).max(fine_m + under - i64::from(low_m));
+        let above = i64::from(self.ladder.above_m()).max(fine_m + 64 + i64::from(high_m));
+        self.ladder = self
+            .ladder
+            .with_band(u32::try_from(crust).ok()?, u32::try_from(above).ok()?)?;
+        let metres = |m: i32| Gi::new(i64::from(m) * STEPS_PER_M) << LENGTH_BITS;
+        self.ground = [metres(low_m) - fine, metres(high_m) + fine];
+        Some(self)
+    }
+
+    /// ★ THE FINE RELIEF'S BOUND (ruling B55), in gap steps at [`LENGTH_BITS`]: the most the column
+    /// rule can stand a surface from the macro field's own height on the artifact's path — the live
+    /// amplitudes of the fine octaves at rung 0 (the macro field replaces the coarse ones), the
+    /// bench's own reach, and the integer terrace's slack once (a VALUE).
+    #[must_use]
+    pub fn fine_relief_bound(&self) -> Gi {
+        let mut sum = Gi::ZERO;
+        for o in self.octaves_at(0).iter().skip(self.first_fine()) {
+            sum += o.amplitude;
+        }
+        (sum << (LENGTH_BITS - AMP_BITS)) + self.pull_bound(0) + self.terrace_round
+    }
+
+    /// ★ THE DRAWN GROUND'S RANGE in metres from the ladder radius, `(lowest, highest)`, for a host
+    /// outside the recipe: the reach to the tallest ground a far peak can stand on, the floor the
+    /// air rests its deepest column on, the shadow casters' height (ruling B55). The recipe's own
+    /// bound for a body built from its seed; the solved field's when the head states it.
+    #[must_use]
+    pub fn ground_range_m(&self) -> (f64, f64) {
+        (
+            crate::units::metres_of_q28(self.ground[0]),
+            crate::units::metres_of_q28(self.ground[1]),
+        )
     }
 
     /// ★ THE PEBBLE STAND-IN: the same body with NO macro lattice — what the divisor rule states
@@ -1626,6 +1696,42 @@ mod tests {
 
     fn home() -> BodyDefinition {
         crate::home::home_planet()
+    }
+
+    /// ★ THE SOLVED BAND (ruling B55): a body from its seed states the recipe's own bound as its
+    /// ground; the head's drawn range moves only what it must — a summit over the recipe's top raises
+    /// the top by the range plus the fine relief's bound and the room, a crater floor under the
+    /// floor's crust moves the floor by a whole top-rung cell, a range inside the band leaves the
+    /// ladder as it was — and the ground reads the range widened by the fine relief's bound; a range
+    /// the ladder cannot hold is refused.
+    #[test]
+    fn the_solved_band_moves_only_what_the_drawn_range_needs() {
+        let body = home();
+        let bound = body.relief_bound(0);
+        assert_eq!(body.ground, [Gi::ZERO - bound, bound]);
+        let (lo, hi) = body.ground_range_m();
+        assert_eq!((lo, hi), (-body.relief_bound_m(0), body.relief_bound_m(0)));
+        let fine = body.fine_relief_bound();
+        assert!(fine > Gi::ZERO, "the fine octaves carry relief");
+        assert!(fine < bound, "the fine octaves are a part of the whole");
+        // Inside the recipe's band: the ladder stays, the ground is the range and the fine bound.
+        let inside = body.with_band_m(-2_000, 3_000).expect("a band");
+        assert_eq!(inside.ladder(), body.ladder());
+        let metres = |m: i32| Gi::new(i64::from(m) * STEPS_PER_M) << LENGTH_BITS;
+        assert_eq!(inside.ground, [metres(-2_000) - fine, metres(3_000) + fine]);
+        // The belts over the recipe's top: the top moves, the floor (a whole top cell deep) stays.
+        let tall = body.with_band_m(-9_862, 12_019).expect("a band");
+        assert_eq!(tall.ladder().floor_m, body.ladder().floor_m);
+        let fine_m = (fine.raw() + (1 << 35) - 1) >> 35;
+        assert_eq!(i64::from(tall.ladder().above_m()), 12_019 + fine_m + 64);
+        // A floor deeper than the crust: the floor moves by a whole top-rung cell.
+        let cell = cell_m(body.ladder().rungs - 1);
+        let deep = body
+            .with_band_m(-(cell as i32) - 1, 0)
+            .expect("a deeper band");
+        assert_eq!(deep.ladder().floor_m, body.ladder().floor_m - cell);
+        // A range the ladder cannot hold is refused.
+        assert_eq!(body.with_band_m(-1_000_000_000, 0), None);
     }
 
     /// The frequency of one octave, reassembled from the charter's pair, at the noise's bits.

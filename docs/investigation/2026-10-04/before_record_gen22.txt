@@ -1,0 +1,681 @@
+# THE "BEFORE" RECORD (ruling B52 item 1), generator 22, 2026-10-04 — today's world, headless, no window
+#
+# WHAT THIS IS: the baseline numbers every later phase of the ground step compares with, read on the world the game
+# solves today (GENERATOR_VERSION 22, ARTIFACT_VERSION 9). Nothing changed in the game's world since the stands rule's
+# census of 2026-10-02 (`docs/investigation/2026-10-02/phase0_stands_census.txt`, also generator 22): every bench since
+# ran in the copy (`crates/bins/src/solve_copy.rs`), and the copy's control matches the release gate's pin
+# [0x1eb53c782459e0df, 0xc2cc766157d2a0e4] (runs 9–30 of `phase0_belts_bench.txt`). So that census holds today's class
+# stands, and this file adds today's readings of the gates phase 1 moves, re-read because the design's table gave them
+# from generator 21:
+#
+# 1. `cargo run --release -p vd-bins --example lake_census` — G-GRID-VALLEYS-BY-CLASS, G-GRID-VALLEYS, G-HYPSO,
+#    G-RIVER, the inland pockets, the budget's books (G-BASIN), G-LAKE-SHARE, G-LAKE-WALK.
+# 2. `cargo run --release -p vd-bins --example grid_bias` — Tarboton's cone (which phase 1 must not move), Hyväluoma's
+#    rotation, the flat's detour.
+# 3. `cargo run --release -p vd-bins --example shipped_drainage` — G-HACK, the closed basins and the breach on the
+#    pinned stands (the belt, the coast, the plain), for phases 2 and 3 (last read on generator 19).
+#
+# THE PICTURES: the frozen references on the default path (`docs/investigation/2026-09-07/pictures/`, frozen again on
+# generator 22 by ruling B32, commit ae39b32) are today's world. The drainage stands' last pictures (`pictures/*_step2b`
+# in `docs/investigation/2026-09-24/`) are generator 21 with its water drawn; generator 22 draws no water. Pictures of
+# the class stands and of the home moon and the third body are OWED (the design §2.2: a spawn on another body).
+#
+# THE SUMMARY (phase 1's gates):
+#   G-GRID-VALLEYS-BY-CLASS  dry 1.414 / flats 1.470 / spilling lakes 1.553   (band ~1.006, <= 1.05 on flats and lakes)  RED
+#   G-GRID-VALLEYS           1.205 area rule / 1.139 step-1 rule / 1.337 outside the filled hollows                      RED
+#   G-LAKE-WALK              14.07° mean (<= 12°), exact runs 21.3 %, walks' flatness 1.605                              RED
+#   G-LAKE-SHARE             4.828 % of the land (<= 4 %)                                                               RED
+#   G-RIVER                  0 heads without an end, 0 rising steps; ends: ocean 3745, closed lake 1442, dry basin 914   GREEN
+#   G-HYPSO                  two humps at −9 241 m and +9 m; integral 0.590; land over 1 000 m 63.11 %                   GREEN
+#   G-BASIN (the budget)     runoff 5 448 997 … = held 1 597 306 … + ocean 3 851 690 … + stranded 0 (exact)              GREEN
+#   INLAND POCKETS           3.30 million km², 61 391 nodes, 236 pockets
+#   TARBOTON'S CONE          face middle: inward MSE 57 768.5 nodes², outward 63.2; near a corner: 244 238.7 / 56.3
+#   HYVÄLUOMA'S ROTATION     fourfold 5.64 % (middle) / 7.03 % (corner)
+#   THE FLAT'S DETOUR        1.2406 by the hop count, 1.0461 by the summed chord; bearing 2.82° / 1.04°
+#   G-HACK (rung 7, shipped) the belt n 0.226, c 2.65 (n RED against 0.45–0.7); the coast and the plain below
+
+== lake_census
+WORLD generator 22 artifact 9 (vd_terrain::GENERATOR_VERSION, vd_terrain::artifact::ARTIFACT_VERSION)
+the octave table (wavelength, amplitude, kind), coarsest first:
+   0:     400000 m wavelength,   4029.4 m amplitude, smooth, coarse
+   1:     200000 m wavelength,   2067.7 m amplitude, smooth, coarse
+   2:     100000 m wavelength,   1061.1 m amplitude, smooth, coarse
+   3:      50000 m wavelength,    544.5 m amplitude, smooth, coarse
+   4:      25000 m wavelength,    496.1 m amplitude, smooth, fine
+   5:      12500 m wavelength,    401.6 m amplitude, RIDGED, fine
+   6:       6250 m wavelength,    319.4 m amplitude, RIDGED, fine
+   7:       3125 m wavelength,    198.8 m amplitude, RIDGED, fine
+   8:       1563 m wavelength,     79.8 m amplitude, RIDGED, fine
+   9:        781 m wavelength,     25.1 m amplitude, RIDGED, fine
+  10:        391 m wavelength,      7.8 m amplitude, smooth, fine
+  11:        195 m wavelength,      2.5 m amplitude, smooth, fine
+  12:         98 m wavelength,      0.9 m amplitude, smooth, fine
+  13:         49 m wavelength,      0.3 m amplitude, smooth, fine
+
+step 2, the basins against the inventory (the initial land, loaded):
+  continental crust 40.0 % of the area; the platform's median 4210 m, the floor's median -5611 m: a step of 9821 m
+  the basins under the platform hold 3.075e9 km³; the inventory is 2.736e9 km³ (0.89 × the basins); Earth: 1.37e9 km³ over basins of ~1.3e9 km³ (0.99 ×)
+  the solved sea stands 3365 m: -845 m OVER the platform (Earth: the sea at the shelf edge, 29 % land on 40 % crust)
+schedule: Schedule { age_yr: 5000000000, passes: 40, flood_every: 1, climate_every: 10, isostasy_every: 5, talus_passes: 8, k0_per_yr: 2e-6 }
+solved in 150.8 s; envelope worst 159465 steps, clamped true; ice: 74104 nodes under the line, thickest 7758 m, deepest cut 97451 steps
+sweeps: first cut 1858484230 steps over 725638 nodes, last cut 1029956832 steps; fills first 170729386 last 71033293 steps
+
+the depression hierarchy: 17623 depressions (10694 leaves); 8727 water bodies — DRY 5127 (58.7 %), PARTIAL 1281 (14.7 %), SPILLING 2319 (26.6 %)
+the standing water: 93225 nodes, 5.342e6 km², 3.1413e5 km³ (0.011 % of the inventory 2.7359e9 km³); the lakes' share of the land (every node that is not the ocean) by AREA 4.828 %
+THE DOUBLE COUNT: the sea was re-solved over the inventory less the lakes: 3591 m → 3591 m (57462 → 57449 sixteenths, -13)
+THE LAKES' SEA FIXED POINT (plan question 8): 1 re-solves, the sea stood still: true; a connected sea solve re-seeded from another body: false; a connected sea solve whose ocean does not hold its own level's water (review finding 4): false
+
+craters stamped: 1668; routes: 42 (every 1 of 40 passes, plus the final); pits RAISED by each flood (= lake nodes at that route):
+  route 0: pits 164759 (11941907102 steps), outlets 7006174 | sweep: lowered 725638 cut 1858484230 max 190718 skipped 164759 | filled 23631 fill 170729386
+  route 1: pits 175461 (11722467658 steps), outlets 7011250 | sweep: lowered 826521 cut 1931457501 max 152432 skipped 175461 | filled 40826 fill 243691915
+  route 2: pits 158400 (11364569164 steps), outlets 7023662 | sweep: lowered 851950 cut 1733325048 max 144805 skipped 158400 | filled 28119 fill 172555887
+  route 3: pits 153771 (11089378554 steps), outlets 7037405 | sweep: lowered 866689 cut 1640896438 max 134112 skipped 153771 | filled 26791 fill 154193628
+  route 4: pits 148730 (10829663126 steps), outlets 7051324 | sweep: lowered 868167 cut 1546856296 max 65882 skipped 148730 | filled 25594 fill 133139622
+  route 5: pits 696728 (11357822458 steps), outlets 6962329 | sweep: lowered 926094 cut 1695673861 max 76600 skipped 696728 | filled 88305 fill 173367070
+  route 6: pits 642079 (11099729131 steps), outlets 6966566 | sweep: lowered 994610 cut 1633753251 max 59125 skipped 642079 | filled 69528 fill 154858753
+  route 7: pits 614553 (10852477575 steps), outlets 6980693 | sweep: lowered 1013190 cut 1570076704 max 53851 skipped 614553 | filled 65197 fill 137166190
+  route 8: pits 600711 (10646554507 steps), outlets 7000036 | sweep: lowered 1027276 cut 1522711417 max 49960 skipped 600711 | filled 78091 fill 142346593
+  route 9: pits 576734 (10434908264 steps), outlets 7018559 | sweep: lowered 1034180 cut 1482324471 max 41147 skipped 576734 | filled 78384 fill 125036307
+  route 10: pits 697416 (10989741429 steps), outlets 6956564 | sweep: lowered 1024258 cut 1592626371 max 76847 skipped 697416 | filled 99750 fill 152930222
+  route 11: pits 638188 (10716528244 steps), outlets 6959267 | sweep: lowered 1073752 cut 1542106941 max 43749 skipped 638188 | filled 79992 fill 140553036
+  route 12: pits 606370 (10505495635 steps), outlets 6973571 | sweep: lowered 1093978 cut 1484353123 max 40401 skipped 606370 | filled 73368 fill 122414285
+  route 13: pits 582288 (10306021182 steps), outlets 6992326 | sweep: lowered 1093347 cut 1426866677 max 66764 skipped 582288 | filled 69246 fill 113138898
+  route 14: pits 563115 (10036809958 steps), outlets 7011801 | sweep: lowered 1089347 cut 1380846204 max 48921 skipped 563115 | filled 67643 fill 109197640
+  route 15: pits 674565 (10688276515 steps), outlets 6934079 | sweep: lowered 1082194 cut 1501807754 max 78832 skipped 674565 | filled 88445 fill 134150333
+  route 16: pits 620607 (10514356745 steps), outlets 6936829 | sweep: lowered 1128981 cut 1463693543 max 58664 skipped 620607 | filled 63126 fill 130224853
+  route 17: pits 589865 (10264834485 steps), outlets 6952191 | sweep: lowered 1147688 cut 1410856358 max 78139 skipped 589865 | filled 63123 fill 123269739
+  route 18: pits 562830 (10082764040 steps), outlets 6971535 | sweep: lowered 1151484 cut 1359433081 max 30820 skipped 562830 | filled 60683 fill 114708768
+  route 19: pits 540559 (9884972665 steps), outlets 6991440 | sweep: lowered 1150362 cut 1313087370 max 50501 skipped 540559 | filled 56211 fill 100819705
+  route 20: pits 634591 (10357981425 steps), outlets 6926759 | sweep: lowered 1143842 cut 1430158633 max 76761 skipped 634591 | filled 78708 fill 122182990
+  route 21: pits 581326 (10108018936 steps), outlets 6929016 | sweep: lowered 1196849 cut 1394478217 max 22937 skipped 581326 | filled 61254 fill 124753827
+  route 22: pits 550473 (9947538622 steps), outlets 6945622 | sweep: lowered 1203938 cut 1334311049 max 22144 skipped 550473 | filled 49935 fill 105836956
+  route 23: pits 531267 (9803842520 steps), outlets 6964340 | sweep: lowered 1194257 cut 1281116776 max 22052 skipped 531267 | filled 44723 fill 99892887
+  route 24: pits 514345 (9660291505 steps), outlets 6984657 | sweep: lowered 1180159 cut 1231253855 max 54709 skipped 514345 | filled 43638 fill 104890049
+  route 25: pits 591687 (9958482891 steps), outlets 6910531 | sweep: lowered 1203767 cut 1348118649 max 122836 skipped 591687 | filled 73098 fill 123129167
+  route 26: pits 542528 (9610137468 steps), outlets 6913352 | sweep: lowered 1257135 cut 1315756765 max 47276 skipped 542528 | filled 58523 fill 119455370
+  route 27: pits 510148 (9446382488 steps), outlets 6930891 | sweep: lowered 1267583 cut 1261670625 max 22600 skipped 510148 | filled 46499 fill 94719902
+  route 28: pits 491640 (9352387982 steps), outlets 6949275 | sweep: lowered 1270164 cut 1211993894 max 21450 skipped 491640 | filled 48609 fill 94253386
+  route 29: pits 472916 (9213689412 steps), outlets 6968571 | sweep: lowered 1259281 cut 1184005059 max 50747 skipped 472916 | filled 40479 fill 89847428
+  route 30: pits 540092 (9508995670 steps), outlets 6902494 | sweep: lowered 1270303 cut 1270916189 max 71418 skipped 540092 | filled 64144 fill 104524605
+  route 31: pits 491475 (9230422877 steps), outlets 6904223 | sweep: lowered 1324361 cut 1240925016 max 30757 skipped 491475 | filled 51256 fill 111536766
+  route 32: pits 463851 (9086085232 steps), outlets 6922208 | sweep: lowered 1337904 cut 1185784388 max 73381 skipped 463851 | filled 45978 fill 93262387
+  route 33: pits 444560 (8888308789 steps), outlets 6941251 | sweep: lowered 1338069 cut 1141371454 max 67745 skipped 444560 | filled 40735 fill 89150823
+  route 34: pits 428958 (8735789310 steps), outlets 6961574 | sweep: lowered 1319397 cut 1098075855 max 39629 skipped 428958 | filled 34196 fill 82825562
+  route 35: pits 491006 (8968625369 steps), outlets 6889245 | sweep: lowered 1336422 cut 1194143301 max 66334 skipped 491006 | filled 57696 fill 94937949
+  route 36: pits 455320 (8882464098 steps), outlets 6892523 | sweep: lowered 1374685 cut 1154538593 max 56459 skipped 455320 | filled 39215 fill 82209767
+  route 37: pits 432706 (8789707970 steps), outlets 6911906 | sweep: lowered 1375688 cut 1108645107 max 61481 skipped 432706 | filled 36883 fill 72547042
+  route 38: pits 414068 (8576312268 steps), outlets 6931254 | sweep: lowered 1380665 cut 1071427524 max 15101 skipped 414068 | filled 40642 fill 78415693
+  route 39: pits 397601 (8488283106 steps), outlets 6951855 | sweep: lowered 1368288 cut 1029956832 max 50777 skipped 397601 | filled 31647 fill 71033293
+  route 40: pits 462601 (8734444492 steps), outlets 6894280 | sweep: lowered 0 cut 0 max 0 skipped 0 | filled 0 fill 0
+  route 41: pits 462601 (8734444492 steps), outlets 6893081 | sweep: lowered 0 cut 0 max 0 skipped 0 | filled 0 fill 0
+
+G-BUZZSAW: the highest peak stands 1296 m over its own snowline; 0 of 1978855 land nodes stand over 1 500 m of it (0.000 %) — Egholm 2009: about 1 500 m, everywhere on Earth
+  the snowline over the land: lowest 3938 m, median 7129 m, highest 7967 m (the sea stands at 3591 m)
+G-CRATER: 1668 craters kept of 144967 the production function drew; 1468 wider than 20 km; median 33.0 km — Earth: 190 structures, 43 over 20 km, median 8 km
+  the age histogram: 146 younger than 200 Ma (9 %), median 3947 Ma, oldest 4999 Ma — Earth: 45 % younger than 200 Ma, which is 4.4 % of its history
+the hierarchy and the budget cost 0.5 s of the solve, and found 8727 water bodies
+
+G-ICE: 74104 nodes under ice, 3.74 % of the land (1978855 land nodes) — Earth: about 10 % today, about 30 % at a glacial maximum. The solve's own reading: 74104 nodes under the line, thickest 7758 m, deepest cut 97451 steps
+
+nodes 8871936 of 8192 m (67.1 km²): sea 6893081 (77.70 %), lake 93225 (1.05 %), dry land 1885630 (21.25 %)
+the lakes' share of the LAND by NODE COUNT (every node that is not the ocean; the share by AREA is G-LAKE-SHARE's, below): 4.71 % — Earth 3.7 % (glacial shields included), under 1 % elsewhere
+lakes: 3868 patches; median 1 nodes (67 km²), p90 11 nodes, largest 12562 nodes (843022 km²); mean 24.1 nodes
+  size classes (nodes): 1:1991 2-3:930 4-7:419 8-15:210 16-31:118 32-63:71 64+:129
+  G-GRID's valleys by the STEP-1 RULE (the rain over the shipped receivers at least 100 times the node's own), for a like-for-like reading against generator 19: 74315 trunks: 0°:16840 45°:15240 90°:21152 135°:21083 | FLATNESS 1.139
+  G-GRID's valleys by the area rule OUTSIDE every hollow the routing filled (the node's own pit zero): 69134 trunks: 0°:13712 45°:18229 90°:14080 135°:23113 | FLATNESS 1.337
+  G-GRID's valleys by the area rule BY THE WATER'S CLASS (plan step 2b): dry ground off the flats 51570 trunks: 0°:9274 45°:14317 90°:9755 135°:18224 | FLATNESS 1.414; on a flat of the ground 34699 trunks: 0°:9462 45°:5660 90°:12753 135°:6824 | FLATNESS 1.470; across a spilling lake 10888 trunks: 0°:2706 45°:1395 90°:2559 135°:4228 | FLATNESS 1.553
+CENSUS G-GRID-VALLEYS-BY-CLASS 1.414dry/1.470flats/1.553spilling-lakes ~1.006(<=1.05-on-the-flats-and-the-spilling-lakes)[W13.3;plan-step-2b:a-flat's-directions-do-not-lean-on-the-lattice] RED
+CENSUS G-GRID-VALLEYS 1.205area-rule/1.139step1-rule/1.337outside-filled-hollows ~1.006[W13.3:a-router-with-no-direction-of-its-own] RED
+
+G-GRID: the long axes against the face grid (0° and 90° are the stencil's rows, 45° and 135° its diagonals)
+  lakes   (947 patches of 4+ nodes): 0°:267 45°:185 90°:253 135°:242 | FLATNESS 1.128
+    0°:186 15°:49 30°:42 45°:101 60°:42 75°:40 90°:160 105°:53 120°:37 135°:169 150°:36 165°:32 | flatness 2.357
+  valleys (97157 trunks over 100 nodes of drainage): 0°:21442 45°:21372 90°:25067 135°:29276 | FLATNESS 1.205
+    0°:11815 15°:4200 30°:4936 45°:10721 60°:5648 75°:5440 90°:15080 105°:4580 120°:6405 135°:15464 150°:7374 165°:5494 | flatness 1.910
+  a router with no direction of its own reads 1.000; a spike at 45° or 135° names the tie-break
+
+G-HYPSO (ruling B3), the FINAL solved field, every node by its own area; heights over the sea's level (3591 m over the ladder radius)
+  the whole surface in 1000 m bins over the sea, % of the surface:
+    under -12000 m: 0.00 %
+    -12000..-11000 m  2.75 % | -11000..-10000 m  0.27 % | -10000.. -9000 m 36.55 % |  -9000.. -8000 m  6.00 % |  -8000.. -7000 m  6.89 % |  -7000.. -6000 m  3.72 % |
+     -6000.. -5000 m  2.56 % |  -5000.. -4000 m  2.14 % |  -4000.. -3000 m  1.81 % |  -3000.. -2000 m  3.93 % |  -2000.. -1000 m  1.78 % |  -1000..    +0 m 10.35 % |
+        +0.. +1000 m  7.84 % |  +1000.. +2000 m  6.32 % |  +2000.. +3000 m  4.49 % |  +3000.. +4000 m  1.95 % |  +4000.. +5000 m  0.65 % |  +5000.. +6000 m  0.00 % |
+     +6000.. +7000 m  0.00 % |  +7000.. +8000 m  0.00 % |  +8000.. +9000 m  0.00 % |  +9000..+10000 m  0.00 % | +10000..+11000 m  0.00 % | +11000..+12000 m  0.00 % |
+    over 12000 m: 0.00 %
+  the two-hump test (G-LAND-HYPSOMETRY's own rule: 250 m bins smoothed 1-2-1, a hump is a local maximum at least a tenth of the largest bin, the two largest count): humps at -9241 m and +9 m over the sea; the shallowest bin between them stands at 0.10 of the lower hump
+CENSUS G-HYPSO-HUMPS 2humps@-9241m,+9m 2humps,the-lower-under-the-sea[ruling-B3-G-HYPSO;rule:land::humps] GREEN
+  the basins' hypsometric integrals (gate G-AGE's own reading over 2472 basins of 100 land nodes or more): the median 0.590, against Strahler's maturity band 0.35 to 0.60
+CENSUS G-HYPSO-AGE 0.590integral 0.35-0.60[Strahler-1952;solve.rs-HI_MATURE] GREEN
+  the land (over the sea) is 21.24 % of the surface and its mean stands 1546 m over the sea; the ground under the sea is 78.76 % and its mean stands -6911 m (01_reference_target.md §6.3 states Earth's +840 m and -3 800 m WITHOUT a source, so neither is a band)
+  the land's share over 1000 m: 63.11 % of the land. NO BAND YET: ruling B3 names Earth's share over 1 000 m, and the repo holds no Earth number for it with a published source. OWED: a cited Earth hypsometric table in the G-HYPSO row of ruling B3
+CENSUS G-HYPSO-LAND-OVER-1000M 63.11%of-land no-band-yet[owed:a-cited-Earth-table-in-ruling-B3] NO-BAND
+
+THE INLAND POCKETS (status §6 T7; ruling B7 item 1): nodes at or under the sea's level (3591 m) that no path through the lattice's own neighbours (the cube seams included) joins to the OCEAN, the largest such body (3.9474e8 km²) — each a CLOSED BASIN since plan step 2
+  236 pockets, 61391 nodes, 3298139 km², 1.5170e7 km³ under the sea's level; by the budget over each deepest node: DRY 175 PARTIAL 49 SPILLING 12 (the ocean's own root 0); the FIRST land held 3 pockets of 17799 nodes (plan question 9). The largest ten:
+      28912 nodes    1574898 km², deepest  11866 m under the sea at node 7901713 — DRY — aim -0.202087 -0.550667 -0.809893
+      12542 nodes     642554 km², deepest   8193 m under the sea at node 4470928 — PARTIAL — aim 0.290360 -0.700976 -0.651401
+       5254 nodes     258730 km², deepest  10310 m under the sea at node 7834694 — PARTIAL — aim -0.226575 -0.682952 -0.694435
+       4011 nodes     207255 km², deepest   9453 m under the sea at node 7648703 — PARTIAL — aim -0.394573 -0.594420 -0.700698
+       2822 nodes     155852 km², deepest  11692 m under the sea at node 7573896 — DRY — aim -0.558518 0.043374 -0.828358
+       1098 nodes      67739 km², deepest   9849 m under the sea at node 8509056 — DRY — aim 0.386078 0.114654 -0.915313
+       1004 nodes      66605 km², deepest  11866 m under the sea at node 8226938 — DRY — aim 0.099248 0.116028 -0.988275
+        579 nodes      29617 km², deepest   6934 m under the sea at node 8560665 — PARTIAL — aim 0.336037 -0.643807 -0.687453
+        453 nodes      28558 km², deepest   6585 m under the sea at node 8465170 — DRY — aim 0.345430 -0.016365 -0.938302
+        465 nodes      25588 km², deepest   1287 m under the sea at node 4593677 — PARTIAL — aim 0.249670 -0.789286 -0.560974
+CENSUS INLAND-POCKETS 3298139km2/61391nodes/236pockets no-band[ruling-B7:each-a-closed-basin-by-its-budget] NO-BAND
+CENSUS CHECK-OCEAN 0nodes 0[the-census's-own-labelling-is-the-solve's] GREEN
+CENSUS CHECK-POCKET-NOT-SEA 0nodes 0[ruling-B7:a-pocket-is-never-the-sea] GREEN
+
+G-RIVER (ruling B3): a river is a land node whose DRAINAGE AREA over the SHIPPED receivers is at least 100 times its own (G-GRID's valley threshold, about 6711 km²); 6101 channel heads, each walked down the SHIPPED receivers to its end
+  the ends, in heads: the ocean 3745, a node the facies call sea that is not the ocean 0 (0 by construction since plan step 2), a closed lake 1442, a dry closed basin 914; DEFECTS: an end the budget does not name 0, a ring of receivers 0
+  (since plan step 2b the shipped receivers are the water's own: a river ENDS where it meets a closed lake's water or a dry hollow's pit — an inland pocket included — and crosses a spilling lake to its spill)
+  along the trunks: 120594 steps; the GROUND rises on 3335 of them (3335 under a water's flat surface); the FLOOR (the ground, or the water's surface where water stands) rises on 0 steps, 0 of them in a hollow the ROUTING filled (a reading of the erosion's scratch surface)
+CENSUS G-RIVER-END 0heads-without-an-end 0heads[ruling-B3-G-RIVER] GREEN
+CENSUS G-RIVER-DESCENT 0rising-steps 0steps[ruling-B3-G-RIVER] GREEN
+CENSUS G-RIVER-ENDS ocean3745/closed-lake1442/dry-basin914/not-ocean-sea0 no-band[a-reading;the-plan's-gen-20-prediction:0-pocket-ends] NO-BAND
+
+G-RIVER:step1-rule (ruling B3): a river is a land node (THE STEP-1 RULE, for comparison) whose RAIN over the SHIPPED receivers is at least 100 times its own (G-GRID's valley threshold, about 6711 km²); 5703 channel heads, each walked down the SHIPPED receivers to its end
+  the ends, in heads: the ocean 3462, a node the facies call sea that is not the ocean 0 (0 by construction since plan step 2), a closed lake 1421, a dry closed basin 820; DEFECTS: an end the budget does not name 0, a ring of receivers 0
+  (since plan step 2b the shipped receivers are the water's own: a river ENDS where it meets a closed lake's water or a dry hollow's pit — an inland pocket included — and crosses a spilling lake to its spill)
+  along the trunks: 96836 steps; the GROUND rises on 3270 of them (3270 under a water's flat surface); the FLOOR (the ground, or the water's surface where water stands) rises on 0 steps, 0 of them in a hollow the ROUTING filled (a reading of the erosion's scratch surface)
+CENSUS G-RIVER-END:step1-rule 0heads-without-an-end 0heads[ruling-B3-G-RIVER] GREEN
+CENSUS G-RIVER-DESCENT:step1-rule 0rising-steps 0steps[ruling-B3-G-RIVER] GREEN
+CENSUS G-RIVER-ENDS:step1-rule ocean3462/closed-lake1421/dry-basin820/not-ocean-sea0 no-band[a-reading;the-plan's-gen-20-prediction:0-pocket-ends] NO-BAND
+
+THE DISCHARGE ROW AND ITS TREE (status §7 W10, W11; ruling B8 item 2: the budget's own water over the water's own receivers)
+  the classes the budget names: dry ground 1880042, a spilling lake's hollow 47162, a spill 2315, under a closed lake's water 49336, the ocean or a root 6893081; dry nodes and closed-lake nodes whose shipped receiver is not the budget's (the descent, or none) 0; spills that do not point at their exit 0; nodes left out of the order 0
+  the tree's own counts: 47162 nodes of spilling lakes' hollows, 2315 spills, 49336 closed-lake ends; the flat steps across the lakes: split 38465, straight 7428, nearest 1269; exits that disagree at one saddle 0, rings 0, short sinks 0
+  the climate's runoff accumulated again over the shipped tree, less the 2315 sinks at their spills: 0 nodes differ (the worst by 1.0 times), 0 of them in the SHIPPED byte (the row's log class); 0 sinks short; the shipped row FALLS downstream with no sink at 0 nodes, which no tree can hold
+CENSUS W10-DISCHARGE-TREE 0nodes 0nodes[ruling-B8-item-2:the-budget's-water-over-the-water's-receivers] GREEN
+CENSUS CHECK-DRY-FOLLOWS-DESCENT 0nodes 0[plan-step-2b:the-dry-ground-takes-the-budget's-descent] GREEN
+CENSUS CHECK-EXIT-AGREES 0spills/0disagree 0[plan-step-2b:a-spill-points-where-the-cascade-pours] GREEN
+CENSUS CHECK-TREE-CYCLIC 0nodes/0falls/0short 0[plan-step-2b:one-tree,no-ring] GREEN
+
+THE STORED LEVEL-1 WATER WORD: the shipped word disagrees with `block_water` over the rows at 0 of 2217984 level-1 nodes (0 expected)
+CENSUS CHECK-LEVEL1-WORD 0nodes 0[plan-step-2-part-5:the-stored-word-is-the-rows-own-fold] GREEN
+
+THE LAKE BUDGET (plan step 2; ruling B7; status §7 W3, W4): each hollow fed from its whole WATERSHED down the ground, every full hollow's overflow passed on (Fill–Spill–Merge, Barnes, Callaghan & Wickert 2021)
+  10694 leaf hollows; the watershed's supply over the runoff of the hollow's own nodes (the rule before step 2): median 8.90 times, p90 52.88 times, largest 4827.2 times; 293 hollows with no runoff of their own take water only from above their brim
+  the water bodies: DRY 5127 PARTIAL 1281 SPILLING 2319; the leaves by the body over them: DRY 5127 PARTIAL 1908 SPILLING 3659
+  the cascade: 5401 pours into another hollow's side of a saddle, 1909 into the ocean's side that the ground leads into a lower hollow (plan step 2b, question 1), 144 off saddles of three sides or more (question 2); its walk visited 20044 rings over 10694 leaves (the skip over full rings, review finding 6); the books, km³/yr: runoff 5448.9972 = held and evaporated 1597.3066 + to the ocean 3851.6906 + stranded 0.0000
+  the standing water: 93225 nodes, 5.342e6 km², 3.1413e5 km³; the lakes cover 4.828 % of the land (every node that is not the ocean) — G-LAKE-SHARE's ceiling 4 % (Verpoorter et al. 2014), W11 names 0.2 to 0.8 % for dry interiors
+  the ten hollows the watershed feeds most beyond their own nodes:
+       17761 km², it spills -7462 m over the sea; its own nodes' runoff 6.7855 km³/yr, its watershed's 85.0188 km³/yr; PARTIAL — aim 0.315749 -0.707436 -0.632327
+        1342 km², it spills 1541 m over the sea; its own nodes' runoff 0.0914 km³/yr, its watershed's 29.3176 km³/yr; SPILLING — aim 0.721572 0.557865 0.410026
+       10873 km², it spills 1260 m over the sea; its own nodes' runoff 0.9141 km³/yr, its watershed's 23.0845 km³/yr; PARTIAL — aim -0.893406 -0.231504 -0.385008
+       39536 km², it spills 1309 m over the sea; its own nodes' runoff 1.5442 km³/yr, its watershed's 22.5602 km³/yr; SPILLING — aim -0.843196 0.045243 -0.535699
+        1866 km², it spills -7685 m over the sea; its own nodes' runoff 0.6486 km³/yr, its watershed's 20.4160 km³/yr; SPILLING — aim 0.297151 -0.701957 -0.647270
+       11281 km², it spills -7703 m over the sea; its own nodes' runoff 1.1267 km³/yr, its watershed's 19.6134 km³/yr; DRY — aim -0.146344 -0.634059 -0.759311
+        3399 km², it spills 1305 m over the sea; its own nodes' runoff 0.1141 km³/yr, its watershed's 16.5503 km³/yr; PARTIAL — aim -0.817382 0.119574 -0.563551
+      238983 km², it spills 1309 m over the sea; its own nodes' runoff 8.1774 km³/yr, its watershed's 24.5592 km³/yr; PARTIAL — aim -0.799514 -0.215991 -0.560468
+      100780 km², it spills 1298 m over the sea; its own nodes' runoff 8.5724 km³/yr, its watershed's 23.2041 km³/yr; PARTIAL — aim -0.926270 -0.034115 -0.375313
+       40240 km², it spills 1308 m over the sea; its own nodes' runoff 2.5031 km³/yr, its watershed's 16.2592 km³/yr; SPILLING — aim -0.864157 -0.240637 -0.441957
+  THE ROW AGAINST THE BUDGET (review finding 3; ruling B8 item 2): the discharge row delivers 3851.6906 km³/yr from the land to the ocean, the cascade 3851.6906 km³/yr (a gap of 0.0000 km³/yr; 1597.3066 km³/yr held); of the 2571 hollows that spill into the sea and are NOT full (the budget holds all their water), 0 have a row leaving them; the largest row out of one is 0.0000 km³/yr, out of a 84767009 km² hollow whose own water is DRY (the rows out of them sum to 0.0 km³/yr)
+  THE ROW AT THE ENDS (plan step 2b): of 6408 water bodies that are not full, 0 have ends whose rows do not sum to the water they hold (off by 0.0000 km³/yr in all); ends inside a spilling body 0, ends under no body 0
+CENSUS ROW-SEA 3851690606676394row-to-ocean/3851690606676394budget-to-ocean equal[ruling-B8-item-2:the-row's-sum-into-the-sea-is-the-cascade's] GREEN
+CENSUS ROW-OUT-OF-CLOSED-HOLLOWS 3851.7km3/yr-row-to-ocean/3851.7km3/yr-budget/0-of-2571-closed-hollows-leak 0-leak[ruling-B8-item-2:a-closed-body-passes-nothing-on] GREEN
+CENSUS ROW-HELD 0of6408bodies/0ends-in-spilling/0ends-in-none 0[plan-step-2b:the-ends-of-a-closed-body-carry-what-it-holds] GREEN
+CENSUS CHECK-BUDGET-STALE 0nodes 0[the-budget-run-here-is-the-solve's-own] GREEN
+CENSUS CHECK-BUDGET-CONSERVE 5448997235105685runoff-1597306628429291held-3851690606676394ocean-0stranded exact[ruling-B7:nothing-is-lost] GREEN
+CENSUS G-LAKE-SHARE 4.828%of-land <=4%[ruling-B3;Verpoorter-et-al-2014] RED
+CENSUS BUDGET-LEAVES DRY5127/PARTIAL1908/SPILLING3659/transfers5401 no-band[a-reading] NO-BAND
+
+PLAN STEP 2b, W0 (ruling B8 item 2): the three readings before the cascade or the descent moves
+  M1 OCEAN-SIDE-POURS (question 1): 1194 full hollows pour 752.1111 km³/yr into the sea; the ground's descent from the ocean-side gate of 833 of them (610.0608 km³/yr) ends in a lower hollow that met the sea earlier, 148 of them (6.3342 km³/yr) in one that is NOT full
+CENSUS M1-OCEAN-SIDE-POURS 833pours/610.0608km3/yr-into-a-hollow/148/6.3342km3/yr-into-a-hollow-not-full no-band[plan-step-2b-question-1] NO-BAND
+  M2 SADDLE-SIDES (question 2): saddles by their sides (the ocean's side counted): 2:10379 3:150 4:5 5:0 6:0 7:0 8+:0; at the saddles of three sides or more 81 full depressions pour on, and 65 of them (19.9746 km³/yr) pour today into a side that is not the steepest side that is the ocean or not full
+CENSUS M2-SADDLE-SIDES 155multi-way-saddles/65pours/19.9746km3/yr-not-the-steepest-open-side no-band[plan-step-2b-question-2] NO-BAND
+  M3 GROUND-PLATEAUS (question 3): 79758 plateaus of two nodes or more — 77764 drain (688043 nodes), 1994 are closed (28662 nodes); 0 leaves of ZERO depth (pit at the spill's height), 0 of them hold water, 0.0000 km³/yr in all
+  the budget's DESCENT tree (100 nodes of drainage area or more): 70804 trunk nodes, 24029 on a plateau; the grid lean of their 8-step axes ON a plateau: 0°:4377 45°:3428 90°:5042 135°:3781 | FLATNESS 1.213; OFF the plateaus: 0°:6653 45°:11480 90°:7284 135°:13882 | FLATNESS 1.413
+CENSUS M3-GROUND-PLATEAUS 688043draining-nodes/28662closed-nodes/0zero-depth-leaves/24029of70804descent-trunks-on-a-plateau/flatness1.213on/1.413off no-band[plan-step-2b-question-3] NO-BAND
+
+THE WALK ACROSS A SPILLING LAKE (plan step 2b, question 4): 37303 six-step walks from the same starts inside their lake's hollow toward its spill; the bearing error against the straight line to the spill, SHIPPED (the split): mean 14.07°, p90 23.37°, exact lattice runs 21.3 %, the walks' axes 0°:9788 45°:4867 90°:7679 135°:14969 | FLATNESS 1.605; THE CONTROL (the nearest by the summed chord, the rule before the split): mean 20.06°, p90 34.99°, exact runs 57.4 %, axes 0°:7184 45°:4926 90°:8336 135°:16857 | FLATNESS 1.808; the straight lines to the spills themselves: 0°:11330 45°:4761 90°:7927 135°:13285 | FLATNESS 1.425
+CENSUS G-LAKE-WALK 14.07deg-mean/21.3%runs/flatness1.605/control20.06deg/57.4%runs/flatness1.808/lines-flatness1.425/37303walks <=12deg-mean[plan-step-2b-question-4:test-T9's-bound;the-owner's-word-owed-for-node-square-lakes] RED
+
+the map around the aim: face NegZ node (151, 1193); 121 nodes a side = 991 km; '~' sea, 'L' lake, '#' land, ':' coast band
+#######################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+########################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#########################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+##################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+###################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#####################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#####################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#####################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#####################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#####################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+######################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+########################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+##########################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+##L#########################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#L############################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~###
+#################################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####
+####################################################################################~~~~~~~~~~~~~~~~~~~~~~~~~~~~~########
+#####################################################################################~######~~~~~~~~~~~~~:###############
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+####L####################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#####################L###################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#####################################################L#L#################################################################
+#########################################################################################################################
+~~##L####################################################################################################################
+~~#######################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+                                                                                                                         
+EXIT 0
+
+== grid_bias
+the home moon: 27744 nodes of 8192 m, radius 355 km
+
+TARBOTON'S CONE, pole at the face's middle: flats 0 of 27744 nodes, undrained 0
+  inward  (15°–45° from the pole):      MSE 57768.5 nodes², bias +21.28, 140.32 % of the true area, 3572 nodes
+  outward (15°–45° from the antipode):  MSE 63.2 nodes², bias +1.77, 56.48 % of the true area, 3572 nodes
+HYVÄLUOMA'S ROTATION, pole at the face's middle: 0°:1.000 15°:0.032 30°:0.016 45°:0.582 60°:0.017 75°:0.031 90°:0.964
+  the fourfold amplitude 5.64 % of the ring's own mean (a perfect router: 0 %)
+
+TARBOTON'S CONE, pole at near a face corner: flats 0 of 27744 nodes, undrained 0
+  inward  (15°–45° from the pole):      MSE 244238.7 nodes², bias +7.38, 275.55 % of the true area, 3613 nodes
+  outward (15°–45° from the antipode):  MSE 56.3 nodes², bias +0.75, 55.06 % of the true area, 3613 nodes
+HYVÄLUOMA'S ROTATION, pole at near a face corner: 0°:1.000 15°:-0.031 30°:-0.031 45°:-0.025 60°:0.118 75°:0.043 90°:-0.028
+  the fourfold amplitude 7.03 % of the ring's own mean (a perfect router: 0 %)
+
+THE FLAT: the bowl filled to a disc of 775 nodes (775 flat receivers, 0 undrained)
+  the HOP COUNT (before)
+    THE DETOUR out of the flat: mean 1.2406, worst 1.404, over 774 nodes (a straight run reads 1.000)
+    THE BEARING against the straight line to the exit: mean 2.82°, worst 12.0°, over 775 trunks (a straight run reads 0.00°)
+    the trunks' own bearings (PEAKED by construction, one disc and one spill): 0°:4 45°:150 90°:107 135°:514 | 2.653
+  the SUMMED CHORD (after)
+    THE DETOUR out of the flat: mean 1.0461, worst 1.094, over 774 nodes (a straight run reads 1.000)
+    THE BEARING against the straight line to the exit: mean 1.04°, worst 8.1°, over 775 trunks (a straight run reads 0.00°)
+    the trunks' own bearings (PEAKED by construction, one disc and one spill): 0°:8 45°:132 90°:534 135°:101 | 2.756
+EXIT 0
+
+== shipped_drainage
+shipped_drainage — the dunes number (plan step 1, docs/investigation/2026-09-24 §4 and §8)
+  the solve: 160.6 s; GENERATOR_VERSION 22, ARTIFACT_VERSION 9; the sea stands 3591 m over the ladder radius (6341670 m)
+  rung 7: 128 m columns (nominal); the field is pyramid level 0; the solve stands in for octaves 0 to 3; the fine octaves this rung sums:
+    octave  4:    25000 m wavelength,  496.1 m amplitude and a slope of 0.125 at a roughness factor of one, smooth
+    octave  5:    12500 m wavelength,  401.6 m amplitude and a slope of 0.202 at a roughness factor of one, RIDGED (1 − 2|n|: round troughs, rings of crests)
+    octave  6:     6250 m wavelength,  319.4 m amplitude and a slope of 0.321 at a roughness factor of one, RIDGED (1 − 2|n|: round troughs, rings of crests)
+    octave  7:     3125 m wavelength,  198.8 m amplitude and a slope of 0.400 at a roughness factor of one, RIDGED (1 − 2|n|: round troughs, rings of crests)
+  the table's own statements: the fine slopes' root sum of squares 0.565 at a factor of one (the body's own a·2π/λ);
+    Rice's crest spacing along a grid axis 4.70 km (each octave taken as one wavenumber: an order, not a band)
+  each square: 26 × 26 chunks of 62 columns = 1612 columns a side, about 206 km (asked 200 km)
+the stands (PINNED; review findings 4 and 9 of plan step 2b): the belt, the coast at node 4718858 (generator 20's pick: 4718858; discharge class today 160), the plain at node 1219 (generator 20's pick: 1219); the rule would pick today: the coast at node 5642175 (discharge class 181), the plain at node 1219 (its ring spreads 0 steps)
+
+══ the belt — aim 0.617270 -0.437286 -0.654033 (feed it to `land_stand -- 2000 dx dy dz`) ══
+  the square: face NegZ, cells [8866, 10478) × [75578, 77190) at rung 7; 1612 × 1612 columns of 109.5 m × 124.1 m on the ground; 187.9 km a side, 35316 km²
+  THE SHIPPED PATH, CHECKED: `column_field` against the shared reader (`shore_geometry::RungReader`) at the shipped first octave (4):
+    0 of 2598544 surfaces differ (must be 0, or (b) is not the shipped ground less its octaves)
+CENSUS SHIPPED-PATH-DIFFER:belt 0.0000e0 [0,0](own_check:column_field_equals_RungReader) GREEN
+  the water: 0.00 % of the columns stand under the solve's sea level (the shipped ground; no water is drawn); 35316 km² of dry ground
+  the solved ground under the dry columns ((b), m over the ladder radius): lowest 5667, median 6833, highest 8128
+  the roughness factor m on the dry columns (the greater of the placeholder noise and the solve's slope share):
+    mean 0.560, p10 0.244, median 0.558, p90 0.866; 0.0 % of the columns at full roughness
+  ── (a) SHIPPED — `column_field`: the solve plus the fine octaves the rung keeps ──
+    G-HACK   L = 2.652·a^0.226 (L in km, a in km²) over 504871 network cells (a basin of 10 cells or more, 0.136 km²; no wet cell fitted)
+             the bands: c in [1, 6], n in [0.45, 0.7] (Sassolas-Serrayet, Cattin, Ferry & Godard 2018); fewer than 2 network cells reads 0 and 0
+CENSUS G-HACK-c:belt:shipped 2.6521e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-n:belt:shipped 2.2637e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-cells:belt:shipped 5.0487e5 none(a_count) NO-BAND
+    G-BREACH 7.526e7 m³ a pit: the mean a one-cell-wide channel must remove, over 2844 pits (a pit has no lower
+             neighbour; a flat cell counts and removes nothing; the unit of Schott et al. 2024 is UNVERIFIED, so no band)
+CENSUS G-BREACH-m3:belt:shipped 7.5259e7 none(Schott_2024_unit_unverified) NO-BAND
+    SPILL    1771 closed basins on 35316 km² of dry ground (a flood from the rim and from every wet column);
+             their fill covers 32.619 % of the dry ground, and the fills of the basins 1 m deep or deeper 32.583 %
+                1551 basins   1 m deep or deeper: 4.392 on each 100 km²
+CENSUS G-SPILL-1m-per100km2:belt:shipped 4.3918e0 none(no_published_band) NO-BAND
+                1041 basins  10 m deep or deeper: 2.948 on each 100 km²
+CENSUS G-SPILL-10m-per100km2:belt:shipped 2.9477e0 none(no_published_band) NO-BAND
+                 187 basins 100 m deep or deeper: 0.530 on each 100 km²
+CENSUS G-SPILL-100m-per100km2:belt:shipped 5.2951e-1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:belt:shipped 3.2619e1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:belt:shipped 3.2583e1 none(no_published_band) NO-BAND
+             the depth histogram, in basins: under 0.1 m: 57 | 0.1–1 m: 163 | 1–10 m: 510 | 10–100 m: 854 | 100–1 000 m: 187 | 1 000 m or more: 0
+             the basins 1 m deep or deeper: median depth 19.5 m, median area 1.767 km², largest 654.1 km²
+             the census's own check: 0 basins whose cells disagree on the fill level (must be 0)
+CENSUS SPILL-SPLIT:belt:shipped 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+               586.9 m deep,  126.324 km², 2.29e10 m³ — the pit at cell (10200, 76257) of face NegZ at rung 7; aim 0.617905 -0.430300 -0.658054
+               563.1 m deep,  247.443 km², 4.03e10 m³ — the pit at cell (9574, 76384) of face NegZ at rung 7; aim 0.616646 -0.439168 -0.653359
+               524.2 m deep,  276.268 km², 4.25e10 m³ — the pit at cell (10322, 75694) of face NegZ at rung 7; aim 0.609820 -0.432099 -0.664387
+               507.7 m deep,  150.855 km², 1.82e10 m³ — the pit at cell (9427, 76311) of face NegZ at rung 7; aim 0.614753 -0.441943 -0.653273
+               483.6 m deep,   93.258 km², 1.32e10 m³ — the pit at cell (9981, 76616) of face NegZ at rung 7; aim 0.622313 -0.431298 -0.653229
+               458.6 m deep,  132.290 km², 2.04e10 m³ — the pit at cell (10257, 75887) of face NegZ at rung 7; aim 0.612480 -0.431852 -0.662096
+               427.4 m deep,   86.640 km², 9.44e9 m³ — the pit at cell (9921, 76805) of face NegZ at rung 7; aim 0.624906 -0.430950 -0.650980
+               419.3 m deep,  198.870 km², 2.79e10 m³ — the pit at cell (9631, 76941) of face NegZ at rung 7; aim 0.625497 -0.434507 -0.648041
+               396.3 m deep,   99.782 km², 1.65e10 m³ — the pit at cell (10188, 76461) of face NegZ at rung 7; aim 0.620984 -0.429130 -0.655916
+               390.7 m deep,  129.124 km², 1.38e10 m³ — the pit at cell (9153, 76916) of face NegZ at rung 7; aim 0.622611 -0.442070 -0.645701
+  ── (b) SOLVE ONLY — the same reads and kernel, the octave sum empty (the bench still runs) ──
+    G-HACK   L = 10.251·a^0.758 (L in km, a in km²) over 2208543 network cells (a basin of 10 cells or more, 0.136 km²; no wet cell fitted)
+             the bands: c in [1, 6], n in [0.45, 0.7] (Sassolas-Serrayet, Cattin, Ferry & Godard 2018); fewer than 2 network cells reads 0 and 0
+CENSUS G-HACK-c:belt:solve 1.0251e1 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-n:belt:solve 7.5786e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-cells:belt:solve 2.2085e6 none(a_count) NO-BAND
+    G-BREACH 8.619e6 m³ a pit: the mean a one-cell-wide channel must remove, over 38 pits (a pit has no lower
+             neighbour; a flat cell counts and removes nothing; the unit of Schott et al. 2024 is UNVERIFIED, so no band)
+CENSUS G-BREACH-m3:belt:solve 8.6193e6 none(Schott_2024_unit_unverified) NO-BAND
+    SPILL    25 closed basins on 35316 km² of dry ground (a flood from the rim and from every wet column);
+             their fill covers 3.050 % of the dry ground, and the fills of the basins 1 m deep or deeper 2.993 %
+                  19 basins   1 m deep or deeper: 0.054 on each 100 km²
+CENSUS G-SPILL-1m-per100km2:belt:solve 5.3801e-2 none(no_published_band) NO-BAND
+                   7 basins  10 m deep or deeper: 0.020 on each 100 km²
+CENSUS G-SPILL-10m-per100km2:belt:solve 1.9821e-2 none(no_published_band) NO-BAND
+                   0 basins 100 m deep or deeper: 0.000 on each 100 km²
+CENSUS G-SPILL-100m-per100km2:belt:solve 0.0000e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:belt:solve 3.0496e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:belt:solve 2.9931e0 none(no_published_band) NO-BAND
+             the depth histogram, in basins: under 0.1 m: 2 | 0.1–1 m: 4 | 1–10 m: 12 | 10–100 m: 7 | 100–1 000 m: 0 | 1 000 m or more: 0
+             the basins 1 m deep or deeper: median depth 6.8 m, median area 27.385 km², largest 353.1 km²
+             the census's own check: 0 basins whose cells disagree on the fill level (must be 0)
+CENSUS SPILL-SPLIT:belt:solve 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+                65.1 m deep,   39.956 km², 1.11e9 m³ — the pit at cell (9364, 77151) of face NegZ at rung 7; aim 0.627318 -0.437188 -0.644468
+                24.6 m deep,   57.461 km², 6.29e8 m³ — the pit at cell (9246, 77151) of face NegZ at rung 7; aim 0.626699 -0.439009 -0.643831
+                22.5 m deep,   26.746 km², 2.72e8 m³ — the pit at cell (9430, 77038) of face NegZ at rung 7; aim 0.625936 -0.436947 -0.645973
+                13.1 m deep,   27.385 km², 1.59e8 m³ — the pit at cell (10392, 76560) of face NegZ at rung 7; aim 0.623532 -0.425312 -0.655986
+                11.2 m deep,   60.410 km², 1.94e8 m³ — the pit at cell (10386, 76422) of face NegZ at rung 7; aim 0.621382 -0.426322 -0.657369
+                10.9 m deep,   18.701 km², 9.12e7 m³ — the pit at cell (9232, 76974) of face NegZ at rung 7; aim 0.623917 -0.440448 -0.645548
+                10.2 m deep,  353.150 km², 8.47e8 m³ — the pit at cell (9156, 76912) of face NegZ at rung 7; aim 0.622566 -0.442051 -0.645757
+                 9.7 m deep,   36.382 km², 1.51e8 m³ — the pit at cell (8908, 77013) of face NegZ at rung 7; aim 0.622794 -0.445191 -0.643376
+                 7.4 m deep,   20.182 km², 6.71e7 m³ — the pit at cell (10334, 76687) of face NegZ at rung 7; aim 0.625189 -0.425361 -0.654375
+                 6.8 m deep,   33.283 km², 7.52e7 m³ — the pit at cell (10234, 76816) of face NegZ at rung 7; aim 0.626662 -0.426040 -0.652521
+  G-BREACH (a) over (b): 8.73 — how many times the fine octaves multiply the channel a pit needs (one grid, one definition;
+    inf = no pit in (b), NaN = no pit in either);
+  basins 10 m deep or deeper: 1041 in (a) against 7 in (b)
+CENSUS G-BREACH-RATIO:belt 8.7314e0 none(no_published_band) NO-BAND
+  ── (c) THE FINE RELIEF, (a) − (b), on the dry columns ──
+    the mean 286.6 m (the ridged LIFT, status §5 D7: an upper bound of about 960 m); the RMS 329.6 m;
+    p1 -3.4 m, median 266.6 m, p99 704.6 m
+    the RMS slope 0.103 (a gradient's magnitude, metres a metre, over 2592100 columns whose four neighbours are dry);
+    the table states 0.565 at a factor of one and 0.316 at this square's mean factor — the body's own a·2π/λ per octave,
+    not an RMS of the drawn noise, so the two agree in order only
+CENSUS G-FINE-MEAN-m:belt 2.8660e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-RMS-m:belt 3.2956e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-SLOPE-rms:belt 1.0286e-1 none(no_published_band) NO-BAND
+    THE HILL SPACING — the mean distance between the crests a straight walk along the grid crosses, in km:
+    (a) 3.22, (b) 31.53, (c) 3.12; the table's Rice spacing 4.70 (a dune field reads ONE spacing of its order; (b) reads 16 km or more)
+CENSUS G-HILL-SPACING-km:belt:shipped 3.2198e0 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:belt:solve 3.1535e1 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:belt:fine 3.1172e0 none(no_published_band) NO-BAND
+  the stand took 3.9 s
+
+══ the coast — aim 0.194169 -0.868118 -0.456804 (feed it to `land_stand -- 2000 dx dy dz`) ══
+  the square: face NegY, cells [48980, 50592) × [14074, 15686) at rung 7; 1612 × 1612 columns of 114.2 m × 126.4 m on the ground; 193.6 km a side, 37498 km²
+  THE SHIPPED PATH, CHECKED: `column_field` against the shared reader (`shore_geometry::RungReader`) at the shipped first octave (4):
+    0 of 2598544 surfaces differ (must be 0, or (b) is not the shipped ground less its octaves)
+CENSUS SHIPPED-PATH-DIFFER:coast 0.0000e0 [0,0](own_check:column_field_equals_RungReader) GREEN
+  the water: 46.06 % of the columns stand under the solve's sea level (the shipped ground; no water is drawn); 20228 km² of dry ground
+  the solved ground under the dry columns ((b), m over the ladder radius): lowest 2579, median 3801, highest 4159
+  the roughness factor m on the dry columns (the greater of the placeholder noise and the solve's slope share):
+    mean 0.537, p10 0.206, median 0.562, p90 0.800; 4.5 % of the columns at full roughness
+  ── (a) SHIPPED — `column_field`: the solve plus the fine octaves the rung keeps ──
+    G-HACK   L = 2.470·a^0.207 (L in km, a in km²) over 290726 network cells (a basin of 10 cells or more, 0.144 km²; no wet cell fitted)
+             the bands: c in [1, 6], n in [0.45, 0.7] (Sassolas-Serrayet, Cattin, Ferry & Godard 2018); fewer than 2 network cells reads 0 and 0
+CENSUS G-HACK-c:coast:shipped 2.4704e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-n:coast:shipped 2.0693e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-cells:coast:shipped 2.9073e5 none(a_count) NO-BAND
+    G-BREACH 1.124e8 m³ a pit: the mean a one-cell-wide channel must remove, over 1712 pits (a pit has no lower
+             neighbour; a flat cell counts and removes nothing; the unit of Schott et al. 2024 is UNVERIFIED, so no band)
+CENSUS G-BREACH-m3:coast:shipped 1.1244e8 none(Schott_2024_unit_unverified) NO-BAND
+    SPILL    837 closed basins on 20228 km² of dry ground (a flood from the rim and from every wet column);
+             their fill covers 42.687 % of the dry ground, and the fills of the basins 1 m deep or deeper 42.651 %
+                 704 basins   1 m deep or deeper: 3.480 on each 100 km²
+CENSUS G-SPILL-1m-per100km2:coast:shipped 3.4803e0 none(no_published_band) NO-BAND
+                 476 basins  10 m deep or deeper: 2.353 on each 100 km²
+CENSUS G-SPILL-10m-per100km2:coast:shipped 2.3532e0 none(no_published_band) NO-BAND
+                  93 basins 100 m deep or deeper: 0.460 on each 100 km²
+CENSUS G-SPILL-100m-per100km2:coast:shipped 4.5975e-1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:coast:shipped 4.2687e1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:coast:shipped 4.2651e1 none(no_published_band) NO-BAND
+             the depth histogram, in basins: under 0.1 m: 30 | 0.1–1 m: 103 | 1–10 m: 228 | 10–100 m: 383 | 100–1 000 m: 93 | 1 000 m or more: 0
+             the basins 1 m deep or deeper: median depth 19.8 m, median area 1.660 km², largest 1051.5 km²
+             the census's own check: 0 basins whose cells disagree on the fill level (must be 0)
+CENSUS SPILL-SPLIT:coast:shipped 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+               447.2 m deep,  202.316 km², 2.43e10 m³ — the pit at cell (49153, 14762) of face NegY at rung 7; aim 0.182098 -0.869074 -0.459946
+               433.4 m deep,  118.230 km², 1.64e10 m³ — the pit at cell (49749, 14610) of face NegY at rung 7; aim 0.192318 -0.865938 -0.461697
+               404.1 m deep,  139.067 km², 1.53e10 m³ — the pit at cell (49617, 14940) of face NegY at rung 7; aim 0.190639 -0.869288 -0.456064
+               397.7 m deep,  569.689 km², 6.25e10 m³ — the pit at cell (49560, 14496) of face NegY at rung 7; aim 0.188763 -0.865480 -0.464017
+               393.2 m deep,   95.833 km², 9.90e9 m³ — the pit at cell (49144, 14953) of face NegY at rung 7; aim 0.182297 -0.870810 -0.456571
+               371.3 m deep,  196.862 km², 2.56e10 m³ — the pit at cell (49226, 14629) of face NegY at rung 7; aim 0.183134 -0.867665 -0.462190
+               363.5 m deep,  274.368 km², 3.47e10 m³ — the pit at cell (49708, 14734) of face NegY at rung 7; aim 0.191842 -0.867175 -0.459569
+               358.8 m deep,   60.854 km², 8.58e9 m³ — the pit at cell (49293, 14774) of face NegY at rung 7; aim 0.184593 -0.868774 -0.459518
+               338.2 m deep,  175.476 km², 1.58e10 m³ — the pit at cell (49734, 14402) of face NegY at rung 7; aim 0.191638 -0.864107 -0.465397
+               301.8 m deep,  608.926 km², 5.97e10 m³ — the pit at cell (49850, 14418) of face NegY at rung 7; aim 0.193710 -0.863899 -0.464925
+  ── (b) SOLVE ONLY — the same reads and kernel, the octave sum empty (the bench still runs) ──
+    G-HACK   L = 8.529·a^0.696 (L in km, a in km²) over 1102626 network cells (a basin of 10 cells or more, 0.144 km²; no wet cell fitted)
+             the bands: c in [1, 6], n in [0.45, 0.7] (Sassolas-Serrayet, Cattin, Ferry & Godard 2018); fewer than 2 network cells reads 0 and 0
+CENSUS G-HACK-c:coast:solve 8.5291e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-n:coast:solve 6.9551e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-cells:coast:solve 1.1026e6 none(a_count) NO-BAND
+    G-BREACH 3.961e6 m³ a pit: the mean a one-cell-wide channel must remove, over 70 pits (a pit has no lower
+             neighbour; a flat cell counts and removes nothing; the unit of Schott et al. 2024 is UNVERIFIED, so no band)
+CENSUS G-BREACH-m3:coast:solve 3.9606e6 none(Schott_2024_unit_unverified) NO-BAND
+    SPILL    48 closed basins on 20228 km² of dry ground (a flood from the rim and from every wet column);
+             their fill covers 14.169 % of the dry ground, and the fills of the basins 1 m deep or deeper 11.619 %
+                  21 basins   1 m deep or deeper: 0.104 on each 100 km²
+CENSUS G-SPILL-1m-per100km2:coast:solve 1.0382e-1 none(no_published_band) NO-BAND
+                   9 basins  10 m deep or deeper: 0.044 on each 100 km²
+CENSUS G-SPILL-10m-per100km2:coast:solve 4.4492e-2 none(no_published_band) NO-BAND
+                   0 basins 100 m deep or deeper: 0.000 on each 100 km²
+CENSUS G-SPILL-100m-per100km2:coast:solve 0.0000e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:coast:solve 1.4169e1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:coast:solve 1.1619e1 none(no_published_band) NO-BAND
+             the depth histogram, in basins: under 0.1 m: 9 | 0.1–1 m: 18 | 1–10 m: 12 | 10–100 m: 9 | 100–1 000 m: 0 | 1 000 m or more: 0
+             the basins 1 m deep or deeper: median depth 6.3 m, median area 55.370 km², largest 534.5 km²
+             the census's own check: 0 basins whose cells disagree on the fill level (must be 0)
+CENSUS SPILL-SPLIT:coast:solve 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+                14.9 m deep,  534.493 km², 5.80e8 m³ — the pit at cell (49610, 14922) of face NegY at rung 7; aim 0.190480 -0.869150 -0.456395
+                13.6 m deep,   45.341 km², 2.34e8 m³ — the pit at cell (50122, 14730) of face NegY at rung 7; aim 0.199135 -0.865853 -0.458958
+                13.4 m deep,  211.523 km², 3.92e8 m³ — the pit at cell (50313, 14669) of face NegY at rung 7; aim 0.202375 -0.864701 -0.459714
+                12.6 m deep,   51.835 km², 2.23e8 m³ — the pit at cell (49930, 14794) of face NegY at rung 7; aim 0.195879 -0.867026 -0.458145
+                12.1 m deep,   31.892 km², 1.61e8 m³ — the pit at cell (49801, 14861) of face NegY at rung 7; aim 0.193735 -0.868023 -0.457169
+                11.3 m deep,  127.898 km², 3.69e8 m³ — the pit at cell (49715, 14576) of face NegY at rung 7; aim 0.191652 -0.865736 -0.462354
+                10.8 m deep,   25.932 km², 1.22e8 m³ — the pit at cell (50510, 14602) of face NegY at rung 7; aim 0.205702 -0.863466 -0.460558
+                10.8 m deep,  144.695 km², 3.05e8 m³ — the pit at cell (49221, 15050) of face NegY at rung 7; aim 0.183841 -0.871449 -0.454730
+                10.3 m deep,   35.672 km², 1.51e8 m³ — the pit at cell (49416, 14987) of face NegY at rung 7; aim 0.187174 -0.870312 -0.455548
+                 8.3 m deep,   56.914 km², 1.48e8 m³ — the pit at cell (50291, 14385) of face NegY at rung 7; aim 0.201393 -0.862226 -0.464766
+  G-BREACH (a) over (b): 28.39 — how many times the fine octaves multiply the channel a pit needs (one grid, one definition;
+    inf = no pit in (b), NaN = no pit in either);
+  basins 10 m deep or deeper: 476 in (a) against 9 in (b)
+CENSUS G-BREACH-RATIO:coast 2.8389e1 none(no_published_band) NO-BAND
+  ── (c) THE FINE RELIEF, (a) − (b), on the dry columns ──
+    the mean 294.4 m (the ridged LIFT, status §5 D7: an upper bound of about 960 m); the RMS 344.6 m;
+    p1 11.8 m, median 277.5 m, p99 782.5 m
+    the RMS slope 0.100 (a gradient's magnitude, metres a metre, over 1396610 columns whose four neighbours are dry);
+    the table states 0.565 at a factor of one and 0.303 at this square's mean factor — the body's own a·2π/λ per octave,
+    not an RMS of the drawn noise, so the two agree in order only
+CENSUS G-FINE-MEAN-m:coast 2.9436e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-RMS-m:coast 3.4463e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-SLOPE-rms:coast 1.0029e-1 none(no_published_band) NO-BAND
+    THE HILL SPACING — the mean distance between the crests a straight walk along the grid crosses, in km:
+    (a) 3.23, (b) 20.55, (c) 3.15; the table's Rice spacing 4.70 (a dune field reads ONE spacing of its order; (b) reads 16 km or more)
+CENSUS G-HILL-SPACING-km:coast:shipped 3.2322e0 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:coast:solve 2.0547e1 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:coast:fine 3.1502e0 none(no_published_band) NO-BAND
+  the stand took 4.0 s
+
+══ a plain — aim 0.579815 -0.574634 -0.577590 (feed it to `land_stand -- 2000 dx dy dz`) ══
+  the square: face PosX, cells [62, 1674) × [62, 1674) at rung 7; 1612 × 1612 columns of 119.4 m × 119.4 m on the ground; 192.6 km a side, 37077 km²
+  the stand stands near a face edge: the square was pulled 96.3 km inward; it still holds the stand's own column
+  THE SHIPPED PATH, CHECKED: `column_field` against the shared reader (`shore_geometry::RungReader`) at the shipped first octave (4):
+    0 of 2598544 surfaces differ (must be 0, or (b) is not the shipped ground less its octaves)
+CENSUS SHIPPED-PATH-DIFFER:plain 0.0000e0 [0,0](own_check:column_field_equals_RungReader) GREEN
+  the water: 98.15 % of the columns stand under the solve's sea level (the shipped ground; no water is drawn); 685 km² of dry ground
+  the solved ground under the dry columns ((b), m over the ladder radius): lowest 2669, median 3750, highest 4138
+  the roughness factor m on the dry columns (the greater of the placeholder noise and the solve's slope share):
+    mean 0.829, p10 0.502, median 1.000, p90 1.000; 57.8 % of the columns at full roughness
+  ── (a) SHIPPED — `column_field`: the solve plus the fine octaves the rung keeps ──
+    G-HACK   L = 2.885·a^0.247 (L in km, a in km²) over 12545 network cells (a basin of 10 cells or more, 0.143 km²; no wet cell fitted)
+             the bands: c in [1, 6], n in [0.45, 0.7] (Sassolas-Serrayet, Cattin, Ferry & Godard 2018); fewer than 2 network cells reads 0 and 0
+CENSUS G-HACK-c:plain:shipped 2.8854e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-n:plain:shipped 2.4721e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-cells:plain:shipped 1.2545e4 none(a_count) NO-BAND
+    G-BREACH 2.077e7 m³ a pit: the mean a one-cell-wide channel must remove, over 22 pits (a pit has no lower
+             neighbour; a flat cell counts and removes nothing; the unit of Schott et al. 2024 is UNVERIFIED, so no band)
+CENSUS G-BREACH-m3:plain:shipped 2.0770e7 none(Schott_2024_unit_unverified) NO-BAND
+    SPILL    20 closed basins on 685 km² of dry ground (a flood from the rim and from every wet column);
+             their fill covers 8.291 % of the dry ground, and the fills of the basins 1 m deep or deeper 8.285 %
+                  19 basins   1 m deep or deeper: 2.772 on each 100 km²
+CENSUS G-SPILL-1m-per100km2:plain:shipped 2.7720e0 none(no_published_band) NO-BAND
+                  10 basins  10 m deep or deeper: 1.459 on each 100 km²
+CENSUS G-SPILL-10m-per100km2:plain:shipped 1.4590e0 none(no_published_band) NO-BAND
+                   2 basins 100 m deep or deeper: 0.292 on each 100 km²
+CENSUS G-SPILL-100m-per100km2:plain:shipped 2.9179e-1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:plain:shipped 8.2914e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:plain:shipped 8.2851e0 none(no_published_band) NO-BAND
+             the depth histogram, in basins: under 0.1 m: 0 | 0.1–1 m: 1 | 1–10 m: 9 | 10–100 m: 8 | 100–1 000 m: 2 | 1 000 m or more: 0
+             the basins 1 m deep or deeper: median depth 19.5 m, median area 0.585 km², largest 18.2 km²
+             the census's own check: 0 basins whose cells disagree on the fill level (must be 0)
+CENSUS SPILL-SPLIT:plain:shipped 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+               161.6 m deep,   18.163 km², 1.25e9 m³ — the pit at cell (124, 101) of face PosX at rung 7; aim 0.579092 -0.576212 -0.576743
+               152.4 m deep,   14.468 km², 9.52e8 m³ — the pit at cell (221, 87) of face PosX at rung 7; aim 0.579730 -0.574608 -0.577702
+                59.3 m deep,    5.365 km², 1.44e8 m³ — the pit at cell (275, 75) of face PosX at rung 7; aim 0.580051 -0.573682 -0.578299
+                52.9 m deep,    6.235 km², 1.54e8 m³ — the pit at cell (156, 93) of face PosX at rung 7; aim 0.579277 -0.575657 -0.577112
+                42.7 m deep,    1.798 km², 3.67e7 m³ — the pit at cell (266, 143) of face PosX at rung 7; aim 0.580509 -0.574343 -0.577182
+                38.4 m deep,    4.865 km², 8.18e7 m³ — the pit at cell (196, 91) of face PosX at rung 7; aim 0.579569 -0.575024 -0.577449
+                27.3 m deep,    0.585 km², 6.66e6 m³ — the pit at cell (313, 100) of face PosX at rung 7; aim 0.580536 -0.573288 -0.578203
+                22.9 m deep,    0.656 km², 7.60e6 m³ — the pit at cell (622, 79) of face PosX at rung 7; aim 0.582721 -0.568355 -0.580869
+                22.0 m deep,    1.812 km², 1.76e7 m³ — the pit at cell (265, 97) of face PosX at rung 7; aim 0.580145 -0.574006 -0.577884
+                19.5 m deep,    0.342 km², 2.67e6 m³ — the pit at cell (307, 105) of face PosX at rung 7; aim 0.580529 -0.573419 -0.578081
+  ── (b) SOLVE ONLY — the same reads and kernel, the octave sum empty (the bench still runs) ──
+    G-HACK   L = 6.688·a^0.585 (L in km, a in km²) over 31372 network cells (a basin of 10 cells or more, 0.143 km²; no wet cell fitted)
+             the bands: c in [1, 6], n in [0.45, 0.7] (Sassolas-Serrayet, Cattin, Ferry & Godard 2018); fewer than 2 network cells reads 0 and 0
+CENSUS G-HACK-c:plain:solve 6.6882e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-n:plain:solve 5.8497e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-cells:plain:solve 3.1372e4 none(a_count) NO-BAND
+    G-BREACH 1.756e4 m³ a pit: the mean a one-cell-wide channel must remove, over 1 pits (a pit has no lower
+             neighbour; a flat cell counts and removes nothing; the unit of Schott et al. 2024 is UNVERIFIED, so no band)
+CENSUS G-BREACH-m3:plain:solve 1.7564e4 none(Schott_2024_unit_unverified) NO-BAND
+    SPILL    1 closed basins on 685 km² of dry ground (a flood from the rim and from every wet column);
+             their fill covers 0.085 % of the dry ground, and the fills of the basins 1 m deep or deeper 0.000 %
+                   0 basins   1 m deep or deeper: 0.000 on each 100 km²
+CENSUS G-SPILL-1m-per100km2:plain:solve 0.0000e0 none(no_published_band) NO-BAND
+                   0 basins  10 m deep or deeper: 0.000 on each 100 km²
+CENSUS G-SPILL-10m-per100km2:plain:solve 0.0000e0 none(no_published_band) NO-BAND
+                   0 basins 100 m deep or deeper: 0.000 on each 100 km²
+CENSUS G-SPILL-100m-per100km2:plain:solve 0.0000e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:plain:solve 8.5349e-2 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:plain:solve 0.0000e0 none(no_published_band) NO-BAND
+             the depth histogram, in basins: under 0.1 m: 0 | 0.1–1 m: 1 | 1–10 m: 0 | 10–100 m: 0 | 100–1 000 m: 0 | 1 000 m or more: 0
+             the census's own check: 0 basins whose cells disagree on the fill level (must be 0)
+CENSUS SPILL-SPLIT:plain:solve 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+  G-BREACH (a) over (b): 1182.55 — how many times the fine octaves multiply the channel a pit needs (one grid, one definition;
+    inf = no pit in (b), NaN = no pit in either);
+  basins 10 m deep or deeper: 10 in (a) against 0 in (b)
+CENSUS G-BREACH-RATIO:plain 1.1826e3 none(no_published_band) NO-BAND
+  ── (c) THE FINE RELIEF, (a) − (b), on the dry columns ──
+    the mean 463.8 m (the ridged LIFT, status §5 D7: an upper bound of about 960 m); the RMS 520.1 m;
+    p1 29.8 m, median 455.8 m, p99 947.2 m
+    the RMS slope 0.154 (a gradient's magnitude, metres a metre, over 46587 columns whose four neighbours are dry);
+    the table states 0.565 at a factor of one and 0.468 at this square's mean factor — the body's own a·2π/λ per octave,
+    not an RMS of the drawn noise, so the two agree in order only
+CENSUS G-FINE-MEAN-m:plain 4.6383e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-RMS-m:plain 5.2005e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-SLOPE-rms:plain 1.5403e-1 none(no_published_band) NO-BAND
+    THE HILL SPACING — the mean distance between the crests a straight walk along the grid crosses, in km:
+    (a) 3.40, (b) 11.48, (c) 2.80; the table's Rice spacing 4.70 (a dune field reads ONE spacing of its order; (b) reads 16 km or more)
+CENSUS G-HILL-SPACING-km:plain:shipped 3.3968e0 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:plain:solve 1.1480e1 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:plain:fine 2.7995e0 none(no_published_band) NO-BAND
+  the stand took 4.2 s
+
+HOW TO READ (the arithmetic is in this file's header; ARITH, an expectation and not a band):
+  a DUNE field: basins 10 m deep or deeper at of the order of 1 to 10 a 100 km², a filled share of some percent,
+    G-BREACH of the order of 1e6 to 2e7 m³ a pit, a hill spacing on (a) of the order of the table's Rice spacing (4.70 km),
+    and G-HACK RED: radial flow into round troughs gives c = 0.56 at n = 0.5, under the band's floor of 1.
+  a DRAINED field: no basin over the arithmetic's noise, G-FILLED-1m near 0 %, G-BREACH near 0, G-HACK inside both bands.
+  (b) the solve alone: a few basins (hollows the solve left dry), G-HACK RED on n (parallel sheets; the R1 bench read
+    n = 0.883 on the bicubic upsample), a hill spacing of 16 km or more.
+  every CENSUS line reads: CENSUS <gate>:<stand>[:<variant>] <value> [lo,hi](source)|none(why) <GREEN|RED|NO-BAND>
+EXIT 0

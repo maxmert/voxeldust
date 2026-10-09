@@ -3001,7 +3001,9 @@ pub(crate) fn sync_terrain(
                 realm: eb.realm,
                 centre: *centre,
                 radius_m: eb.body.ladder().radius_m(),
-                relief_m: eb.body.relief_bound_m(0),
+                // The depth of the lowest drawn ground under the datum (ruling B55: the solved
+                // field's own once the artifact's head states it).
+                relief_m: -eb.body.ground_range_m().0,
                 charter,
             })
         })
@@ -4011,12 +4013,12 @@ pub(crate) fn sync_terrain(
             // every drawn entity — MEASURED at 6 376 km over the belt: 2.6 ms of a 20.2 ms frame,
             // 2.3 of them the three far cascades, for a map nothing lands in. The map is switched
             // off there and on again the moment ground can stand inside the reach; on foot and in
-            // the air under 3.5 km nothing changes. The ground's relief stands over the ladder's
-            // floor by the body's own bound, so the test reads the floor's altitude less that.
+            // the air under 3.5 km nothing changes. The ground stands over the ladder's radius by
+            // at most its drawn range's top (ruling B55), so the test reads the eye's height less that.
             let shadow_reach_m = f64::from(switch_m(terrain.config.shadow_reach_rung) as f32);
             let ground_within_reach = with_bodies.iter().any(|eb| {
                 let over_floor_m = DVec3::from_array(eb.eye).length() - eb.body.ladder().radius_m();
-                over_floor_m - eb.body.relief_bound_m(0) <= shadow_reach_m
+                over_floor_m - eb.body.ground_range_m().1 <= shadow_reach_m
             });
             let shadows_now = terrain.config.shadows & ground_within_reach;
             match terrain.sun {

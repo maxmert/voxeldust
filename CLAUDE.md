@@ -249,6 +249,102 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     WATER'S OWN PATHS (the law's own rain on the area that truly drains to a node; the budget's lakes in the passes; a
     closed basin keeps its rock, filling from its floor) GO INTO PHASE 2; NEXT THE ANDEAN MARGINS' LAW (research, then
     bench); one commit, no push.
+    ★★ B52 (2026-10-04, owner: "when the implementation part will start?" → "Build now, Andean beside"): THE BUILDING
+    STARTS NOW — the "before" record on the pinned stands (headless) → PHASE 1 (the flat directions, the smooth rebound,
+    G-MEAN) → PHASE 2'S MACRO CHANGE with every ruled law in the generator's integer form under the float fence, one change
+    at a time; the Andean margins' law researched BESIDE by a read-only agent, joining phase 2 as one change (the interim
+    until then); the other phase-0 items move into the phases that use them.
+    ★ B53 (2026-10-04, owner on phase 1's pictures: "very hard to judge … I didn't see the mountain region … let's do
+    [phase 2] and then look at the end result"): BUILD PHASE 2 NOW; ONE LOOK AT THE END RESULT with stands that hold a
+    mountain region and the other kinds of country (never only today's five plain stands); the frozen references stay
+    until then; no commit until the owner asks.
+    ★ B54 (2026-10-05, after the gate's cause was measured: 17 % of the rock vanished past closed hollows' spills — CURED,
+    the rock kept exactly; the heights converge from 414 to 814 passes; the plains' share carries its own noise of about
+    2.6 points at one resolution, the young plateaus' drainage layout being sensitive): THE CURE FIRST (find whether the
+    sensitivity is numerical — the suspect, the routing rationing how fast a valley captures flat plateau ground), THEN
+    A NOISE RULE (each reading's own noise measured at one resolution; N and 2N agree within it where it exceeds the
+    tolerance); 214 PASSES STAY until the cure.
+    ★ B55 (2026-10-05, owner: "Agree, go"): THE BAND'S TWO ENDS IN THE ARTIFACT'S HEAD (SL6 YES) — the shard states the
+    solved ground's lowest and highest point once and every host reads them, so the band is one value on every machine
+    and never changes in flight (the skyline's walls, cracks and lids were the summits over the band's top); THEN the
+    level handover's pops on steep ground and the far summits the culling drops MEASURED planet-wide, headless; per-tile
+    or per-point ranges only where that shows a defect.
+    ★ B56 (2026-10-05, owner: "414 steps (Recommended)"): B54 ANSWERED BY MEASUREMENT — a second rock defect (an endless
+    loop past full hollows) CURED, the rest passes each hollow once, no rock lost; the sensitivity is NOT numerical (the
+    chaos twins' plains spread 1.4 / 1.6 / 5.0 points at 214 / 414 / 814 passes, plate 10's young plateau); under the
+    noise rule the gate FAILS 214 → 414 on the heights and PASSES 414 → 814 on every reading: THE SOLVE'S AXIS IS 414
+    PASSES (every first solve ~1.6× as long); then the world moves once (generator and artifact key 25, the pins), the
+    census and pictures on three bodies, the owner's one look.
+    ★ B57 (2026-10-06, owner: "Yes, proceed", after the generator-25 pictures): THE LOOK AT PHASES 1 AND 2 GIVEN (not
+    G-LOOK); R2 NEXT in the ground step design's order (§5.2) — ITS SLICE 0 FIRST: the bench (M2-1: R1's loop as the
+    control, the new operators without caps, the bake's rate, G-MEAN) and a shaded relief at 100–150 km on the three
+    bodies for the owner's look, before any bake service, world change or data crossing; Q5's parts, Q6, Q8 and the SL6
+    asks A1/A2 come with measured numbers at the slice that needs them; no commit until asked.
+    ★ B58 (2026-10-06, owner: "I would take the recommendation which will remove the strait or 45 percent angled rivers
+    (or staicased), as it hurts believability"): R2's slice 0 measured — the 1 km law passes Hack (n 0.29 → 0.52); on a
+    smooth cone D8 runs down the grid's rays, D∞ makes an eight-armed star, RHO8 cuts valleys at every angle; the macro
+    ground carries the grid's mark (straight trunks, 45° side valleys, stepped coasts) — THE MACRO ROUTING'S GRID LEAN IS
+    CURED FIRST: Rho8 in the macro routing and erosion sweep (amends B11's D∞), measured in the bench copy, then built as
+    generator 26 with new pins and the gate; the target is the owner's look (no straight, 45° or staircased rivers or
+    coasts); then R2's bake.
+    ★ B59 (2026-10-06, all four recommendations): the remaining marks have ONE ROOT, the first land (87 % exact flats,
+    no relief between 8 and 375 km; the plates' steps one node wide) — BENCH THE FORMS OF THE FIRST RELIEF (a crust-
+    thickness scatter through Airy, the same through flexure, the older landscape's relief by Earth's spectrum), THE
+    OWNER CHOOSES FROM THE PICTURES; THE MARGINS BY KIND by their published laws (each node its cell's mean; rifted by
+    the necking instability, Andean by the interface–Moho crossing at 23°, transform at Earth's measured 50 km); a
+    SOURCED per-plate crust spread measured beside [0.7, 1.4]; THE WORLD MOVES ONCE (generator 26 = Rho8 + the relief +
+    the margins, new pins, the gate), then R2's bake.
+    ★ B60 (2026-10-06, the owner chose (c) over the recommended (a)): THE FIRST RELIEF IS THE OLDER LANDSCAPE'S — Earth's
+    continental spectrum (β 2.09) sized to 131 m at 110 km, a named scatter by the crust share; with Rho8, the margins by
+    kind (cell mean; the Andean wedge from the law's coast; the trench's inner wall) and the sourced spread it makes
+    generator 26; the gate (414/828 + twins) first; THE SECOND CLIFF (a coast inside a plate filled ~4 km and ending in a
+    3.5 km cliff, also in today's world) measured and brought back before the world moves.
+    ★ B61 (2026-10-06): the (c) flooding was a BENCH DEFECT (the relief added after the freeboard law; corrected, 24.6 %
+    land); THE BELTS' LAW READS THE CRUST SHARE CONTINUOUSLY in generator 26 (the second cliff: the wedge stopped at the
+    continent's half-share line); THE GATE'S CAUSE FIRST (plates 5 and 13, old low plains, −10 to −12 % at 828 passes).
+    ★ B62 (2026-10-07): the gate's two causes are NUMERICAL — EIGHT SWEEPS A PASS (the implicit step's error) and THE
+    CLOSED BASIN'S CAPTURE CURED INSIDE THE SWEEP (a basin opened only at the next routing, so the coarser axis kept rock
+    in captured hollows); designed and benched, then the gate again.
+    ★ B63 (2026-10-07, B62's gate: thirteen of fourteen readings pass, plate 5 cured, PLATE 13's MEAN −11.9 % against 10 %;
+    generator 26 built, its first land the benched world's byte for byte): PLATE 13's CAUSE FIRST (the ledger by plate,
+    then the cure; the pins wait for the gate); A SINKING FOREARC IS DEEP SEDIMENT (continental crust that sinks where
+    plates push together; rift basalt only where they pull apart — 12 609 home-planet nodes were misnamed); THE WINDOW
+    NOW AS A PREVIEW (the generator-25 cluster stops, generator 26 built and solved, then the owner's word to open it).
+    ★ B64 (2026-10-07, owner: "Can we give more cores for passes to build the realm for the first time?"): BUILD THE
+    PARALLEL FIRST SOLVE NOW, measure after plate 13's runs; THE SAME BYTES ON ANY NUMBER OF CORES (the digest does not
+    move — a pure speed change, the pin gate proves it); RUST'S OWN SCOPED THREADS, no new dependency.
+    ★ B65 (2026-10-07, plate 13 FOLLOWS THE ROUTING COUNT ALONE — at 1 656 routings 414 and 828 passes give it 214 and
+    215 m — and converges): FOUR ROUTINGS A PASS in generator 26 (two of the eight sweeps each; +~64 min a first solve on
+    one core, the parallel solve cuts it), then the gate with twins; THE GATE READS EACH TRACKED PLATE'S OLD PLAINS' MEAN,
+    never its whole-land mean (its dry basins under the sea level swing it: plate 5 reads 61–365 m under one law).
+    ★ B66 (2026-10-08, B65's gate: plate 13 CURED by four routings, PLATE 5's OLD PLAINS FAIL −14.3 % — 345 / 305–329 /
+    294–303 / 252–263 m at 414 / 828 / 1 656 / 3 312 routings, not converging): PLATE 5's CAUSE FIRST (414 passes routed
+    eight times, the ledger by plate on both axes); the pins wait.
+    ★ B67 (2026-10-08, the owner: "Is there any way how we can parallelize work? … Clouds?"): THE WEATHER STEP DESIGNED NOW,
+    AS DOCUMENTS ONLY (almanac, weather list, clouds and their shadows, rain/snow on screen, wind, lying snow; one design
+    with reviews), BY AGENTS FROM THIS SESSION; its BUILD keeps its B35 place (after G-LOOK, the waves and the water fill).
+    ★ B68 (2026-10-08, plate 5's cause found — TWO NUMERICAL PARTS: the river's step over the long history (16 sweeps and 8
+    routings a pass reach the 828-pass axis within 3 m) and the sea re-solved only every 20 passes near the present (a
+    53–60 m jump that lands at another time on each axis)): BENCH BOTH CURES (the river's step ×2; the sea and the climate
+    every pass), then the gate with twins; the benches first, the coverage gate after them.
+    ★ B69 (2026-10-09, the cheap cure passes B39's gate on every reading, both cures fail by the noise's size): THE CHEAP
+    CURE in generator 26 (the climate and the running sea every pass, `CLIMATE_EVERY` 20 → 1; the river step unchanged);
+    THE NOISE RULE AS RULED; GENERATOR 26 CLOSES BY A FIXED LIST (the cure, a clean timing, the pins and the pin gate, the
+    coverage gate, the census and pictures on three bodies for the owner's look); anything else is REGISTERED and does not
+    stop the move to R2's bake unless it breaks a hard rule or a ruling.
+    ★ B70 (2026-10-09, the owner: "migrate to bevy 0.20 and make sure that we are using all benefits that bevy 0.20 is
+    provide, while not breaking anything we have today"): AFTER GENERATOR 26 CLOSES AND THE OWNER'S WORD, THE MOVE TO BEVY 0.20
+    (before R2; lifts the 2026-08-27 upgrade gate, met); every benefit listed with its price for the owner to choose; nothing
+    broken (suite, coverage, process and pin gates, the frozen pictures, a clean frame reading before and after); its design
+    starts now as documents only.
+    ★ B71 (2026-10-09, the owner: "If pictures quality improves in comparison to frozen ones, let's use new ones"): THE FROZEN
+    PICTURES FOLLOW QUALITY — a change that improves them re-freezes them (side by side, no new defect by the gates, better;
+    the owner sees the pairs); a worse picture is a defect to cure, never a re-freeze.
+    ★ B72 (2026-10-09, the owner: "most of the time we are waiting … suggestions to improve that, while don't compromize on
+    quality?"): THE FASTER SOLVE (the flood, the lakes' hierarchy and the deposit on all cores, the same bytes; built beside
+    generator 26's close, the release pin gate proving pins and bytes at once) and A PARALLEL FEATURE TRACK (AMENDS T1: a
+    feature that does not depend on the terrain's final look moves in its own worktree and session with its own gates;
+    the owner names it); not adopted: standing rules, bench checkpoints, nightly-only coverage, a rented machine (not now).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

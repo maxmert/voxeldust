@@ -2052,15 +2052,26 @@ impl ChunkLane {
         }
         let first = held.is_none_or(|(head, _)| head != cache.head);
         if first {
-            if self.held.get(&realm).copied().unwrap_or(0) > 0 {
+            let had = self.held.get(&realm).copied().unwrap_or(0) > 0;
+            if had {
                 self.counters.artifact_rebuilds += 1;
-                self.drop_chunks(realm);
             }
             // ★ THE BODY TAKES THE SOLVED SEA (C5): every chunk built from here on reads the
-            // artifact's sea where its column holds no water row (the far view, the halo).
+            // artifact's sea where its column holds no water row (the far view, the halo). ★ AND THE
+            // SOLVED BAND (ruling B55): the head's two heights size the ladder, so a summit over the
+            // recipe's band is built whole; a head the ladder refuses keeps the recipe's band. A band
+            // that moved drops every pending build too: each read the old ladder.
+            let mut moved = false;
             if let Some(body) = self.bodies.get(&realm) {
                 let wet = body.with_sea_m(cache.head.sea());
-                self.bodies.insert(realm, Arc::new(wet));
+                let banded = wet
+                    .with_band_m(cache.head.low_m, cache.head.high_m)
+                    .unwrap_or(wet);
+                moved = banded.ladder() != body.ladder();
+                self.bodies.insert(realm, Arc::new(banded));
+            }
+            if had | moved {
+                self.drop_chunks(realm);
             }
         }
         self.artifacts.insert(realm, Arc::new(cache.clone()));
@@ -2511,6 +2522,15 @@ pub fn ruler_on_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drawn ground's range of a home-moon artifact, as its head states it (ruling B55).
+    fn drawn_of(artifact: &vd_terrain::artifact::Artifact) -> (i32, i32) {
+        artifact.drawn_range_m(
+            &vd_terrain::home::home_moon()
+                .macro_lattice()
+                .expect("a lattice"),
+        )
+    }
     use vd_seed::bend::Face;
     use vd_terrain::digest::surface_chunk_z;
     use vd_terrain::home::{HOME_PLANET_RADIUS_BITS, HOME_PLANET_SEED, home_planet};
@@ -2641,6 +2661,8 @@ mod tests {
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
             coast_parts: 0,
+            low_m: drawn_of(&artifact).0,
+            high_m: drawn_of(&artifact).1,
         });
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
             rx.accept(BulkMsg::ArtifactPyramid {
@@ -2753,6 +2775,8 @@ mod tests {
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
             coast_parts: 0,
+            low_m: drawn_of(&artifact).0,
+            high_m: drawn_of(&artifact).1,
         });
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
             rx.accept(BulkMsg::ArtifactPyramid {
@@ -2892,6 +2916,8 @@ mod tests {
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
             coast_parts: 0,
+            low_m: drawn_of(&artifact).0,
+            high_m: drawn_of(&artifact).1,
         });
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
             rx.accept(BulkMsg::ArtifactPyramid {
@@ -2939,6 +2965,22 @@ mod tests {
         assert_eq!(lane.resident(realm), vec![]);
         assert!(lane.artifact(realm).is_some());
         assert_eq!(lane.body(realm).expect("a body").sea_m(), artifact.sea());
+        // ★ THE SLICES UNDER THE BAND THE HEAD SIZED (ruling B55): the solved moon's craters reach
+        // under the recipe's band, so the head moved its floor; from here on a slice is named on the
+        // lane's own body, as the lane names it.
+        let banded = **lane.body(realm).expect("a body");
+        assert_ne!(
+            banded.ladder().floor_m,
+            moon.ladder().floor_m,
+            "the craters moved the floor"
+        );
+        let key = |rung: u8, x: i32, y: i32| ChunkKey {
+            face: Face::PosX,
+            rung,
+            x,
+            y,
+            z: vd_terrain::digest::surface_chunk_z(&banded, Face::PosX, rung, x, y),
+        };
         lane.state_artifact(realm, &cache);
         assert_eq!(
             lane.counters().artifact_rebuilds,
@@ -3058,16 +3100,40 @@ mod tests {
         let empties = built.len() - with_ground;
         assert_eq!(lane.counters().empty_chunks, 1 + empties as u64);
         assert_eq!(lane.take_empty().len(), empties);
-        // ★ THE HOLE COLUMNS: the column holds an empty chunk and one with ground — no hole;
-        // release every chunk with ground and the column is a hole, named by its empty key;
-        // release the empty ones too and nothing is left to be a hole.
+        // ★ THE HOLE COLUMNS: the column holds an empty chunk and one with ground within the rule's
+        // reach ([`HOLE_SIBLING_SLICES`]) — no hole; release every chunk with ground and the column
+        // is a hole, named by its empty key; release the empty ones too and nothing is left to be a
+        // hole. The recipe's own slice, asked before the field said where the ground stands, is
+        // released first: on generator 26's moon it stands farther from the solved ground than the
+        // rule's reach, and alone it is a hole of its own. The column's empty chunks are the two air
+        // slices right over the field's span: one column with two empty chunks is one hole, named
+        // once.
+        lane.release(realm, key(0, 4_000, 4_000));
+        let air = [1, 2].map(|up| ChunkKey {
+            z: span.hi + up,
+            ..key(0, 4_000, 4_000)
+        });
+        for k in air {
+            lane.request(realm, k, 0);
+        }
+        let over = lane.poll(8);
+        assert_eq!(over.len(), 2);
+        assert!(
+            over.iter().all(|b| b.geometry.triangles.is_empty()),
+            "the air over the span"
+        );
+        let _ = lane.take_empty();
         assert_eq!(lane.hole_columns(realm), (0, vec![]));
         for b in built.iter().filter(|b| !b.geometry.triangles.is_empty()) {
             lane.release(realm, b.geometry.key);
         }
         let (holes, named) = lane.hole_columns(realm);
         assert_eq!(holes, 1);
-        assert_eq!(named.len(), 1);
+        assert_eq!(
+            named.len(),
+            1,
+            "one column, named once for its two empty chunks"
+        );
         assert_eq!(
             (
                 named[0].0.face,
@@ -3078,9 +3144,15 @@ mod tests {
             ),
             (Face::PosX, 0, 4_000, 4_000, 0)
         );
-        lane.release(realm, key(0, 4_000, 4_000));
-        for b in built.iter().filter(|b| b.geometry.triangles.is_empty()) {
-            lane.release(realm, b.geometry.key);
+        // Release the empty ones too — the air and any slice of the span that holds no ground.
+        let empty: Vec<ChunkKey> = built
+            .iter()
+            .filter(|b| b.geometry.triangles.is_empty())
+            .map(|b| b.geometry.key)
+            .chain(air)
+            .collect();
+        for k in empty {
+            lane.release(realm, k);
         }
         assert_eq!(lane.hole_columns(realm), (0, vec![]));
         // ★ THE CAPS ON THE STAMP: thirteen columns whose asked slice holds no ground name twelve
@@ -3126,6 +3198,8 @@ mod tests {
                 levels: other.levels,
                 sea_m: other.sea_m,
                 coast_parts: 0,
+                low_m: other.low_m,
+                high_m: other.high_m,
             });
             rx2.book().get(realm).cloned().expect("a cache")
         };
@@ -3168,6 +3242,8 @@ mod tests {
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
             coast_parts: 0,
+            low_m: drawn_of(&artifact).0,
+            high_m: drawn_of(&artifact).1,
         });
         half.accept(BulkMsg::ArtifactPyramid {
             realm,
@@ -3210,13 +3286,14 @@ mod tests {
         lane3.state_surface(realm, &surface, Some(&moon_charter), &look);
         lane3.expect_artifact(realm, Some(artifact.digest()));
         assert_eq!(lane3.expected_artifact(realm), Some(artifact.digest()));
-        lane3.request(realm, key(top, 0, 0), 0);
+        // Before its head lane3 holds the recipe's band: its slices are named on the recipe's body.
+        lane3.request(realm, surface_key(&moon, top, 0, 0), 0);
         assert_eq!(lane3.counters().awaiting_artifact, 1);
         assert!(lane3.poll(8).is_empty());
         // The cap holds on the head's own refusal too: thirteen more refusals name twelve, and
         // the counter carries them all.
         for i in 0..13 {
-            lane3.request(realm, key(0, 4_000 + i, 4_000), 0);
+            lane3.request(realm, surface_key(&moon, 0, 4_000 + i, 4_000), 0);
         }
         assert_eq!(lane3.counters().awaiting_artifact, 14);
         assert_eq!(lane3.take_awaiting().len(), NAMED_PER_FRAME);
@@ -4796,6 +4873,8 @@ mod tests {
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
             coast_parts: 0,
+            low_m: drawn_of(&artifact).0,
+            high_m: drawn_of(&artifact).1,
         });
         let head = rx.book().get(realm).cloned().expect("a head");
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {

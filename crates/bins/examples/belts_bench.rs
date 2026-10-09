@@ -3,60 +3,53 @@
 //! THE COPY ONLY — nothing in the game changes. Each case prints Earth's set (the stands' relief rule and land readings,
 //! one copy with the Earth instrument) and the mountains split BY CAUSE.
 //!
-//! **THE CASES** (`cargo run --release -p vd-bins --example belts_bench [-- today limits belts-today-limits belts]`):
-//! - `today`: the solve's own laws. ★ THE CONTROL: its artifact must match the release gate's pinned digest.
-//! - `belts-today-limits`: the belts by their influx (L1, L2, L4) under today's limits — what the limits cut (Q-B0).
-//! - `limits`: the limits as laws (L0) alone: no clip, no uplift clamps, no envelope; the peak law per node.
-//! - `belts`: the limits as laws AND the belts by their influx.
-//! - `today-geometric`: the solve's own laws on the geometric time axis (L5) — the axis alone.
-//! - `belts-geometric`: the limits as laws, the belts by their influx, and the geometric axis.
-//! - `b40`: ruling B40 — the limits as laws, the belts by their influx at the plates' corrected mean speed (Earth's
-//!   50 mm/yr), held by the force balance and widening into plateaus; `b40-geometric` on the geometric axis.
-//! - `today-craters`, `b40-craters`: each crater stamped in the pass where its impact falls (ruling B37's landscape time).
-//! - `joint`: today's laws with the erosion on F2, the joint law (Adams et al. 2020: `E = K_lp·Q·S^2.2`); `b40-joint`:
-//!   ruling B40's laws, the craters' own time and the joint law together. Every case also prints F3, each node's inner
-//!   relief from the 10 km law (Montgomery & Brandon 2002), and the relief rule on the node means it implies.
-//! - `b40-joint-kept`, `b40-joint-slow`, `b40-joint-kept-slow`: `b40-joint` with P2, the crust's partition at a
-//!   collision (Replumaz et al. 2010), with S2, the collision's slowing (Clark 2012), and with both (the design §12);
-//!   `b40-craters-kept-slow`: `b40-craters` with both (the solve's own erosion beside the joint law).
-//! - any case `~mixed`: on the mixed axis (ruling B39's gate: passes from 0.5 Myr at the present, each 1.25 times
-//!   the next, up to 25 Myr, then even 25 Myr passes back to the start; about 210 passes).
-//! - any case `~fine`: the convergence gate's twice-as-fine axis (ruling B39 item 1): the mixed axis from 0.25 Myr up
-//!   to 12.5 Myr, about twice the passes, the climate and the rebound every twice as many passes so their spacing in
-//!   years stays the mixed axis's (as `@N` keeps the even axis's, M-TIME-1).
-//! - any case `@N`: on N passes, the pass-counted cadences scaled to keep their spacing in years (M-TIME-1).
-//! - any case `%K` (last): K sweeps in each pass on the pass's one routing, each a K-th of the pass's time — a
-//!   resolution, not a law (ruling B41 item 1: does the sweep's own step or the routing every pass carry the gate's cause);
-//!   `%Kr`: the same with the drains found again before each sub-sweep.
-//! - any case `+ice`, `+icereb`, `+reb` (before the axis): ruling B42 item 2's cures — the ice stepped in time with no
-//!   per-call cap; the same with its cut booked for the rebound; the rebound after every pass. `+base`: ruling B42 item
-//!   1's mechanism cured — the sweep reads a receiver as a lake only where the routing found one. `+rebx`: the rebound
-//!   without its floors (each node's fraction carried), so a finer rebound spacing is not read low by rounding. `+lt`:
-//!   ruling B45 item 2's landscape's time — each plate's ground erodes only since its raise under the reworking law.
-//!   `+lake`: ruling B46 item 2's lakes' cure — a lake's level follows its outlet inside the sweep. `+wedge`: ruling
-//!   B49's critical wedge — each margin's cross-section a taper wedge sized by its rock, a plateau past the ceiling.
-//!   `+level`: ruling B50's level plateau (one level a pair); `+wrain`: the erosion reads the joint law's own rain on the
-//!   WATER'S OWN PATHS (the solve's own lakes' budget and water tree after every routing; a closed lake ends its rivers);
-//!   `+water`: the same paths with the budget's runoff less the spilling lakes' evaporation (a reading: not the law's `Q`).
+//! ★ RE-BASED ON PHASE 2 (2026-10-04, rulings B52–B53): the game's solve now runs every ruled law, and the copy is that
+//! solve with ONE law taken out at a time. The bench's own forms of the laws and their cases (runs 9–30, `today`,
+//! `b40-joint-kept-slow+base+icereb+reb+rebx+lt+lake+wedge+level+wrain~mixed%2`, …) are recorded in
+//! `docs/investigation/2026-10-02/phase0_belts_bench.txt` and in git; they ran on the pre-phase-2 erosion.
+//!
+//! **THE CASES** (`cargo run --release -p vd-bins --example belts_bench [-- phase2 phase2-water …]`):
+//! - `phase2`: every law as the game runs it. ★ THE CONTROL: its artifact must match the release gate's pinned digest.
+//! - `phase2-<law>…`: the same with each named law taken out (`vd_bins::solve_copy::Laws`): `-water` the water's own
+//!   paths (B51 item 2), `-lt` the landscape's time (B45–B46), `-craters` the craters at their own age (B37), `-wedge`
+//!   the critical wedges (B49–B51; the belts by the room come back); generator 26's land laws in the land copy
+//!   (`vd_bins::land_copy`, rulings B59–B61) — `-cell` the cell's mean, `-margins` the margins by kind (and the Andean
+//!   coast), `-spread` the sourced spread, `-relief` the older landscape, `-share` the crust share read continuously.
+//!   Each is a MEASUREMENT of that law's own effect, never a candidate (ruling B38 item 4: the room is a cap, ruling
+//!   B37 item 4).
+//! - any case `~fine` / `~finer`: the convergence gate's axis twice / four times as fine (rulings B39, B47): every pass
+//!   length of the solve's own mixed axis halved / quartered, so about twice / four times the passes (and the routings),
+//!   the climate every twice / four times as many passes so its spacing in years stays the axis's.
+//! - any case `%K` (last): K sweeps on each pass's one routing, each a K-th of the pass's time — a resolution (the solve's
+//!   own is eight, ruling B62).
+//! - any case `@R` (last of all): the water routed R times a pass, the pass's sweeps shared among the routings — a
+//!   resolution (ruling B63 item 1 measured with it; the solve's own is four, ruling B65).
+//! - any case `^C` (just before `@R`): the climate and the running sea re-solved every C passes, counted in passes on
+//!   either axis — a resolution (ruling B68: the sea's stale spacing near the present); without it the axis keeps the
+//!   climate's spacing in years (the solve's own every 20 passes).
 //! - `--ledger=DIR`: each case also writes its PASS LEDGER to `DIR/<case>.csv` — each process's change of volume on the
-//!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause).
+//!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause) — and its LEDGER
+//!   BY PLATE AND PASS to `DIR/<case>.plates.csv` (ruling B66 item 1: which process, where, when). `<case>` is the case's
+//!   full name, its axis and routings included.
+//! - `--dump=DIR`: each case also writes its final field to `DIR/<case>.<row>.bin` (heights, the relief code, the plate,
+//!   the water, the ocean, each node's cause and where its water ends).
 //!
 //! **THE CAUSES**, exclusive, in this order: a CLOSED BASIN'S WALL (the relief window reaches the sea level or under
 //! it); a CRATER (within one diameter of a crater's centre, by the summed chord); a BELT (the folded belt's rock: the
-//! nodes a belt raised) — by a collision, at an Andean margin, or by the room; a WIDENED PLATEAU (a node the force
-//! balance's widening raised, B40); the OLD PLAINS (all other land).
+//! nodes a belt raised) — by a collision, at an Andean margin, or by the room; a WEDGE'S PLATEAU (a node that stands on
+//! a wedge's level plateau at the end, B50–B51); the OLD PLAINS (all other land).
 //!
-//! **Example.** If the `belts` case reads two per cent of the land as mountains and most of them as BELT, the influx law
-//! put the ranges where the plates close; if they read as CRATER, the law did not, and the craters' rims made them.
+//! **Example.** If `phase2` reads two per cent of the land as mountains and most of them as BELT, the wedges put the
+//! ranges where the plates close; if `phase2-wedge` reads them as CRATER, the room's belts did not, and the craters' rims
+//! made them.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::time::Instant;
 
-use vd_bins::solve_copy::{
-    BELT_ANDEAN, BELT_COLLISION, Laws, Router, Solved, artifact_of, solve_copy,
-};
+use vd_bins::solve_copy::{Laws, Solved, artifact_of, solve_copy};
 use vd_bins::stands::{LandReading, MOUNTAINS, ReliefReading, merged, read_land, relief_readings};
+use vd_terrain::belts::{BELT_ANDEAN, BELT_COLLISION};
 use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
 use vd_terrain::solve::{FACIES_SEA, Schedule, Z_STEPS_PER_M};
@@ -80,18 +73,8 @@ fn inner_relief_m(e_mm_yr: f64) -> f64 {
     (-MB_K_MM_YR_M + (MB_K_MM_YR_M * MB_K_MM_YR_M + 4.0 * a * d).sqrt()) / (2.0 * a)
 }
 
-/// The mixed axis (ruling B39's gate): the last pass half a million years, the longest 25 million years.
-const MIXED_T_MIN_YR: u64 = 500_000;
-const MIXED_T_MAX_YR: u64 = 25_000_000;
-/// The convergence gate's finer axis: every pass length halved.
-const FINE_T_MIN_YR: u64 = 250_000;
-const FINE_T_MAX_YR: u64 = 12_500_000;
-
-/// The geometric axis's last pass, years (the design's L5: half a million years; M-TIME-1 varies it).
-const GEOMETRIC_LAST_YR: u64 = 500_000;
-
 /// The release gate's pinned digest of the home planet's artifact (`crates/bins/tests/home_artifact_pin.rs`).
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x1eb5_3c78_2459_e0df, 0xc2cc_7661_57d2_a0e4];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x81c0_d090_3ce0_129b, 0xb29e_978b_3db0_1040];
 
 /// Whole metres of a height in sixteenths, rounded half up: the artifact's own rounding.
 fn metres(sixteenths: i32) -> i32 {
@@ -154,7 +137,15 @@ fn crater_reach(lattice: &MacroLattice, solved: &Solved) -> Vec<bool> {
 }
 
 /// The readings of one solved case: Earth's set, the belts' heights, and the mountains by cause.
-fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: u64) {
+/// Reads a solved case and prints its readings; returns each node's CAUSE (the exclusive causes' index, 255 off the land)
+/// and where its WATER ENDS (bit 1: at the sea; bit 2: through a standing lake), for the field dump (ruling B66 item 1:
+/// where two axes differ).
+fn read_case(
+    lattice: &MacroLattice,
+    area: &[u64],
+    solved: &Solved,
+    last_dt_yr: u64,
+) -> (Vec<u8>, Vec<u8>) {
     let state = &solved.state;
     let n = lattice.node_count();
     let sea_m = metres(state.sea_z);
@@ -470,7 +461,10 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
     );
     // B49: where the belts' and the plateaus' water ends — straight to the sea, or through a standing lake (the budget's
     // water) on its way — and their rain; read in the solve's own order, outlets first.
-    {
+    let causes: Vec<u8> = (0..n)
+        .map(|v| readings[v].map_or(u8::MAX, |_| cause(v) as u8))
+        .collect();
+    let drains = {
         let lake_bit = vd_terrain::solve::FACIES_LAKE;
         let mut through_lake = vec![false; n];
         let mut to_sea = vec![false; n];
@@ -518,7 +512,10 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
                 rain / a_all as f64
             );
         }
-    }
+        (0..n)
+            .map(|v| u8::from(to_sea[v]) | (u8::from(through_lake[v]) << 1))
+            .collect::<Vec<u8>>()
+    };
     // B45 item 2: each plate's raise time and its land's height (the landscape's time).
     if !solved.raise_yr.is_empty() {
         let plates = solved.raise_yr.len();
@@ -557,36 +554,6 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
             );
         }
     }
-    // B40 item 1: each pair's plateau — the nodes within 100 m of their ceiling — and its half-width.
-    if let Some(b) = &solved.belts
-        && solved.carry_left_m3 >= 0.0
-        && b.pairs.iter().any(|l| !l.is_empty())
-    {
-        let near = 100 * Z_STEPS_PER_M;
-        let mut widths: Vec<f64> = Vec::new();
-        let mut plateau_area = 0u128;
-        for list in &b.pairs {
-            let mut w = 0u32;
-            for &(dist, j) in list {
-                let j = j as usize;
-                if b.ceiling[j] != i32::MAX && state.z[j] >= b.ceiling[j] - near {
-                    w = w.max(dist);
-                    plateau_area += u128::from(area[j]);
-                }
-            }
-            widths.push(f64::from(w) / 1_000.0);
-        }
-        widths.sort_by(f64::total_cmp);
-        println!(
-            "  THE PLATEAUS (B40): {} convergent pairs; the half-width at 50 % / the largest: {:.0} / {:.0} km; the land \
-             within 100 m of its ceiling {:.2} million km²; the rock that found no room {:.3e} m³",
-            widths.len(),
-            widths.get(widths.len() / 2).copied().unwrap_or(0.0),
-            widths.last().copied().unwrap_or(0.0),
-            plateau_area as f64 / 1e12,
-            solved.carry_left_m3
-        );
-    }
     let kinds = [
         "THE BELTS' LAND (the folded belt's rock)",
         "  of it, the collisions'",
@@ -616,16 +583,53 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
             share_over(5_000)
         );
     }
+    (causes, drains)
+}
+
+/// The final field of a case as raw rows (`--dump`): heights, the stands' relief code, the plate, the water, the ocean,
+/// and the case reader's own rows — each node's cause and where its water ends ([`read_case`]).
+fn dump_case(
+    dir: &str,
+    case: &str,
+    lattice: &MacroLattice,
+    solved: &Solved,
+    causes: Vec<u8>,
+    drains: Vec<u8>,
+) {
+    let st = &solved.state;
+    let z_m: Vec<i32> = st.z.iter().map(|&z| z / Z_STEPS_PER_M).collect();
+    let land: Vec<bool> = st.z.iter().map(|&z| z > st.sea_z).collect();
+    let inland: Vec<bool> = vec![false; st.z.len()];
+    let class = vd_bins::stands::relief_classes(lattice, &z_m, &land, &inland);
+    let rows: [(&str, Vec<u8>); 7] = [
+        ("z", st.z.iter().flat_map(|v| v.to_le_bytes()).collect()),
+        ("class", class),
+        ("plate", solved.plate_of.clone()),
+        (
+            "water",
+            st.water_z.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        ),
+        ("ocean", st.ocean.iter().map(|&o| u8::from(o)).collect()),
+        ("cause", causes),
+        ("drain", drains),
+    ];
+    for (name, bytes) in rows {
+        let path = format!("{dir}/{case}.{name}.bin");
+        match std::fs::write(&path, bytes) {
+            Ok(()) => println!("  the dump: {path}"),
+            Err(e) => println!("  the dump: could not write {path}: {e}"),
+        }
+    }
 }
 
 /// The pass ledger as CSV, one line a pass (ruling B41 item 1, the gate's cause).
 fn write_ledger(path: &str, ledger: &[vd_bins::solve_copy::PassLedger]) {
     use std::fmt::Write as _;
     let mut out = String::from(
-        "t0_yr,t1_yr,craters_land,craters_sea,talus_land,talus_sea,ice_land,ice_sea,sweep_land,sweep_sea,\
-         uplift_land,uplift_sea,cut_land,cut_sea,rebound_land,rebound_sea,peak_land,peak_sea,sea_z,land_mean_m,\
-         land_over_1km,land_share,cut_lake,cut_held,cut_rerouted,cut_rest,nodes_lake,nodes_held,nodes_rerouted,\
-         nodes_rest,ice_steps\n",
+        "t0_yr,t1_yr,craters_land,craters_sea,talus_land,talus_sea,ice_land,ice_sea,uplift_land,uplift_sea,\
+         sweep_land,sweep_sea,rebound_land,rebound_sea,peak_land,peak_sea,ice_steps,sea_z,land_mean_m,land_over_1km,\
+         land_share,rock_cut,rock_laid_open,rock_laid_closed,rock_over_spill,rock_sea,rock_dropped,rock_remainder,\
+         rock_check,closed_bodies,closed_m2,opened_m2,newly_closed_m2,relief_p50_m,plains_pct\n",
     );
     for e in ledger {
         let _ = write!(out, "{},{}", e.t0_yr, e.t1_yr);
@@ -633,9 +637,8 @@ fn write_ledger(path: &str, ledger: &[vd_bins::solve_copy::PassLedger]) {
             e.craters_m3,
             e.talus_m3,
             e.ice_m3,
-            e.sweep_m3,
             e.uplift_m3,
-            e.cut_m3,
+            e.sweep_m3,
             e.rebound_m3,
             e.peak_m3,
         ] {
@@ -643,22 +646,58 @@ fn write_ledger(path: &str, ledger: &[vd_bins::solve_copy::PassLedger]) {
         }
         let _ = write!(
             out,
-            ",{},{:.3},{:.6},{:.6}",
-            e.sea_z, e.land_mean_m, e.land_over_1km, e.land_share
+            ",{},{},{:.3},{:.6},{:.6}",
+            e.ice_steps, e.sea_z, e.land_mean_m, e.land_over_1km, e.land_share
         );
-        for v in e.cut_by_source_m3 {
+        let _ = writeln!(
+            out,
+            ",{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{},{},{:.6e},{:.6e},{:.6e},{},{:.3}",
+            e.rock_cut_m3,
+            e.rock_laid_open_m3,
+            e.rock_laid_closed_m3,
+            e.rock_over_spill_m3,
+            e.rock_sea_m3,
+            e.rock_dropped_m3,
+            e.rock_remainder_m3,
+            e.rock_check,
+            e.closed_bodies,
+            e.closed_m2,
+            e.opened_m2,
+            e.newly_closed_m2,
+            e.relief_p50_m,
+            e.plains_pct
+        );
+    }
+    match std::fs::write(path, out) {
+        Ok(()) => println!("  the pass ledger: {path} ({} passes)", ledger.len()),
+        Err(e) => println!("  the pass ledger: could not write {path}: {e}"),
+    }
+}
+
+/// The ledger by plate and pass as CSV, one line a plate a pass (ruling B66 item 1: which process, where, when).
+fn write_plate_ledger(path: &str, rows: &[vd_bins::solve_copy::PlatePass]) {
+    use std::fmt::Write as _;
+    let mut out = String::from(
+        "t1_yr,plate,craters,talus,ice,uplift,sweep,rebound,peak,land_m2,land_mean_m,calm_m2,calm_mean_m,under_m2\n",
+    );
+    for r in rows {
+        let _ = write!(out, "{},{}", r.t1_yr, r.plate);
+        for v in r.process_m3 {
             let _ = write!(out, ",{v:.6e}");
         }
-        for c in e.nodes_by_source {
-            let _ = write!(out, ",{c}");
-        }
-        let _ = writeln!(out, ",{}", e.ice_steps);
+        let _ = writeln!(
+            out,
+            ",{:.6e},{:.3},{:.6e},{:.3},{:.6e}",
+            r.land_m2, r.land_mean_m, r.calm_m2, r.calm_mean_m, r.under_m2
+        );
     }
-    std::fs::write(path, out).expect("the ledger writes");
-    println!(
-        "  THE PASS LEDGER: {} passes written to {path}",
-        ledger.len()
-    );
+    match std::fs::write(path, out) {
+        Ok(()) => println!(
+            "  the ledger by plate and pass: {path} ({} rows)",
+            rows.len()
+        ),
+        Err(e) => println!("  the ledger by plate and pass: could not write {path}: {e}"),
+    }
 }
 
 fn main() {
@@ -668,10 +707,21 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("--ledger=").map(str::to_string));
     args.retain(|a| !a.starts_with("--ledger="));
+    // `--dump=DIR`: each case also writes its final field to `DIR/<case>.<row>.bin` (the gate's cause: where two axes
+    // differ) — `z` (i32, sixteenths), `class` (u8, the stands' relief code), `plate` (u8), `water` (i32), `ocean` (u8),
+    // `cause` (u8, the causes' index, 255 off the land) and `drain` (u8: 1 at the sea, 2 through a standing lake).
+    let dump_dir: Option<String> = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--dump=").map(str::to_string));
+    args.retain(|a| !a.starts_with("--dump="));
+    // `--artifact=DIR`: each case also writes its artifact, exactly as the shard's worker makes it, to `DIR/<case>.art`
+    // (ruling B58 item 2: the readers of the shipped rows run on a candidate's own world).
+    let artifact_dir: Option<String> = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--artifact=").map(str::to_string));
+    args.retain(|a| !a.starts_with("--artifact="));
     let cases: Vec<String> = if args.is_empty() {
-        ["today", "belts-today-limits", "limits", "belts"]
-            .map(str::to_string)
-            .to_vec()
+        vec!["phase2".to_string()]
     } else {
         args
     };
@@ -686,250 +736,145 @@ fn main() {
         .map(|v| lattice.area_m2(v))
         .collect();
     for case in &cases {
-        // `name@N`: the case on N passes, every pass-counted cadence (the climate, the rebound) scaled by N/40 so its
-        // spacing in YEARS stays the solve's own; the talus keeps its total count (the convergence test, M-TIME-1).
-        // `name~mixed`: the case on the mixed axis (ruling B39's gate): its own pass count, the solve's cadence counts.
-        // `name~fine`: the convergence gate's twice-as-fine mixed axis.
-        // `name%K`: K sweeps in each pass on the pass's one routing (a resolution; ruling B41 item 1, the gate's cause).
-        // `name%Kr`: the same, the drains found again before each sub-sweep.
-        let (case, sub_sweeps, sub_route) = match case.split_once('%') {
-            Some((c, k)) => {
-                let (k, routed) = match k.strip_suffix('r') {
-                    Some(k) => (k, true),
-                    None => (k, false),
-                };
-                (
-                    c.to_string(),
-                    k.parse::<u32>().expect("a sweep count after %"),
-                    routed,
-                )
-            }
-            None => (case.clone(), 1, false),
+        // The files carry the case's full name (its axis and routings too, so two cases never write one file).
+        let full = case.as_str();
+        // `case…@R` (last of all): the water routed R times a pass, the sweeps shared among the routings (B63 item 1).
+        let (case, routings) = match case.rsplit_once('@') {
+            Some((c, r)) => (c, Some(r.parse::<u32>().expect("a routing count after @"))),
+            None => (case.as_str(), None),
         };
-        let case = &case;
-        let (case_name, axis) = if let Some(name) = case.strip_suffix("~mixed") {
-            (name, Some((MIXED_T_MIN_YR, MIXED_T_MAX_YR, 1)))
-        } else if let Some(name) = case.strip_suffix("~fine") {
-            (name, Some((FINE_T_MIN_YR, FINE_T_MAX_YR, 2)))
+        // `case…^C` (just before `@R`): the climate and the sea re-solved every C passes, in passes on either axis — a
+        // resolution (ruling B68 measured with it); without it the axis keeps the climate's spacing in years.
+        let (case, climate_every) = match case.rsplit_once('^') {
+            Some((c, k)) => (c, Some(k.parse::<u32>().expect("a climate spacing after ^"))),
+            None => (case, None),
+        };
+        // `case%K`: K sweeps a pass (a resolution).
+        let (case_axis, sub_sweeps) = match case.split_once('%') {
+            Some((c, k)) => (c, k.parse::<u32>().expect("a sweep count after %")),
+            None => (case, vd_terrain::solve::SUB_SWEEPS),
+        };
+        // `case~fine` / `case~finer`: the convergence gate's axis twice / four times as fine, the climate's spacing in
+        // years kept.
+        let (name, fineness) = if let Some(name) = case_axis.strip_suffix("~finer") {
+            (name, 4u64)
+        } else if let Some(name) = case_axis.strip_suffix("~fine") {
+            (name, 2u64)
         } else {
-            (case.as_str(), None)
+            (case_axis, 1u64)
         };
-        let (name, passes) = match case_name.split_once('@') {
-            Some((name, n)) => (name, n.parse::<u32>().expect("a pass count after @")),
-            None => (case_name, vd_terrain::solve::PASSES),
-        };
-        // `name+ice`, `+icereb`, `+reb`: ruling B42 item 2's three cures (the ice stepped in time; the same with its cut
-        // booked for the rebound; the rebound after every pass).
-        let mut cures = name.split('+');
-        let name = cures.next().expect("a case name");
-        let (mut ice_stepped, mut ice_rebound, mut rebound_every_pass, mut base_cure) =
-            (false, false, false, false);
-        let mut rebound_exact = false;
-        let mut landscape_time = false;
-        let mut lake_cure = false;
-        let mut wedge = false;
-        let mut level_plateau = false;
-        let mut water = vd_bins::solve_copy::ErosionWater::Routing;
-        for cure in cures {
-            match cure {
-                "ice" => ice_stepped = true,
-                "icereb" => {
-                    ice_stepped = true;
-                    ice_rebound = true;
+        // `phase2+pass…`: a CANDIDATE under measurement switched in (never a ruled law; `Laws::pass_share`).
+        let (name, candidates) = name.split_once('+').unwrap_or((name, ""));
+        let mut parts = name.split('-');
+        assert_eq!(
+            parts.next(),
+            Some("phase2"),
+            "a case is phase2[-water][-lt][-craters][-wedge][-cell][-margins][-spread][-relief][-share][+pass|+flats|+cellK|+airy|+flex|+blendM|+scatterA][~fine][%K]"
+        );
+        let mut laws = Laws::default();
+        for cand in candidates.split('+').filter(|c| !c.is_empty()) {
+            match cand {
+                "pass" => laws.pass_share = true,
+                "flats" => laws.routing_flats = true,
+                other => {
+                    // The land copy's forms and diagnostics (rulings B58 item 2, B59–B61): cellK, airy, flex; the game's
+                    // own margins, spread, spectrum and share (no change on generator 26); the diagnostics blendM
+                    // (metres) and scatterA (sixteenths).
+                    use vd_bins::land_copy::Relief;
+                    if let Some(k) = other.strip_prefix("cell") {
+                        laws.land.cell = Some(k.parse().expect("cellK"));
+                    } else if let Some(m) = other.strip_prefix("blend") {
+                        laws.land.blend_m = Some(m.parse().expect("blendM"));
+                    } else if let Some(a) = other.strip_prefix("scatter") {
+                        laws.land.scatter = Some(a.parse().expect("scatterA"));
+                    } else {
+                        match other {
+                            "margins" => laws.land.margins = true,
+                            "spread" => laws.land.spread = true,
+                            "airy" => laws.land.relief = Relief::Airy,
+                            "flex" => laws.land.relief = Relief::Flex,
+                            "spectrum" => laws.land.relief = Relief::Spectrum,
+                            "share" => laws.land.share = true,
+                            _ => panic!(
+                                "a candidate is pass, flats, cellK, margins, spread, airy, flex, spectrum, share, blendM or scatterA, not {other}"
+                            ),
+                        }
+                    }
                 }
-                "reb" => rebound_every_pass = true,
-                "base" => base_cure = true,
-                "rebx" => rebound_exact = true,
-                "lt" => landscape_time = true,
-                "lake" => lake_cure = true,
-                "wedge" => wedge = true,
-                "level" => level_plateau = true,
-                "wrain" => water = vd_bins::solve_copy::ErosionWater::RainOnWaterTree,
-                "water" => water = vd_bins::solve_copy::ErosionWater::BudgetRunoff,
+            }
+        }
+        for out in parts {
+            match out {
+                "water" => laws.water_paths = false,
+                "lt" => laws.landscape_time = false,
+                "craters" => laws.craters_at_own_age = false,
+                "wedge" => laws.wedge = false,
+                // Generator 26's land laws (rulings B59–B61), each taken out in the land copy only.
+                "cell" => laws.land.cell = None,
+                "margins" => laws.land.margins = false,
+                "spread" => laws.land.spread = false,
+                "relief" => laws.land.relief = vd_bins::land_copy::Relief::None,
+                "share" => laws.land.share = false,
                 other => panic!(
-                    "a cure is ice, icereb, reb, rebx, base, lt, lake, wedge, level, wrain or water, not {other}"
+                    "a law taken out is water, lt, craters, wedge, cell, margins, spread, relief or share, not {other}"
                 ),
             }
         }
         let standard = Schedule::standard(words.age_yr);
-        let k = passes / standard.passes;
-        assert_eq!(
-            k * standard.passes,
-            passes,
-            "the pass count is a multiple of the solve's {}",
-            standard.passes
-        );
+        // `VD_BENCH_T_MIN_YR`: the axis's last pass in years, in place of the axis's own (the gate's cause: a change of
+        // the discretization at one resolution — the chaos test). Unset, the axis is the solve's own.
+        let t_min_yr = std::env::var("VD_BENCH_T_MIN_YR")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(standard.t_min_yr / fineness);
         let schedule = Schedule {
-            passes,
-            climate_every: standard.climate_every * k,
-            isostasy_every: standard.isostasy_every * k,
+            t_min_yr,
+            t_max_yr: standard.t_max_yr / fineness,
+            climate_every: climate_every.unwrap_or(standard.climate_every * fineness as u32),
+            sub_sweeps,
+            routings: routings.unwrap_or(standard.routings),
             ..standard
         };
-        let laws = match name {
-            "today" => Laws::default(),
-            "belts-today-limits" => Laws {
-                belts_by_influx: true,
-                ..Laws::default()
-            },
-            "limits" => Laws {
-                limits_as_law: true,
-                ..Laws::default()
-            },
-            "belts" => Laws {
-                limits_as_law: true,
-                belts_by_influx: true,
-                ..Laws::default()
-            },
-            "today-geometric" => Laws {
-                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
-                ..Laws::default()
-            },
-            "belts-geometric" => Laws {
-                limits_as_law: true,
-                belts_by_influx: true,
-                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
-                ..Laws::default()
-            },
-            "b40" => Laws {
-                limits_as_law: true,
-                belts_by_influx: true,
-                mean_speed: true,
-                force_balance: true,
-                ..Laws::default()
-            },
-            "b40-geometric" => Laws {
-                limits_as_law: true,
-                belts_by_influx: true,
-                mean_speed: true,
-                force_balance: true,
-                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
-                ..Laws::default()
-            },
-            "today-craters" => Laws {
-                craters_at_own_age: true,
-                ..Laws::default()
-            },
-            "joint" => Laws {
-                joint_law: true,
-                ..Laws::default()
-            },
-            "b40-joint" => Laws {
-                limits_as_law: true,
-                belts_by_influx: true,
-                mean_speed: true,
-                force_balance: true,
-                craters_at_own_age: true,
-                joint_law: true,
-                ..Laws::default()
-            },
-            "joint-geometric" => Laws {
-                joint_law: true,
-                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
-                ..Laws::default()
-            },
-            "b40-joint-geometric" => Laws {
-                limits_as_law: true,
-                belts_by_influx: true,
-                mean_speed: true,
-                force_balance: true,
-                craters_at_own_age: true,
-                joint_law: true,
-                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
-                ..Laws::default()
-            },
-            "b40-craters" => Laws {
-                limits_as_law: true,
-                belts_by_influx: true,
-                mean_speed: true,
-                force_balance: true,
-                craters_at_own_age: true,
-                ..Laws::default()
-            },
-            "b40-joint-kept" | "b40-joint-slow" | "b40-joint-kept-slow" => Laws {
-                limits_as_law: true,
-                belts_by_influx: true,
-                mean_speed: true,
-                force_balance: true,
-                craters_at_own_age: true,
-                joint_law: true,
-                crust_partition: name.contains("kept"),
-                collision_slowing: name.contains("slow"),
-                ..Laws::default()
-            },
-            "b40-craters-kept-slow" => Laws {
-                limits_as_law: true,
-                belts_by_influx: true,
-                mean_speed: true,
-                force_balance: true,
-                craters_at_own_age: true,
-                crust_partition: true,
-                collision_slowing: true,
-                ..Laws::default()
-            },
-            other => panic!(
-                "a case is today, belts-today-limits, limits, belts, today-geometric, belts-geometric, b40, b40-geometric, today-craters, b40-craters, joint, b40-joint, joint-geometric, b40-joint-geometric, b40-joint-kept, b40-joint-slow, b40-joint-kept-slow or b40-craters-kept-slow, not {other}"
-            ),
-        };
-        let (laws, schedule) = if let Some((t_min, t_max, cadence)) = axis {
-            let times = vd_bins::solve_copy::mixed_times(words.age_yr, t_min, t_max);
-            let passes = (times.len() - 1) as u32;
-            (
-                Laws {
-                    mixed_axis: Some((t_min, t_max)),
-                    ..laws
-                },
-                Schedule {
-                    passes,
-                    climate_every: standard.climate_every * cadence,
-                    isostasy_every: standard.isostasy_every * cadence,
-                    ..standard
-                },
-            )
-        } else {
-            (laws, schedule)
-        };
-        let laws = Laws {
-            sub_sweeps,
-            sub_route,
-            ice_stepped,
-            ice_rebound,
-            rebound_every_pass,
-            base_cure,
-            rebound_exact,
-            landscape_time,
-            lake_cure,
-            wedge,
-            level_plateau,
-            water,
-            ..laws
-        };
-        let case = &if sub_sweeps > 1 {
-            format!("{case}%{sub_sweeps}{}", if sub_route { "r" } else { "" })
-        } else {
-            case.clone()
-        };
         let started = Instant::now();
-        let solved = solve_copy(
-            &body,
-            &words,
-            schedule,
-            Router::D8,
-            &laws,
-            None,
-            ledger_dir.is_some(),
-        )
-        .expect("the home planet solves");
+        let solved = solve_copy(&body, &words, schedule, &laws, ledger_dir.is_some())
+            .expect("the home planet solves");
         println!(
-            "\n== CASE {case} ({laws:?}): solved in {:.1} s",
+            "\n== CASE {case} ({laws:?}, {} passes, {} sweeps and {} routings a pass): solved in {:.1} s",
+            schedule.times().len() - 1,
+            schedule.sub_sweeps,
+            schedule.routings,
             started.elapsed().as_secs_f64()
         );
         if let Some(dir) = &ledger_dir {
-            write_ledger(&format!("{dir}/{case}.csv"), &solved.ledger);
+            write_ledger(&format!("{dir}/{full}.csv"), &solved.ledger);
+            write_plate_ledger(&format!("{dir}/{full}.plates.csv"), &solved.plate_passes);
+            // THE LEDGER BY PLATE (ruling B61 item 2): each plate's volume change by process over the solve, km³.
+            println!(
+                "  THE LEDGER BY PLATE, km³ over the solve: plate | craters | talus | ice | uplift | sweeps | rebounds | peak law | net"
+            );
+            for (p, row) in solved.by_plate.iter().enumerate() {
+                let net: f64 = row.iter().sum();
+                println!(
+                    "    plate {p:2}: {}",
+                    row.iter()
+                        .chain(std::iter::once(&net))
+                        .map(|v| format!("{:12.0}", v / 1e9))
+                        .collect::<Vec<_>>()
+                        .join(" |")
+                );
+            }
         }
-        if case == "today" && passes == standard.passes {
+        if let Some(dir) = &artifact_dir {
+            let path = format!("{dir}/{case}.art");
+            match vd_bins::artifact_file::write(&path, &artifact_of(&body, &words, &solved)) {
+                Ok(()) => println!("  the artifact: {path}"),
+                Err(e) => println!("  the artifact: could not write {path}: {e}"),
+            }
+        }
+        if case == "phase2" {
             let digest = artifact_of(&body, &words, &solved).digest();
             println!(
-                "CONTROL the copy with the solve's own laws: digest [{:#x}, {:#x}] {} the release gate's pin",
+                "CONTROL the copy with every law as the game runs it: digest [{:#x}, {:#x}] {} the release gate's pin",
                 digest[0],
                 digest[1],
                 if digest == HOME_ARTIFACT_DIGEST {
@@ -941,56 +886,63 @@ fn main() {
         }
         if let Some(b) = &solved.belts {
             let r = &b.report;
+            let mut windows: Vec<f64> = b
+                .wedge
+                .iter()
+                .map(|w| (words.age_yr - w.start_yr) as f64 / 1e6)
+                .collect();
+            windows.sort_by(f64::total_cmp);
+            let at = |p: f64| {
+                windows
+                    .get(((windows.len().max(1) - 1) as f64 * p) as usize)
+                    .copied()
+                    .unwrap_or(0.0)
+            };
             println!(
-                "  THE BELTS' LAW: {} nodes ({} in collisions, {} at Andean margins); the plates' turnover {:.0} Myr \
-                 (oceanic crust {:.1} million km², ridges {:.0} km, C0 {:.2} km²/yr); windows at 10/25/50/75/90 %: \
-                 {:.1} / {:.1} / {:.1} / {:.1} / {:.1} Myr; convergence at 10/50/90 %: {:.1} / {:.1} / {:.1} mm/yr; \
-                 surface uplift rate at 50 % {:.3} mm/yr, the largest {:.3} mm/yr; the uplift over the window: mean \
-                 {:.0} m, the largest {:.0} m; P2 the crust a collision keeps at 10/50/90 %: {:.2} / {:.2} / {:.2}; S2 a \
-                 collision's influx against a constant speed's at 10/50/90 %: {:.2} / {:.2} / {:.2}; the rock raised over \
-                 the windows: collisions {:.3e} m³, Andean margins {:.3e} m³",
+                "  THE BELTS' LAW (the critical wedges): {} nodes rise ({} in collisions, {} at Andean margins, {} on a \
+                 plateau at the end); the plates' turnover {:.0} Myr; the windows the risen nodes read at 10/50/90 %: \
+                 {:.1} / {:.1} / {:.1} Myr; the rock raised by the end: collisions {:.3e} m³, Andean margins {:.3e} m³",
                 r.nodes,
                 r.collision_nodes,
                 r.andean_nodes,
-                r.t_m_yr / 1e6,
-                r.ocean_area_m2 / 1e12,
-                r.ridge_length_m / 1e3,
-                r.c0_m2_yr / 1e6,
-                r.windows_myr[0],
-                r.windows_myr[1],
-                r.windows_myr[2],
-                r.windows_myr[3],
-                r.windows_myr[4],
-                r.vn_mm_yr[0],
-                r.vn_mm_yr[1],
-                r.vn_mm_yr[2],
-                r.rate_mm_yr[0],
-                r.rate_mm_yr[1],
-                r.mean_total_m,
-                r.max_total_m,
-                r.kept_share[0],
-                r.kept_share[1],
-                r.kept_share[2],
-                r.slowing_share[0],
-                r.slowing_share[1],
-                r.slowing_share[2],
-                r.volume_m3[0],
-                r.volume_m3[1]
+                r.plateau_nodes,
+                r.t_m_yr as f64 / 1e6,
+                at(0.1),
+                at(0.5),
+                at(0.9),
+                r.volume_m3[0] as f64,
+                r.volume_m3[1] as f64
             );
         }
-        if solved.collapsed > 0 || laws.limits_as_law {
+        println!(
+            "  THE PEAK LAW: {} node collapses over the passes and their rounds; the largest excess left over its cap \
+             after a pass: {:.0} m",
+            solved.collapsed,
+            f64::from(solved.peak_left) / f64::from(Z_STEPS_PER_M)
+        );
+        println!(
+            "  THE STEPPED ICE: {} steps over the epoch; the one-year guard acted {} times (DEFERRED D-TERRAIN-10)",
+            solved.report.ice_steps, solved.report.ice_floored
+        );
+        // The rock's ways (the game's deposit, 2026-10-05): a way refused because the water's way from its gate ends in a
+        // body the rest already passed, at an inland end or on a ring; the rock with no way left is dropped and counted.
+        let refused: usize = solved.report.sweeps.iter().map(|s| s.rock_refused).sum();
+        let stuck: u128 = solved.report.sweeps.iter().map(|s| s.rock_stuck).sum();
+        println!(
+            "  THE ROCK'S WAYS: {refused} ways refused over the sweeps; the rock with no way {:.3e} m³",
+            stuck as f64 / f64::from(Z_STEPS_PER_M)
+        );
+        if laws.routing_flats {
             println!(
-                "  THE PEAK LAW: {} node collapses over the passes and their rounds; the largest excess left over its \
-                 cap after a pass: {:.0} m",
-                solved.collapsed,
-                f64::from(solved.peak_left) / f64::from(Z_STEPS_PER_M)
+                "  THE CANDIDATE (the routing's receivers on open land): {} nodes given the water's own receiver back over the passes (a ring of receivers)",
+                solved.flats_repaired
             );
         }
-        let times = match laws.mixed_axis {
-            Some((t_min, t_max)) => vd_bins::solve_copy::mixed_times(words.age_yr, t_min, t_max),
-            None => vd_bins::solve_copy::pass_times(words.age_yr, passes, laws.geometric_last_yr),
-        };
+        let times = schedule.times();
         let last_dt_yr = times[times.len() - 1] - times[times.len() - 2];
-        read_case(&lattice, &area, &solved, last_dt_yr);
+        let (causes, drains) = read_case(&lattice, &area, &solved, last_dt_yr);
+        if let Some(dir) = &dump_dir {
+            dump_case(dir, full, &lattice, &solved, causes, drains);
+        }
     }
 }

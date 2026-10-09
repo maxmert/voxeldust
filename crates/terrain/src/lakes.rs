@@ -14,8 +14,9 @@
 //! **THE HIERARCHY** (Barnes, Callaghan & Wickert 2021, *Fill–Spill–Merge*, Earth Surf. Dynam. 9,
 //! 105–121, <https://doi.org/10.5194/esurf-9-105-2021>; the reference code is MIT and none of it is
 //! copied — this is the merge tree of the field's own sublevel sets, built here in integers). The
-//! nodes are swept in one stated order, lowest first — ★ on a FLAT of one height by the summed chord
-//! from its drains ([`flats`]; plan step 2b), then by the smaller index. A node whose lower
+//! nodes are swept in one stated order, lowest first — ★ on a FLAT of one height by the flat's
+//! combined potential ([`flats`]; plan step 2b; phase 1 of the ground step), then by the smaller
+//! index. A node whose lower
 //! neighbours are all unvisited is a PIT and opens a new depression; a node with one lower
 //! component joins it; a node with two or more MERGES them — each child closes with that node as
 //! its SPILL, and a parent depression carries both. The CONNECTED OCEAN is the root and never
@@ -307,7 +308,7 @@ fn leaf(v: u32, z_v: i32) -> Depression {
 /// 1), or — on a body whose water settled no ocean — the same six lowest nodes the routing takes
 /// ([`OUTLETS_WITHOUT_SEA`]), so the hierarchy and the receivers agree about where the water
 /// leaves. Returns the root mask, THE FLATS of the ground ([`flats`]), and every other node in the
-/// SWEEP'S ORDER: lowest first by `(height, distance on its flat, index)`.
+/// SWEEP'S ORDER: lowest first by `(height, potential on its flat, index)`.
 ///
 /// ★ THE FLAT'S DISTANCE IN THE ORDER (plan step 2b, question 3). By `(height, index)` alone a flat
 /// was swept in index order, so a node of a flat that drains could be reached before any neighbour
@@ -327,7 +328,7 @@ fn root_and_order(state: &MacroSolve) -> (Vec<bool>, Flats, Vec<u32>) {
         order.drain(0..seeds);
     }
     let flats = flats(state, &root);
-    order.sort_unstable_by_key(|&v| (z[v as usize], flats.dist[v as usize], v));
+    order.sort_unstable_by_key(|&v| (z[v as usize], flats.phi[v as usize], v));
     (root, flats, order)
 }
 
@@ -344,18 +345,32 @@ fn root_and_order(state: &MacroSolve) -> (Vec<bool>, Flats, Vec<u32>) {
 ///   node farthest from its rim by the summed chord, ties to the smaller index — is the pit, and
 ///   every node takes the summed chord to it.
 ///
-/// A node off every flat reads zero and heads nowhere. Barnes' second field ("away from higher
-/// ground") is left out: the flat's water leaves by its drains whatever path it takes over the flat.
+/// A node off every flat reads zero and heads nowhere.
+///
+/// ★ BARNES' TWO FIELDS AS ONE POTENTIAL (phase 1 of the ground step, design §5.1; rulings B9 item 2,
+/// B52 item 2). The flat's water no longer aims at ONE target — its nearest drain — whose straight
+/// line on a flat of node squares runs along the lattice's rows (MEASURED, generator 22: the flats'
+/// trunks read 1.470 against ~1.006). Each node of the flat takes two summed chords: `T`, to its
+/// nearest drain (the middle on a closed flat), and `A`, to the nearest node of the flat that touches
+/// HIGHER ground; the potential is `Φ = 2·T + (A_max − A)`, `A_max` the flat's largest `A` — Barnes'
+/// "toward lower" field twice and "away from higher" once, in metres of chord. Its water steps down
+/// `Φ`'s own gradient ([`downhill`], [`step_along`]). Every node of the flat off a drain has a
+/// neighbour of smaller `Φ`: the step toward its nearest drain shortens `T` by its chord `c` and
+/// moves `A` by at most `c`, so `Φ` falls by at least `c` — so the water always reaches a drain, and
+/// the flat holds no false pit. A flat that touches no higher ground has `A_max − A = 0`.
 ///
 /// **Example.** A crater bowl the sediment filled to its sill is a flat 40 km across at the sill's
-/// height. Its water no longer runs to the bowl's south-west corner by the node index; each node's
-/// water heads for the nearest point of the sill, where the ground falls away.
+/// height. Its water no longer runs to the bowl's south-west corner by the node index, nor along the
+/// rim's straight edge to the nearest point of the sill: it leaves the walls first, gathers along the
+/// bowl's middle and runs out through the sill.
 struct Flats {
-    /// The summed chord to the node's drain or middle, whole metres; zero off the flats and at a
+    /// `T`: the summed chord to the node's drain or middle, whole metres; zero off the flats and at a
     /// drain or a middle.
     dist: Vec<u64>,
     /// The drain or the middle the node's water heads for; [`NO_NODE`] off the flats.
     toward: Vec<u32>,
+    /// `Φ = 2·T + (A_max − A)`, whole metres; zero off the flats and at a closed flat's middle.
+    phi: Vec<u64>,
 }
 
 /// The flats of `state` over the stated root ([`Flats`]).
@@ -365,7 +380,11 @@ fn flats(state: &MacroSolve, root: &[bool]) -> Flats {
     let mut out = Flats {
         dist: vec![0; n],
         toward: vec![NO_NODE; n],
+        phi: vec![0; n],
     };
+    // `A` and its scratch sources, over every flat in turn.
+    let mut away = vec![0u64; n];
+    let mut away_from = vec![NO_NODE; n];
     let mut seen = vec![false; n];
     let mut members: Vec<u32> = Vec::new();
     let mut stack: Vec<u32> = Vec::new();
@@ -392,6 +411,19 @@ fn flats(state: &MacroSolve, root: &[bool]) -> Flats {
                 }
             }
         }
+        // The higher edge: a node with a higher neighbour; `A` is the summed chord from it.
+        let rim: Vec<u32> = members
+            .iter()
+            .copied()
+            .filter(|&v| {
+                state
+                    .lattice
+                    .neighbours(v)
+                    .iter()
+                    .any(|&m| (m != NO_NODE) && (z[m as usize] > z0))
+            })
+            .collect();
+        spread(state, &mut away, &mut away_from, &members, &rim, z0, root);
         // The drains: a node with a lower neighbour or a root neighbour.
         let mut sources: Vec<u32> = members
             .iter()
@@ -405,36 +437,48 @@ fn flats(state: &MacroSolve, root: &[bool]) -> Flats {
             })
             .collect();
         if sources.is_empty() {
-            // A closed flat: its middle, the node farthest from its rim.
-            let rim: Vec<u32> = members
-                .iter()
-                .copied()
-                .filter(|&v| {
-                    state
-                        .lattice
-                        .neighbours(v)
-                        .iter()
-                        .any(|&m| (m != NO_NODE) && (z[m as usize] > z0))
-                })
-                .collect();
-            spread(state, &mut out, &members, &rim, z0, root);
+            // A closed flat: its middle, the node farthest from its rim (a closed flat's every
+            // neighbour off it stands higher, so its rim is never empty).
             let middle = members
                 .iter()
                 .copied()
-                .max_by_key(|&v| (out.dist[v as usize], std::cmp::Reverse(v)))
+                .max_by_key(|&v| (away[v as usize], std::cmp::Reverse(v)))
                 .expect("a flat has members");
             sources = vec![middle];
         }
-        spread(state, &mut out, &members, &sources, z0, root);
+        spread(
+            state,
+            &mut out.dist,
+            &mut out.toward,
+            &members,
+            &sources,
+            z0,
+            root,
+        );
+        // Barnes' two fields as one potential; a flat that touches no higher ground reads `A` as
+        // unreached everywhere and adds nothing.
+        let a_max = members
+            .iter()
+            .map(|&v| away[v as usize])
+            .filter(|&a| a != u64::MAX)
+            .max()
+            .unwrap_or(0);
+        for &v in &members {
+            let a = away[v as usize];
+            let lift = if a == u64::MAX { 0 } else { a_max - a };
+            out.phi[v as usize] = 2 * out.dist[v as usize] + lift;
+        }
     }
     out
 }
 
 /// The summed chord from `sources` over the flat `members` at height `z0` (a Dijkstra keyed by
-/// `(distance, node)`, so no visit order decides it), and the source each node heads for.
+/// `(distance, node)`, so no visit order decides it) into `dist`, and the source each node heads
+/// for into `toward`; a member no source reaches reads `u64::MAX` (an empty `sources`).
 fn spread(
     state: &MacroSolve,
-    out: &mut Flats,
+    dist: &mut [u64],
+    toward: &mut [u32],
     members: &[u32],
     sources: &[u32],
     z0: i32,
@@ -442,16 +486,16 @@ fn spread(
 ) {
     let z = &state.z;
     for &v in members {
-        out.dist[v as usize] = u64::MAX;
+        dist[v as usize] = u64::MAX;
     }
     let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
     for &s in sources {
-        out.dist[s as usize] = 0;
-        out.toward[s as usize] = s;
+        dist[s as usize] = 0;
+        toward[s as usize] = s;
         heap.push(Reverse((0, s)));
     }
     while let Some(Reverse((d, u))) = heap.pop() {
-        if d > out.dist[u as usize] {
+        if d > dist[u as usize] {
             continue;
         }
         for m in state.lattice.neighbours(u) {
@@ -459,13 +503,51 @@ fn spread(
                 continue;
             }
             let step = d + u64::from(state.chord_m(u, m));
-            if step < out.dist[m as usize] {
-                out.dist[m as usize] = step;
-                out.toward[m as usize] = out.toward[u as usize];
+            if step < dist[m as usize] {
+                dist[m as usize] = step;
+                toward[m as usize] = toward[u as usize];
                 heap.push(Reverse((step, m)));
             }
         }
     }
+}
+
+/// ★ THE DOWNHILL OF A FIELD at node `i` (phase 1 of the ground step; ruling B58 for the ground's own height): the
+/// central difference over `ring`, the node's neighbours with their values — a flat's potential, or the ground's height
+/// in sixteenths — each neighbour's offset weighted by the field's drop to it over the offset's squared length. On
+/// the lattice's symmetric stencil the sum points EXACTLY down a potential that falls evenly in any
+/// one direction (each row and each diagonal pair adds twice its share), so no direction of the
+/// lattice is preferred. Scaled so its largest component stays under 2²⁴, where [`step_along`]'s
+/// squared offsets fit their words; zero where the ring is flat.
+///
+/// **Example.** On a basin floor whose potential falls 3 m a kilometre toward the north-north-east,
+/// the eight neighbours' drops weigh their offsets so the sum points north-north-east, between the
+/// row and the diagonal, and the split then takes each about as often as that bearing asks.
+fn downhill(state: &MacroSolve, i: u32, phi_i: i64, ring: &[(u32, i64)]) -> [i128; 3] {
+    let at = state.dir_of(i);
+    let mut t = [0i128; 3];
+    for &(m, phi_m) in ring {
+        let d = state.dir_of(m);
+        let e = [
+            i128::from(d[0]) - i128::from(at[0]),
+            i128::from(d[1]) - i128::from(at[1]),
+            i128::from(d[2]) - i128::from(at[2]),
+        ];
+        // The weight at 64 fraction bits: a drop under 2²⁵ m stays under 2⁸⁹, and over the
+        // smallest squared offset of THE world's lattices (2³⁵, the largest body's 8 km node at
+        // 30 bits) the eight terms stay under 2⁷⁴.
+        let e2 = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).max(1);
+        let w = ((i128::from(phi_i) - i128::from(phi_m)) << 64) / e2;
+        t[0] += w * e[0];
+        t[1] += w * e[1];
+        t[2] += w * e[2];
+    }
+    let big = t[0]
+        .unsigned_abs()
+        .max(t[1].unsigned_abs())
+        .max(t[2].unsigned_abs());
+    let shift = (128 - big.leading_zeros()).saturating_sub(24);
+    [t[0] >> shift, t[1] >> shift, t[2] >> shift]
 }
 
 /// ★ THE FLAT STEP (plan step 2b, question 4): from node `i` toward `target`, among `cands` — every
@@ -495,6 +577,14 @@ fn flat_step(state: &MacroSolve, i: u32, target: u32, cands: &[(u32, u64)]) -> (
         i128::from(to[1]) - i128::from(at[1]),
         i128::from(to[2]) - i128::from(at[2]),
     ];
+    step_along(state, i, t, cands)
+}
+
+/// ★ THE STEP ALONG A BEARING (the flat step's own rule, [`flat_step`], for any line `t` from node
+/// `i`, in the cached directions' units): among `cands`, the nearest by its cost when none lies
+/// ahead (0), the one ahead (1), or Rho8's split between the two ahead nearest the line (2).
+fn step_along(state: &MacroSolve, i: u32, t: [i128; 3], cands: &[(u32, u64)]) -> (u32, u8) {
+    let at = state.dir_of(i);
     let mut near = (u64::MAX, NO_NODE);
     let mut ahead = [(u128::MAX, NO_NODE); 2];
     let mut count = 0usize;
@@ -548,10 +638,13 @@ fn split(seed: u64, i: u32, near: (u128, u32), far: (u128, u32)) -> u32 {
     }
 }
 
-/// ★ THE DESCENT OVER THE GROUND for every node, with the root stated: each node that is not a root
-/// takes its steepest neighbour lower in the sweep's order ("steepest" is the solve's own
-/// [`steeper`] over the lattice's chord); ★ a node of a FLAT takes the flat step toward its drain or
-/// its middle ([`flat_step`]; plan step 2b, question 3); and the descent ends at a root or at a node
+/// ★ THE DESCENT OVER THE GROUND for every node, with the root stated: ★ each node that is not a root
+/// takes the neighbour lower in the sweep's order that the ground's own downhill bearing reaches by
+/// Rho8's seeded split (ruling B58: no straight, 45° or staircased rivers; [`downhill`] over the
+/// heights, [`step_along`]), and its steepest lower neighbour (the solve's own [`steeper`] over the
+/// lattice's chord) where none lies ahead of that bearing; ★ a node of a FLAT steps down the flat's potential
+/// ([`Flats`], [`downhill`], [`step_along`]; plan step 2b, question 3; phase 1 of the ground step);
+/// and the descent ends at a root or at a node
 /// with no lower neighbour — a PIT, which opened exactly one leaf of the hierarchy.
 ///
 /// **Example.** Rain on a spur of the belt's range runs down the ground, never down the fill. The
@@ -568,51 +661,98 @@ pub fn descent(state: &MacroSolve) -> Descent {
 /// sweep reached first, so the descent and the hierarchy name the same pits.
 fn descent_over(state: &MacroSolve, order: &[u32], flats: &Flats) -> Descent {
     let n = state.node_count();
-    let z = &state.z;
+    // ★ EACH NODE'S WAY DOWN ON THE SOLVE'S CORES (ruling B64): it reads only the ground and the flats, never another
+    // node's way, so the nodes of `order` are cut into ranges, each computed by its own thread, and joined in order.
+    let picks: Vec<u32> = crate::par::per_range(order.len(), state.cores.threads(), |r| {
+        let mut cands: Vec<(u32, u64)> = Vec::with_capacity(8);
+        let mut ring: Vec<(u32, i64)> = Vec::with_capacity(8);
+        order[r]
+            .iter()
+            .map(|&v| way_down(state, flats, v, &mut cands, &mut ring))
+            .collect::<Vec<u32>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    // Where each descent ends, in the sweep's order (a node's way down comes before it).
     let mut down = vec![NO_NODE; n];
     let mut end: Vec<u32> = (0..n as u32).collect();
-    let mut cands: Vec<(u32, u64)> = Vec::with_capacity(8);
-    for &v in order {
+    for (&v, &best) in order.iter().zip(&picks) {
         let iv = v as usize;
-        let key = (z[iv], flats.dist[iv], v);
-        let mut best = NO_NODE;
-        if flats.dist[iv] > 0 {
-            cands.clear();
-            for m in state.lattice.neighbours(v) {
-                if m == NO_NODE {
-                    continue;
-                }
-                let mi = m as usize;
-                // The same flat (a flat node of one height, never a root), nearer its drain.
-                if (flats.toward[mi] != NO_NODE)
-                    & (z[mi] == z[iv])
-                    & (flats.dist[mi] < flats.dist[iv])
-                {
-                    cands.push((m, flats.dist[mi] + u64::from(state.chord_m(v, m))));
-                }
-            }
-            best = flat_step(state, v, flats.toward[iv], &cands).0;
-        } else {
-            let (mut dz_best, mut l_best) = (0i64, 0u32);
-            for m in state.lattice.neighbours(v) {
-                if m == NO_NODE || (z[m as usize], flats.dist[m as usize], m) >= key {
-                    continue;
-                }
-                let dz = i64::from(z[iv]) - i64::from(z[m as usize]);
-                let l = state.chord_m(v, m);
-                if best == NO_NODE || steeper(dz, l, m, dz_best, l_best, best) {
-                    best = m;
-                    dz_best = dz;
-                    l_best = l;
-                }
-            }
-        }
         down[iv] = best;
         if best != NO_NODE {
             end[iv] = end[best as usize];
         }
     }
     Descent { down, end }
+}
+
+/// One node's way down (see [`descent_over`]): the neighbour its descent takes, or [`NO_NODE`] at a pit; `cands` and
+/// `ring` are the caller's scratch.
+fn way_down(
+    state: &MacroSolve,
+    flats: &Flats,
+    v: u32,
+    cands: &mut Vec<(u32, u64)>,
+    ring: &mut Vec<(u32, i64)>,
+) -> u32 {
+    let z = &state.z;
+    let iv = v as usize;
+    let key = (z[iv], flats.phi[iv], v);
+    let mut best = NO_NODE;
+    if flats.dist[iv] > 0 {
+        cands.clear();
+        ring.clear();
+        for m in state.lattice.neighbours(v) {
+            if m == NO_NODE {
+                continue;
+            }
+            let mi = m as usize;
+            // The same flat (a flat node of one height, never a root); a candidate is lower in
+            // the flat's potential.
+            if (flats.toward[mi] != NO_NODE) & (z[mi] == z[iv]) {
+                ring.push((m, flats.phi[mi] as i64));
+                if flats.phi[mi] < flats.phi[iv] {
+                    cands.push((m, flats.phi[mi] + u64::from(state.chord_m(v, m))));
+                }
+            }
+        }
+        let t = downhill(state, v, flats.phi[iv] as i64, ring);
+        best = step_along(state, v, t, cands).0;
+    } else {
+        // ★ RHO8 ON THE GROUND'S OWN SLOPE (ruling B58: no straight, 45° or staircased rivers): the bearing down the
+        // ground from all its neighbours ([`downhill`] over the heights), and the lower neighbour that bearing
+        // reaches by Rho8's seeded split between the two that bracket it ([`step_along`]); where no lower
+        // neighbour lies ahead of the bearing (a ridge's crest, a saddle), the steepest lower neighbour.
+        cands.clear();
+        ring.clear();
+        let (mut dz_best, mut l_best) = (0i64, 0u32);
+        for m in state.lattice.neighbours(v) {
+            if m == NO_NODE {
+                continue;
+            }
+            ring.push((m, i64::from(z[m as usize])));
+            if (z[m as usize], flats.phi[m as usize], m) >= key {
+                continue;
+            }
+            cands.push((m, 0));
+            let dz = i64::from(z[iv]) - i64::from(z[m as usize]);
+            let l = state.chord_m(v, m);
+            if best == NO_NODE || steeper(dz, l, m, dz_best, l_best, best) {
+                best = m;
+                dz_best = dz;
+                l_best = l;
+            }
+        }
+        if best != NO_NODE {
+            let t = downhill(state, v, i64::from(z[iv]), ring);
+            let (pick, ahead) = step_along(state, v, t, cands);
+            if ahead > 0 {
+                best = pick;
+            }
+        }
+    }
+    best
 }
 
 /// One root met at a node of the sweep, and its steepest lower neighbour there: the gate the
@@ -844,7 +984,7 @@ pub fn budget(state: &MacroSolve, climate: &Climate) -> Lakes {
         let kids = deps[d].children;
         let kids_full =
             kids[0] == NO_DEP || (deps[kids[0] as usize].full && deps[kids[1] as usize].full);
-        let up = if p == OCEAN || p == NO_DEP {
+        let up = if (p == OCEAN) | (p == NO_DEP) {
             NO_DEP
         } else {
             body_of[p as usize]
@@ -876,7 +1016,7 @@ pub fn budget(state: &MacroSolve, climate: &Climate) -> Lakes {
     let mut water = vec![DRY; n];
     for i in 0..n {
         let h = home[i];
-        if h == NO_DEP || h == OCEAN {
+        if (h == NO_DEP) | (h == OCEAN) {
             continue;
         }
         let body = body_of[h as usize];
@@ -1200,7 +1340,7 @@ fn solve_partial_levels(
     let mut counts = vec![0u32; partial.len() + 1];
     let body_slot = |home: &[u32], i: usize| -> u32 {
         let h = home[i];
-        if h == NO_DEP || h == OCEAN {
+        if (h == NO_DEP) | (h == OCEAN) {
             return NO_DEP;
         }
         let body = body_of[h as usize];
@@ -1632,6 +1772,24 @@ mod tests {
         let facies = state.facies(&vec![false; n], 0, true);
         assert_eq!(facies[a as usize], FACIES_LAKE);
         assert_eq!(facies[feeder], 0, "the wall is dry land over the lake");
+    }
+
+    /// ★ THE FILL LEVEL over nodes sorted lowest first, on the stated trough: a supply that cannot
+    /// pay the first step's evaporation stands DRY; one that pays exactly the first step stands one
+    /// sixteenth over it; a supply that pays every step stands one sixteenth over the highest — the
+    /// loop's own end.
+    #[test]
+    fn the_fill_level_pays_its_steps_lowest_first() {
+        let (state, _, _, _) = stated_field();
+        let climate = flat_climate(state.node_count(), 0, 1_000);
+        let mut own: Vec<u32> = trough(&state).iter().map(|&i| i as u32).collect();
+        own.sort_unstable_by_key(|&v| (state.z[v as usize], v));
+        let first = rates(&state, &climate, own[0] as usize).1;
+        assert!(first > 0, "the floor's evaporation costs water");
+        assert_eq!(fill_level(&own, &state, &climate, 0), DRY);
+        assert_eq!(fill_level(&own, &state, &climate, first - 1), DRY);
+        assert_eq!(fill_level(&own, &state, &climate, first), 11);
+        assert_eq!(fill_level(&own, &state, &climate, u128::MAX), 51);
     }
 
     /// The stated field's five trough nodes, west to east: the pit `A`, its wall, the saddle, the
@@ -2176,9 +2334,13 @@ mod tests {
         assert_eq!(lakes.report.lake_nodes, 0);
     }
 
-    /// ★ THE FULL SOLVE'S OWN LAKES on the moon's lattice under the home planet's words: the budget
-    /// runs, every body ends dry, partial or spilling, and every node the facies call a lake stands
-    /// under the level the budget settled — never under the routing fill, which raised far more.
+    /// ★ THE SOLVE'S OWN LAKES on the moon's lattice under the home planet's words: the budget runs,
+    /// every body ends dry, partial or spilling, and every node the facies call a lake stands under
+    /// the level the budget settled — never under the routing fill, which raised far more. ★ The
+    /// solved field holds few lakes (MEASURED: none in phase 2 before the deposit's cure, 24 hollows
+    /// after it — a hollow full of rock passes the rest on, ruling B51 item 2; 98 on generator 26's
+    /// moon), so the facies are read over the same field with two hollows dug into it
+    /// (`crate::solve::dug`) and the budget over that field.
     #[test]
     fn the_solve_states_a_lake_only_where_the_budget_put_water() {
         let moon = home_moon();
@@ -2188,12 +2350,18 @@ mod tests {
             water_km3: 3_000_000,
             ..home_solve_words()
         };
-        let (state, facies, report) =
+        let (mut state, _, _) =
             solve_full(&moon, &words, Schedule::standard(words.age_yr)).expect("a solve");
-        assert!(report.lakes.depressions > 0);
+        let (_, lakes) = crate::solve::dug::two_hollows(&moon, &words, &mut state);
+        let report = &lakes;
+        let facies = state.facies(&vec![false; state.node_count()], 0, true);
+        // The dug bowl holds standing water (the helper chooses it by the budget's own verdict). The depressions' count
+        // is no measure of the dig: on generator 26's moon the pit dug on the trunk lowered a saddle and opened older
+        // hollows (MEASURED: 98 depressions before the dig, 97 after).
+        assert!(report.report.partial > 0, "the dug bowl holds a lake");
         assert_eq!(
-            report.lakes.bodies,
-            report.lakes.dry + report.lakes.partial + report.lakes.spilling
+            report.report.bodies,
+            report.report.dry + report.report.partial + report.report.spilling
         );
         let mut lake_nodes = 0usize;
         let mut filled = 0usize;
@@ -2209,7 +2377,8 @@ mod tests {
                 assert!(state.water_z[i] <= state.z[i]);
             }
         }
-        assert_eq!(lake_nodes, report.lakes.lake_nodes);
+        assert_eq!(lake_nodes, report.report.lake_nodes);
+        assert!(lake_nodes > 0, "a lake stands");
         assert!(filled > 0, "the routing fill raised hollows");
         assert!(lake_nodes < filled, "the fill is not the water");
     }
@@ -2921,6 +3090,179 @@ mod tests {
         for &k in &floor {
             assert_eq!(lakes.descent.end[k], middle, "node {k}");
         }
+    }
+
+    /// ★ BARNES' TWO FIELDS AS ONE POTENTIAL (phase 1 of the ground step): on a flat that drains to
+    /// the sea and touches a block of higher ground, `Φ − 2·T` is `A_max − A` — largest beside the
+    /// block, zero at the flat's node farthest from it — every node off a drain has a neighbour of
+    /// smaller `Φ` on its flat (no false pit), and the descent steps strictly down `Φ`.
+    #[test]
+    fn the_flats_potential_leaves_the_higher_ground_first() {
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let n = state.node_count();
+        state.z = vec![100; n];
+        state.sea_z = 0;
+        let sea = state.lattice.index(Face::PosX, 3, 3);
+        state.z[sea as usize] = 0;
+        let block: Vec<usize> = (30..33)
+            .flat_map(|i| (30..33).map(move |j| (i, j)))
+            .map(|(i, j)| state.lattice.index(Face::PosX, i, j) as usize)
+            .collect();
+        for &k in &block {
+            state.z[k] = 200;
+        }
+        state.route();
+        let (root, flats, order) = root_and_order(&state);
+        let on_flat = |k: usize| (state.z[k] == 100) & !root[k];
+        let lift = |k: usize| flats.phi[k] - 2 * flats.dist[k];
+        let beside = state.lattice.index(Face::PosX, 29, 31) as usize;
+        let a_max = (0..n)
+            .filter(|&k| on_flat(k))
+            .map(lift)
+            .max()
+            .expect("a flat");
+        assert_eq!(
+            lift(beside),
+            a_max,
+            "beside the block the lift is the flat's largest"
+        );
+        assert_eq!((0..n).filter(|&k| on_flat(k)).map(lift).min(), Some(0));
+        for &v in &order {
+            let k = v as usize;
+            if !on_flat(k) || flats.dist[k] == 0 {
+                continue;
+            }
+            let lower = state.lattice.neighbours(v).iter().any(|&m| {
+                (m != NO_NODE) && on_flat(m as usize) && (flats.phi[m as usize] < flats.phi[k])
+            });
+            assert!(lower, "node {k} has a neighbour of smaller potential");
+        }
+        let descent = descent_over(&state, &order, &flats);
+        for k in 0..n {
+            let d = descent.down[k];
+            if on_flat(k) && (flats.dist[k] > 0) {
+                assert!(
+                    flats.phi[d as usize] < flats.phi[k],
+                    "node {k} steps down the potential"
+                );
+            }
+        }
+    }
+
+    /// A flat that touches no higher ground adds nothing to its potential: `Φ = 2·T` everywhere.
+    #[test]
+    fn a_flat_with_no_higher_ground_is_twice_its_distance() {
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let n = state.node_count();
+        state.z = vec![100; n];
+        state.sea_z = 0;
+        state.z[state.lattice.index(Face::PosX, 3, 3) as usize] = 0;
+        state.route();
+        let (_, flats, _) = root_and_order(&state);
+        assert!(flats.dist.iter().any(|&d| d > 0));
+        for k in 0..n {
+            assert_eq!(flats.phi[k], 2 * flats.dist[k], "node {k}");
+        }
+    }
+
+    /// A closed flat's middle stands at the bottom of its potential, and the floor's rim carries
+    /// the flat's largest lift.
+    #[test]
+    fn a_closed_flats_middle_is_the_bottom_of_its_potential() {
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let n = state.node_count();
+        state.z = vec![100; n];
+        state.sea_z = 0;
+        state.z[state.lattice.index(Face::PosX, 3, 3) as usize] = 0;
+        let floor: Vec<usize> = (20..25)
+            .flat_map(|i| (20..25).map(move |j| (i, j)))
+            .map(|(i, j)| state.lattice.index(Face::NegZ, i, j) as usize)
+            .collect();
+        for &k in &floor {
+            state.z[k] = 50;
+        }
+        state.route();
+        let (_, flats, _) = root_and_order(&state);
+        let middle = state.lattice.index(Face::NegZ, 22, 22) as usize;
+        assert_eq!(flats.phi[middle], 0);
+        for &k in &floor {
+            if k != middle {
+                assert!(flats.phi[k] > 0, "node {k}");
+            }
+        }
+        let corner = state.lattice.index(Face::NegZ, 20, 20) as usize;
+        let lift = |k: usize| flats.phi[k] - 2 * flats.dist[k];
+        let a_max = floor.iter().map(|&k| lift(k)).max().expect("a floor");
+        assert_eq!(lift(corner), a_max);
+    }
+
+    /// ★ THE DOWNHILL PREFERS NO DIRECTION OF THE LATTICE: at a face's middle, a potential that
+    /// falls evenly along the row, along the diagonal and at 30° and 120° off the row gives a
+    /// downhill parallel to the fall within about 1.8° (the sine squared under 10⁻³, read with no
+    /// transcendental; MEASURED 0.24–0.94° over the four falls — the coarse moon's own stencil,
+    /// whose face middle lies between two nodes, not a preferred direction), and a ring with no fall
+    /// gives none.
+    #[test]
+    fn the_downhill_points_down_the_potential_in_every_direction() {
+        #![allow(
+            clippy::cast_precision_loss,
+            reason = "a test reads a direction's sine"
+        )]
+        let moon = home_moon();
+        let state = MacroSolve::new(&moon).expect("a state");
+        let (face, ci, cj) = (Face::PosX, 34i32, 34i32);
+        let c = state.lattice.index(face, ci, cj);
+        let at = state.dir_of(c);
+        let off = |i: i32, j: i32| -> [f64; 3] {
+            let d = state.dir_of(state.lattice.index(face, i, j));
+            [
+                f64::from(d[0] - at[0]),
+                f64::from(d[1] - at[1]),
+                f64::from(d[2] - at[2]),
+            ]
+        };
+        let (ex, ey) = (off(ci + 1, cj), off(ci, cj + 1));
+        for (gx, gy) in [(1_000i64, 0i64), (707, 707), (866, 500), (-500, 866)] {
+            let base = 1_000_000i64;
+            let ring: Vec<(u32, i64)> = state
+                .lattice
+                .neighbours(c)
+                .iter()
+                .map(|&m| {
+                    let (_, i, j) = state.lattice.split(m);
+                    let phi = base + gx * i64::from(i - ci) + gy * i64::from(j - cj);
+                    (m, phi)
+                })
+                .collect();
+            let t = downhill(&state, c, base, &ring);
+            let t = [t[0] as f64, t[1] as f64, t[2] as f64];
+            let want = [
+                -(gx as f64) * ex[0] - (gy as f64) * ey[0],
+                -(gx as f64) * ex[1] - (gy as f64) * ey[1],
+                -(gx as f64) * ex[2] - (gy as f64) * ey[2],
+            ];
+            let dot = t[0] * want[0] + t[1] * want[1] + t[2] * want[2];
+            let cross = [
+                t[1] * want[2] - t[2] * want[1],
+                t[2] * want[0] - t[0] * want[2],
+                t[0] * want[1] - t[1] * want[0],
+            ];
+            let c2 = cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2];
+            let n2 = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2])
+                * (want[0] * want[0] + want[1] * want[1] + want[2] * want[2]);
+            assert!(dot > 0.0, "the fall ({gx}, {gy}) points down");
+            assert!(c2 < 1.0e-3 * n2, "the fall ({gx}, {gy}): sine² {}", c2 / n2);
+        }
+        let level: Vec<(u32, i64)> = state
+            .lattice
+            .neighbours(c)
+            .iter()
+            .map(|&m| (m, 5_000))
+            .collect();
+        assert_eq!(downhill(&state, c, 5_000, &level), [0, 0, 0]);
     }
 
     /// ★ QUESTION 3 (plan step 2b): A CLOSED FLAT ROUND A CUBE CORNER is one hollow as well. Only

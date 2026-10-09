@@ -42,6 +42,7 @@
 #![deny(clippy::modulo_arithmetic)]
 
 pub mod artifact;
+pub mod belts;
 pub mod body;
 pub mod carve;
 pub mod chunk;
@@ -59,6 +60,7 @@ pub mod land;
 pub mod lattice;
 pub mod macro_lattice;
 pub mod noise;
+pub mod par;
 pub mod position;
 pub mod river;
 pub mod seat;

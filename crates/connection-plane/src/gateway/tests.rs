@@ -268,7 +268,7 @@ fn a_peer_below_the_protocol_floor_is_closed_with_the_floor_named() {
     assert_eq!(
         decode_controls(&sent, CLIENT),
         vec![ServerControlMsg::Close {
-            reason: "protocol minor below the floor (34): the scene is server-composed from v1.34"
+            reason: "protocol minor below the floor (36): the scene is server-composed from v1.36"
                 .to_owned()
         }]
     );
@@ -11946,6 +11946,8 @@ fn the_realm_the_occupant_stands_in_has_its_artifact_wanted_and_served_too() {
             levels: 1,
             sea_m: 0,
             coast_parts: 2,
+            low_m: 0,
+            high_m: 0,
         }),
         bulk(&BulkMsg::ArtifactPyramid {
             realm: RealmId::System(7),
@@ -12159,6 +12161,8 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
             levels: 1,
             sea_m: 0,
             coast_parts: 0,
+            low_m: 0,
+            high_m: 0,
         }),
         bulk(&BulkMsg::ArtifactPyramid {
             realm: RealmId::Planet(7),
@@ -12430,6 +12434,8 @@ fn a_drawn_realms_artifact_is_wanted_once_cached_once_and_served_per_session() {
         levels: 2,
         sea_m: 0,
         coast_parts: 0,
+        low_m: 0,
+        high_m: 0,
     };
     let head = head_for(RealmId::Planet(7));
     let part = |level: u32, part: u32, parts: u32| BulkMsg::ArtifactPyramid {
@@ -12618,6 +12624,8 @@ fn a_drawn_realms_artifact_is_wanted_once_cached_once_and_served_per_session() {
             levels: 0,
             sea_m: 0,
             coast_parts: 0,
+            low_m: 0,
+            high_m: 0,
         },
     )]);
     assert!(!rig.world.resource::<GatewaySessions>().artifacts[&RealmId::Planet(7)].whole());
@@ -12822,6 +12830,8 @@ fn a_drawn_realm_whose_surface_is_not_a_planets_is_served_no_tiles() {
         levels: 1,
         sea_m: 0,
         coast_parts: 0,
+        low_m: 0,
+        high_m: 0,
     };
     let part = BulkMsg::ArtifactPyramid {
         realm: RealmId::Star(7),
@@ -12909,6 +12919,8 @@ fn a_view_of_no_length_or_a_realm_with_no_look_is_served_no_tiles() {
                 levels: 1,
                 sea_m: 0,
                 coast_parts: 0,
+                low_m: 0,
+                high_m: 0,
             },
             BulkMsg::ArtifactPyramid {
                 realm,
@@ -13185,6 +13197,8 @@ fn cache_whole(
         levels: 1,
         sea_m: 0,
         coast_parts: 0,
+        low_m: 0,
+        high_m: 0,
     };
     super::artifact::cache_artifact_part(
         DEST,
@@ -13501,6 +13515,8 @@ fn only_a_tile_names_a_relayed_key() {
         levels: 1,
         sea_m: 0,
         coast_parts: 0,
+        low_m: 0,
+        high_m: 0,
     };
     assert_eq!(
         super::artifact::tile_key_of(&postcard::to_allocvec(&head).expect("encode")),
@@ -13645,6 +13661,8 @@ fn a_new_digest_drops_the_realms_relayed_copies() {
             levels: 1,
             sea_m: 0,
             coast_parts: 0,
+            low_m: 0,
+            high_m: 0,
         })
         .expect("encode")
     };
@@ -13736,6 +13754,8 @@ fn a_coast_part_before_its_head_is_a_stray_and_a_missing_part_keeps_a_cache_shor
         levels: 1,
         sea_m: 0,
         coast_parts: 0,
+        low_m: 0,
+        high_m: 0,
     };
     let part = |part: u32| BulkMsg::ArtifactPyramid {
         realm,
@@ -13851,6 +13871,8 @@ fn a_realm_that_leaves_the_picture_and_returns_is_served_again() {
         levels: 1,
         sea_m: 0,
         coast_parts: 0,
+        low_m: 0,
+        high_m: 0,
     };
     let part = BulkMsg::ArtifactPyramid {
         realm: RealmId::Planet(7),

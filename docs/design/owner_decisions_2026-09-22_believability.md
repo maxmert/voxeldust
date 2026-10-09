@@ -1389,3 +1389,470 @@ plateau land stands on Andean margins (8.8 % of the land, about half the mountai
 lake's rim as if its water went on; the rock it carries stays in the lake's basin and fills it. A pilot who flies inland
 from a coast where an ocean plate dives under the continent will cross the plateau the margin's own law builds — on most
 of Earth's such coasts, one range and no plateau.
+
+## B52. THE BUILDING STARTS NOW; THE ANDEAN LAW IS RESEARCHED BESIDE IT (2026-10-04)
+
+After runs 9–30 of phase 0's belts' bench, the owner asked: *"You are doing investigations for quite a lot, when the
+implementation part will start?"* Every ruled law of phase 2 has no open question left except the Andean margins' law,
+which has a registered interim. The owner ruled (*"Build now, Andean beside"*; amends B51 item 3's order):
+
+1. **THE "BEFORE" RECORD FIRST**: today's numbers on the pinned stands, headless (no window), as the baseline every later
+   phase's census compares with. The other phase-0 items (the climate bench M0-9, the rest of M0-4, the window session)
+   move into the phases that use them.
+2. **THEN PHASE 1** (the ground step design §5.1): the flat directions (Barnes, Lehman & Mulla 2014's two fields, one
+   potential) and the smooth rebound (B37 item 3), with the G-MEAN gate.
+3. **THEN PHASE 2'S MACRO CHANGE** with every ruled law (B39's convergence gate; B43 the cured base and the joint law; B44
+   the ice cure; B45 the exact rebound; B46–B47 the landscape's time and the lakes' cure; B42/B41 the crust partition and
+   the collision's slowing; B50 the critical wedge; B51 the level plateau and the water's own paths), each in the
+   generator's own integer form under the float fence (SL10 clause 4: the copy's powers, exponentials, logarithms and
+   tangents get integer forms), one change at a time with its census.
+4. **THE ANDEAN MARGINS' LAW IS RESEARCHED BESIDE THE BUILD** by a read-only agent; its bench and its build join phase 2
+   as one change. Until then the registered interim stands.
+
+**Example.** The pilot's next landing on the home planet comes after phase 1 (the flats drain without the grid's lean);
+after phase 2 the ranges are critical wedges, the plateaus level, and a dry range's rivers end in closed salt basins.
+
+## B53. BUILD PHASE 2, THEN ONE LOOK AT THE END RESULT (2026-10-04)
+
+Phase 1 was built and checked (generator 23: the flats' potential, the smooth rebound; the census
+`docs/investigation/2026-10-04/phase1_census.txt`), and its pictures were offered for the owner's look. The owner:
+*"It's very hard to judge at the moment - I didn't see the mountain region or anything else. If we still need to build
+in the phase 2, let's do it and then look at the end result please."* So:
+
+1. **PHASE 2 IS BUILT NEXT**, every ruled law in the generator's own form (B52 item 3), one change at a time with its
+   census; phase 1 stays as built under it.
+2. **THE OWNER'S LOOK COMES AT THE END RESULT**, with stands that hold a MOUNTAIN REGION and the other kinds of country
+   in frame — never only the plains around today's five picture stands. The frozen picture references stay until that
+   look; phase 1 and phase 2 are judged together.
+3. No commit until the owner asks for one.
+
+**Example.** The next pictures the owner sees stand over a collision belt's wedge, an Andean plateau, the old plains and
+a coast of the solved home planet, each before and after, instead of five views of the same plain.
+
+## B54. THE GATE'S SENSITIVITY: THE CURE FIRST, THEN A NOISE RULE; 214 PASSES UNTIL THE CURE (2026-10-05)
+
+Phase 2's census and the gate's cause were measured (the census document's gate section; DEFERRED D-TERRAIN-10): a defect
+was found and cured in the game's solve (17 % of all the rock the rivers cut vanished past the closed hollows' spills; now
+a hollow full of rock passes the rest on and the rock is kept exactly); with the rock kept the land's heights agree from
+414 to 814 passes but not from 214 to 414; and the plains' share carries its own noise of about 2.6 points at one
+resolution (the chaos test: the axis's last pass 4 % longer), over B47's 2-point tolerance — the young plateaus'
+drainage layout is sensitive. The owner chose:
+
+1. **THE CURE FIRST**: find whether the sensitivity is numerical (the suspect: the routing rations how fast a valley
+   captures flat plateau ground — the solve without the water's own paths converges), and cure it if it is.
+2. **THEN A NOISE RULE**: each reading's own noise measured at one resolution; where it exceeds the tolerance, N and 2N
+   passes agree within that noise.
+3. **214 PASSES STAY** until the cure (a cure may make the heights converge on the solve's own axis).
+
+**Example.** Plate 10's plateau, raised 223 Myr ago, is dissected by one valley system in one run and by a valley a node
+away in another; the cure must make how fast the valleys capture the plateau a fact of the law, not of the routing's
+spacing.
+
+## B55. THE BAND FROM THE ARTIFACT'S HEAD (SL6 YES); THE LEVEL HANDOVER AND THE FAR CULL MEASURED NEXT (2026-10-05)
+
+The skyline's walls, cracks and lids were measured on the pictures' probe: phase 2's summits rise over the band's top
+(+9.3 km on the home planet; the solved field reaches +12.0 km), where a chunk's halo reads air and its core reads rock.
+The client holds the artifact's head and its coarse levels whole but the fine heights only in the tiles near the eye, so
+no host can scan the whole field but the shard. After plain explanations (the owner: *"If we go with 2, will it be the
+same on all machines? … will it produce 'waves' while ship is flying?"*; *"What is the AAA MMO games approach?"*; *"Will
+the quality significantly improve, if we will go with more detailed?"*), the owner: *"Agree, go"*:
+
+1. **THE BAND'S TWO ENDS IN THE ARTIFACT'S HEAD (SL6 YES)**: the shard states the solved ground's lowest and highest
+   point once; every host — the shard, the gateway, the client — reads them from the head and none computes its own, so
+   the band is one value on every machine and never changes while a ship flies (it changes once, when the artifact
+   lands, as the solved ground already does).
+2. **THEN MEASURED, PLANET-WIDE, HEADLESS**: the level-of-detail handover's pops on steep ground (the slope law the solved
+   ranges break by up to six times) and the far summits the culling drops.
+3. **PER-TILE OR PER-POINT RANGES** (the AAA terrain pattern: bounds travel with the data) only where that measurement
+   shows a defect, with their measured price.
+
+**Example.** A summit of the belt 12 km over the home planet's radius is built whole — no wall at its chunk's edge, no
+flat lid — and every machine builds the same chunks, because each reads the same two heights from the head.
+
+## B56. THE SOLVE'S AXIS IS 414 PASSES (2026-10-05)
+
+B54's cure was looked for and measured (the census's gate section items 12–14): a second defect in the rock's way was found
+and CURED — a full hollow whose side's water ran back into it sent the rest round for ever (a bench run spun 90 minutes);
+now the rest passes each hollow once and no rock is lost (six runs: no way refused). The sensitivity itself is NOT
+NUMERICAL: the chaos twins' spread on the plains share is 1.4 / 1.6 / 5.0 points at 214 / 414 / 814 passes (plate 10's
+young plateau carries it), so no finer axis cures it. Under the noise rule (B54 item 2: the tolerance the larger of B47's
+and the reading's own twin spread; the axes compared by their pairs' means) the gate FAILS 214 → 414 on the heights beyond
+their noise (land over 1 km −3.0 points, the old plains' mean −11 % and median −16.5 %, plate 5 −24 %) and PASSES 414 → 814
+on every reading (every share within 0.4 points, every height within 4.5 %). Asked which axis, with the price (every first
+solve about 1.6 times as long: the home planet about 22 → 35 minutes, the desert world about 35 → 57), the owner chose
+*"414 steps (Recommended)"*:
+
+1. **THE SOLVE'S OWN AXIS IS 414 PASSES** — the mixed axis twice as fine as today's (the last pass 0.25 Myr, the longest
+   12.5 Myr, the climate's spacing in years kept); B54 item 3's 214 passes retire. B39's gate stands: 414 against 814.
+2. **THEN THE WORLD MOVES ONCE**: the game's schedule, the generator's version and the artifact key's generation to 25,
+   the pins re-recorded; then the census and the pictures on the three bodies, and the owner's one look (B53).
+
+**Example.** A pilot who lands on the home planet's old plains finds them at the height the laws give, not 70 m higher
+because the solve took long steps; and a second solve with twice the steps shows the same plains, while the rivers on
+plate 10's young plateau may run a valley over, as real young rivers do.
+
+## B57. PHASES 1 AND 2 LOOKED AT; R2 NEXT, ITS SLICE 0 FIRST (2026-10-06)
+
+Generator 25 was built, checked (the release pin gate, the bench's control, a cluster's shard on the same digest) and shown
+on the 32 pinned stands of the three bodies beside generator 22 (the owner's page; the census's generator-25 table). The
+pictures showed the large forms moved — the ground under the fixed eyes rose by up to 12.5 km where the belts and plateaus
+stand, a range now on the desert world's skyline — and the near ground still dominated by the dune-like noise under the
+8 km grid (B6's root), the views from 150 km mostly haze, the moon unmoved. Asked for the look and the next step, with the
+recommendation R2 (one eroded 1 km level sent to players), the owner: *"Yes, proceed"*:
+
+1. **THE LOOK AT PHASES 1 AND 2 IS GIVEN** (B53's one look at the end result); the world stands at generator 25. This is not
+   G-LOOK: the final look comes at the ground step's end (B35).
+2. **R2 IS NEXT, IN THE GROUND STEP DESIGN'S ORDER** (`docs/investigation/2026-10-02/ground_step_design.md` §5.2): ITS
+   SLICE 0 FIRST — the bench (M2-1: R1's loop as the control; the new operators without caps under B23; the bake's rate;
+   the fine relief under G-MEAN) and a shaded relief at 100–150 km on the three bodies for the owner's look (B8 item 3),
+   before any bake service, any world change or any data crossing a realm. The questions the design holds for R2 (Q5's
+   parts, Q6 the far hand-over, Q8 the prebake, the SL6 asks A1 and A2) come to the owner with their measured numbers at
+   the slice that needs them.
+3. No commit until the owner asks for one (B53 item 3 stands).
+
+**Example.** The next picture the owner sees is a shaded relief of a 524 km tile of the home planet's belt from the bench:
+valleys a few kilometres apart that join toward the sea, where today's pictures show rounded dunes. Nothing in the game
+changes until the owner rules on what that picture and its numbers show.
+
+## B58. THE MACRO ROUTING'S GRID LEAN CURED FIRST, BEFORE R2's BAKE (2026-10-06)
+
+R2's slice 0 measured on the erosion bench (the owner's page https://claude.ai/artifact/LnTGvq541tsrib68TvFGyd): the 1 km
+joint law passes Hack's law on the belt tile (n 0.29 → 0.52); on a smooth cone with no grid in it, D8 runs the water down
+the grid's rays (the valleys' lean 52 %, none 22 %), D∞ gathers its valleys into an eight-armed star (its dispersion), and
+Rho8 cuts valleys at every angle (24 %); and the generator-25 macro ground carries the grid's mark on every pinned tile —
+straight trunks with side valleys at 45°, coasts stepping along the node rows, regular bands on the belt tile — which any
+1 km ground keeps, since the 1 km level holds each 8 km node's mean. Asked what comes first, the owner: *"I would take the
+recommendation which will remove the strait or 45 percent angled rivers (or staicased), as it hurts believability"*:
+
+1. **THE MACRO ROUTING'S GRID LEAN IS CURED FIRST.** Rho8 (Fairfield & Leymarie 1991: one receiver of the D∞ facet, chosen
+   with the facet's angle as its chance by the node's own hash — the method phase 1 already uses on the flats) in the macro
+   solve's water routing and in its erosion sweep; measured in the bench copy first (the macro ground's shaded relief and
+   grid lean on the pinned tiles and on the cone, the census, the convergence gate at 414 against 814 passes), then built
+   as generator 26 (a new solve, new pins, the gate again). AMENDS B11's D∞ for the macro passes: the cone shows D∞'s star.
+2. **THE TARGET IS THE OWNER'S LOOK**: no straight rivers, no rivers at 45°, no staircased rivers or coasts. The readings
+   (the valleys' grid lean, G-GRID by class) report it; the shaded relief shows it; a cause the routing does not remove
+   (the stepped coasts may have their own) is measured and brought back with its numbers.
+3. **THEN R2's 1 km BAKE** on the clean macro ground; slice 0 continues (the steady state, the duration).
+
+**Example.** Today a river on the home planet's old plains runs 60 km due south in a straight line, with side rivers joining
+it at exactly 45°. After the cure the same river meanders with the ground's own slope, and its side rivers join it at the
+angles the land gives them; the 1 km valleys then cut into that river's own bends.
+
+## B59. THE FIRST LAND'S RELIEF AND MARGINS BENCHED; THE WORLD MOVES ONCE (2026-10-06)
+
+B58 item 2's causes were measured and brought back (the owner's page https://claude.ai/artifact/LnTGvq541tsrib68TvFGyd,
+sections 5–6; the status file's 2026-10-06 entries): the descent's Rho8 takes the rivers on a lattice line 32.7 → 22.5 %
+(none 22.2 %) and the straight runs of 82 km or more 10.5 → 2.5 %, and the two marks that remain have ONE ROOT — the first
+land. 87 % of its nodes stand on an EXACT FLAT (deep in a continent the crust share is exactly one, so the Airy height is
+one number for the whole plate), and it holds no relief between the 8 km node and the affinity noise's shortest wave
+(375 km). The bench's history of the Andean tile shows the first rivers born straight on that smooth ground and kept by
+their own valleys for 1.4 Gyr; a ±12 cm tie-breaking diagnostic does not move them. The stepped coasts are the plates'
+steps one node wide (21.9 % of the boundary coastline stepped against 0.4 % inside a plate; each node's cell mean 8.4 %;
+diagnostic margins of ±40 / ±80 km 3.2 / 1.4 %). A read-only research agent
+(`docs/investigation/2026-10-06/platform_margin_research.md`) found NO published law for a platform's relief when its
+erosion starts (the best-founded choice a named crust-thickness scatter, Earth's stable continents its calibration), the
+margin laws by kind, and that the per-plate crust scatter [0.7, 1.4] names no source and is about 5.6 times Earth's
+stable continents' spread. The owner chose every recommendation:
+
+1. **BENCH THE FORMS OF THE FIRST RELIEF, THEN THE OWNER CHOOSES FROM THE PICTURES**: (a) a named crust-thickness scatter
+   inside each plate through the model's Airy isostasy; (b) the same scatter through flexure (the body's own elastic
+   thickness and gravity); (c) the older landscape's relief by Earth's measured topography spectrum. Each is read for the
+   exact-flat share, the rivers' lean and straight runs, the Andean tile's picture, the old plains' relief against
+   Earth's readings (a check, never a target) and the convergence gate.
+2. **THE MARGINS BY KIND, BY THEIR PUBLISHED LAWS**: each node holds its cell's mean of the plate terms; a rifted margin's
+   width by the necking instability (Fletcher & Hallet 1983, as Chenin et al. 2018 apply it); an Andean coast over the
+   crossing of the plate interface and the upper plate's Moho (Ruff & Tichelaar 1996; the dip 23 ± 8°, Heuret et al.
+   2011); a transform margin at Earth's measured necking of about 50 km (Mercier de Lépinay et al. 2016), a named
+   calibration until a law exists.
+3. **THE PER-PLATE CRUST SPREAD**: the bench also measures a SOURCED spread (Earth's stable continents') beside today's
+   [0.7, 1.4], and shows the steps where two continental plates meet.
+4. **THE WORLD MOVES ONCE**: generator 26 = the descent's Rho8 + the chosen relief + the margins, with new pins and the
+   gate (B39, B56), then R2's 1 km bake on the clean ground (B58 item 3).
+
+**Example.** Today the plate under the Andean tile starts as one flat at 3 489 m, and its first rivers run due west in
+straight lines that its plateau keeps 1.4 Gyr later. With a first relief the same plate starts with low swells and hollows
+a few hundred metres high; its first rivers wind between them, and the plateau rises over valleys that bend. Its coast no
+longer steps one node at a time: the continent's crust thins toward the trench over the forearc's own width.
+
+## B60. THE FIRST RELIEF IS THE OLDER LANDSCAPE'S, BY EARTH'S SPECTRUM (2026-10-06)
+
+B59's bench round was measured (the owner's page, section 7; the status file's 2026-10-06 entry): every world solved over
+5 Gyr with Rho8, the margins by kind, each node's cell mean and the sourced spread, and one of three first reliefs, each also
+at twice the passes. The readings: rivers on a grid line (a) 19.2 %, (b) 23.3 %, (c) 19.4 % (none 22.2 %); straight runs of
+82 km or more from 1.0 / 4.0 / 1.1 % of the river nodes (Rho8 alone 2.5 %); the old plains' relief at 110 / 1 200 km 190 /
+425, 141 / 228, 175 / 269 m (Earth's stable continents 131 / 328 m, a check); the gate (414 → 828 passes) closest to passing
+for (a), two readings over the tolerance for (c); on the Andean plateau (a) removes the bands and (c) keeps some. The
+recommendation was (a); the owner chose **(c)**:
+
+1. **THE FIRST RELIEF IS THE OLDER LANDSCAPE'S RELIEF** — a surface field with the continents' published spectrum
+   (β = 2.09, Gagnon, Lovejoy & Schertzer 2006), its size set by Earth's stable continents' height difference of 131 m at
+   110 km (a named scatter for an unrecoverable history, ruling T9), weighted by each node's crust share. It joins
+   generator 26 with the descent's Rho8, the margins by kind (each node's cell mean; the Andean wedge rising from the law's
+   coast, the trench's inner wall) and the sourced spread (B59 item 4).
+2. **THE GATE FOR THIS WORLD** (B39, B56): the 414 and 828-pass solves with the full margins, each with its twin for B54's
+   noise rule, before the world moves.
+3. **THE SECOND CLIFF IS MEASURED NEXT** (B58 item 2): a coast 200–345 km inside a plate, smooth on the first land, ends after
+   the solve in a cliff about 3.5 km tall; today's world has it too. Its cause and its numbers come back before generator 26.
+
+**Example.** A pilot over the home planet's old plains sees low rises and shallow basins a few hundred metres apart in
+height over a hundred kilometres — the older landscape the plate carried when its erosion began — and rivers that wind
+between them toward the sea, where today the same plains start as one exact flat.
+
+## B61. THE BELTS' LAW READS THE CRUST SHARE; THE GATE'S CAUSE FIRST (2026-10-06)
+
+The owner asked whether world (c) floods the plains (*"Wait, in C - the plain will be covered by water?"*): measured, the
+first (c) run kept only 18.4 % land because the bench added the older landscape's relief after the freeboard law had solved
+the continents' thickness — a defect in the bench, corrected (the law's bisection now reads the relief; (c) solves to
+24.6 % land, the plains and mountains stands dry land again). B60 item 3's cliff was found: the belts' law raised its wedge
+only where a node's crust share is at least one half, so the Andean plateau stopped dead at the continent's own half-share
+line in a cliff about 3 km tall (also in today's world). Benched with the law reading the share continuously, both coasts of
+the Andean tile draw one smooth line, the coast slope's 99th percentile falls 19° → 10°, and the twin runs tighten; the gate
+(414 → 828 passes under the noise rule) passes every share, the relief and the old plains, and misses two plate means
+(plate 5 −10.2 %, plate 13 −12.3 %). The owner chose both recommendations:
+
+1. **THE BELTS' LAW READS THE CRUST SHARE CONTINUOUSLY** in generator 26: a node of crust share `s` takes in `s` of the
+   margin's rock, and the room's profiles blend the continental and the oceanic profile by `s` — the cell's mean of the
+   law's own variable, in place of the yes-or-no test at one half.
+2. **THE GATE'S CAUSE FIRST**: the bench measures why plates 5 and 13 — old, low plains — stand 21–34 m lower on the finer
+   axis (which nodes, which process) and brings the cure or a stated finding back before the world moves.
+
+**Example.** Plate 1's continent ends southward over a hundred kilometres where its crust thins. Today the Andean plateau
+stands 4 km high to the line where the crust is half continental and drops 3 km in one node; with the law reading the share,
+the plateau's edge falls over that same hundred kilometres as the continent thins, and the coast below it is one line.
+
+## B62. EIGHT SWEEPS A PASS; THE CLOSED BASIN'S CAPTURE CURED INSIDE THE SWEEP (2026-10-07)
+
+B61 item 2's cause was measured (the owner's page, section 10; the status file's 2026-10-07 entries). Two numerical causes
+carry the gate's miss on the old, low plains of plates 5 and 13: (1) THE SWEEP'S STEP — the joint law's one implicit step
+per sweep under-erodes decaying high ground; with 8 sweeps a pass the 414-pass world reaches the 828-pass value on plate 5
+(185 against 188 m) for about 15 % more time; (2) THE CLOSED BASINS' CAPTURE WAITS FOR THE NEXT ROUTING — with the sweep
+step equal, the bench's ledger by plate shows only the rivers' cut differing (2.2 % more on plate 5, 6.5 % on plate 13 on
+the finer axis); the finer axis keeps less land in closed basins from 1.5 Gyr ago on, basins open 17 % more often and 2.2 %
+more rock reaches the sea, because a basin can open only when the water is routed again, once a pass. The owner chose the
+recommendation:
+
+1. **EIGHT SWEEPS A PASS** (`SUB_SWEEPS` 2 → 8; a resolution under B39, B41 item 1, B45 — the rebound's spacing finer).
+2. **THE CAPTURE CURED INSIDE THE SWEEP**: as B47 made a lake's level follow its outlet inside the sweep, a closed basin's
+   state follows its rim inside the sweep — when a river cuts the basin's way out below what the basin holds, the basin
+   passes its water's rock on at once, not at the next routing. Designed and benched first; then the gate again (414
+   against 828 passes, with the twins).
+
+**Example.** A river on plate 13 cuts back into the rim of a dry hollow the older landscape left. Today the hollow keeps
+filling with its own rock until the next routing, up to 12.5 Myr later; after the cure the hollow's rock follows the river
+out in the same sweep in which the rim falls below it, on either axis.
+
+## B63. PLATE 13's CAUSE FIRST; A SINKING FOREARC IS DEEP SEDIMENT; THE WINDOW NOW AS A PREVIEW (2026-10-07)
+
+B62's gate was measured (the status file's 2026-10-07 entries): with 8 sweeps a pass and the capture inside the sweep,
+thirteen of fourteen readings pass under the noise rule — plate 5's mean among them (+4.2 %; it failed at −10.2 % before)
+— and PLATE 13's MEAN FAILS: 261.5 → 230.5 m from 414 to 828 passes (−11.9 % against the 10 % tolerance; its twins 2.7 %
+apart), against −12.3 % before the cure, its loss on its belts and plateaus. Generator 26 was built in the game (not
+committed, the pins not moved): its first land equals the benched world's byte for byte. A finding came with it: the
+Andean trench's inner wall makes the continent's outer margin sink, and the province rule named sinking continental crust
+"rift basalt" — 12 609 nodes of the home planet (generator 25: none), so a forearc strip took basalt's hardness, and the
+rock map's own test ("a rift with no rifting") went red. The owner chose every recommendation:
+
+1. **PLATE 13's CAUSE FIRST**: the bench's ledger by plate measures which process differs on plate 13 between the two
+   axes (as it did for plate 5), and the cure comes back with its numbers; the world's pins wait for the gate (B39, B60
+   item 2).
+2. **A SINKING FOREARC IS DEEP SEDIMENT**: continental crust that sinks where plates push together fills with sediment,
+   like the trench beside it; rift basalt stays only where plates pull apart. A small world change in generator 26,
+   measured in the next gate run.
+3. **THE WINDOW NOW, AS A PREVIEW OF GENERATOR 26**: the generator-25 cluster stops, the release binaries are built with
+   generator 26, the home planet's shard solves its new artifact (about 55 minutes), and then the owner is asked to open
+   the window (the window is never opened without that word). Bench runs for plate 13 run beside it; no frame timing is
+   read that day.
+
+**Example.** On Chile's coast the land between the trench and the coastal hills is a slope of mud and sand that the rivers
+carry down; under this ruling the home planet's Andean forearc wears like that sediment, and a pilot finds basalt only in
+the rift valleys where its plates pull apart.
+
+## B64. THE FIRST SOLVE ON MORE CORES, THE SAME BYTES (2026-10-07)
+
+The owner asked whether every planet solves for about an hour when a player first reaches a new system (yes, today: once
+per planet in the world's life, the planets of a system in parallel, one core each; the first visitor sees the seed's
+own ground replaced when the artifact lands — a seam), and then: *"Can we give more cores for passes to build the realm
+for the first time?"* The answer given: the passes stay one after another (each reads the ground the one before left),
+but the work inside a pass can run on many cores — the first land, the climate, the rebound and the routing's receivers by
+node, the sweeps by river basin, the priority flood and the lakes' hierarchy by published parallel methods (Barnes 2017)
+— an ESTIMATE of 2.5× on 10 cores for the easy steps (55 → about 21 minutes for the home planet), 4–5× with the hard
+ones. The owner chose:
+
+1. **BUILD THE PARALLEL FIRST SOLVE NOW, MEASURE AFTER**: in the game's solve, beside plate 13's running bench runs;
+   its speed measured once they end (one job at a time for timings).
+2. **THE SAME BYTES ON ANY NUMBER OF CORES**: every thread writes only its own nodes and every sum keeps one order, so
+   the artifact's digest does not move — a pure speed change, proven by the pin gate; no world change.
+3. **RUST'S OWN THREADS**: the standard library's scoped threads, no new dependency; the generator keeps its rule (the
+   recipe, the seed leaf, nothing else).
+
+**Example.** A pilot warps toward an unvisited star. Its planets start their first solves on a share of the host's cores;
+the home-planet-sized world that took 55 minutes on one core takes about 20 on ten, with exactly the same rivers and coasts.
+
+## B65. FOUR ROUTINGS A PASS; THE GATE READS THE PLATES' OLD PLAINS (2026-10-07)
+
+B63 item 1's cause was measured (the status file's 2026-10-07 entries): with the sweep's step equal, the rivers cut 7.1 %
+more on plate 13 and 10.3 % more on plate 5 on the axis with twice the routings, every other process equal; and with the
+routings counted apart from the passes (a bench switch, the water routed R times a pass), PLATE 13 FOLLOWS THE ROUTING COUNT
+ALONE — at 1 656 routings over the age 414 and 828 passes give its mean 214 and 215 m, its cut 36.10 and 36.19 million
+km³ — and converges (each doubling adds less: +7.7 %, then +3.5 %); plate 5's old plains converge more slowly (345 → about
+317 → about 299 m). Each routing finds the basins and the water's ways afresh, so more routings let the rivers capture the
+old plains' hollows sooner. And a plate's whole-land mean swings with the dry basins under the sea level (plate 5's reads
+61 to 365 m under one law). The owner chose both recommendations:
+
+1. **FOUR ROUTINGS A PASS**: the solve routes the water four times a pass, each routing (with its budget) followed by two
+   of the pass's eight sweeps; the uplift, the talus, the ice and the peak law stay once a pass. A world change in
+   generator 26; its cost about +64 minutes a home-planet first solve on one core, which the parallel solve (B64) cuts.
+   Then the gate with twins: 414 against 828 passes, both routed four times.
+2. **THE GATE READS EACH TRACKED PLATE'S OLD PLAINS' MEAN** (beside the shares and the relief), never its whole-land
+   mean, whose dry basins under the sea level are the water fill's later lakes and read apart.
+
+**Example.** A river on plate 13 works headward toward a hollow in the old plains. Routed once a pass, the solve learns
+that the river has reached the hollow's rim only at the next pass, up to 12.5 million years later; routed four times, it
+learns within a quarter of that, and the hollow's rock follows the river out, as it would on a real old plain.
+
+## B66. PLATE 5's CAUSE FIRST (2026-10-08)
+
+B65's gate was measured (414 against 828 passes, both routed four times, each with its twin; the plates read by their old
+plains): every share, the old plains' mean and median, the relief and plates 1, 10 and 13 pass — PLATE 13 CURED (−3.2 %)
+— and PLATE 5's OLD PLAINS FAIL: 300.5 → 257.5 m (−14.3 % against 10 %; its twins 1.7 / 4.3 % apart, so a numerical
+effect, not noise). Its old plains by the routings over the age: 345 m (414), 305–329 (828), 294–303 (1 656), 252–263 (3 312)
+— the last step the largest, so plate 5 does not converge as plate 13 did; the finer axis also halves the sweep's step and
+the uplift's steps. The owner chose the recommendation:
+
+1. **PLATE 5's CAUSE FIRST**: 414 passes routed eight times (the routing count alone against 828 × 4) and the ledger by
+   plate on both axes routed four times (which process, where, when); then the cure with its numbers. The pins wait.
+
+**Example.** Plate 5 is the home planet's oldest continent, its plains worn for 2.6 billion years. If its plains stand 40 m
+lower only because the solve took finer steps, a pilot's view of them depends on the solve's resolution, not on the laws;
+the cause decides whether finer routings, finer sweeps or a law's own form cures it.
+
+## B67. THE WEATHER STEP DESIGNED NOW, BUILT IN ITS PLACE (2026-10-08)
+
+The owner asked, while plate 5's solves ran: *"Is there any way how we can parallelize work? Maybe we can work on something
+else in the other session? Clouds?"* Three facts were stated: B35 puts the clouds in the one weather step, after G-LOOK, the
+waves and the water fill, so building them now changes a ruled order; today's terrain work is uncommitted with its pins not
+final, so no clean base exists for a second worktree, and cloud code touches the sky and drawing files that change holds;
+and the machine runs the solves, so a client build slows them and no timing reading holds while they run. The owner chose
+both recommendations:
+
+1. **THE WEATHER STEP IS DESIGNED NOW, AS DOCUMENTS ONLY** — the almanac, the weather list, clouds and their shadows, rain and
+   snow on screen, wind and lying snow, as ONE design with reviews (B35's pattern: readers, one synthesis, adversarial
+   reviews, then the owner's questions), joining the parts that exist (the climate design's §8, the ground step design's
+   asks A9–A12 and questions Q17–Q18). No code, no world change; the BUILD keeps its B35 place.
+2. **BY AGENTS FROM THIS SESSION**: read-only on the code, writing notes and the draft into the design folder; the session
+   reviews each draft against the rulings and brings the owner's questions.
+
+**Example.** While the solve works out why plate 5's old plains sink 40 m on the finer axis, the readers collect what the
+rulings already say about a storm over the home planet's plains — who steps it (the planet's own shard), how it reaches a
+pilot (the weather list on its own lane), and what it may never do (touch the land's shape) — so the day the water fill is
+done, the weather step starts from a reviewed design.
+
+## B68. PLATE 5's CAUSE FOUND; BOTH CURES BENCHED FIRST (2026-10-08)
+
+B66's runs measured plate 5's cause (the bench's ledger by plate and pass, the field dumps with each node's cause and
+where its water ends, and two splitting runs): the routing count alone carries about 11 m of the 40 m; only the rivers'
+cut and the rebound differ between the axes; the plains sink on the same ground (not by a change of class), most in the
+high plains beside the plate's dry basins. TWO NUMERICAL PARTS: (1) THE LONG HISTORY — at 50 Myr ago the calm plains read
+323 m (414 passes × 4 routings), 287 m (828 passes, coarse sweeps), 276 m (414 passes, 16 sweeps and 8 routings a pass)
+and 274 m (828 passes): the finer river step with the finer routing reaches the finer axis within 3 m; (2) THE END — the
+sea and the climate are re-solved every 20 passes, so near the present the sea stood still for about 225 Myr while the
+young belts rose (95 % of plate 5's uplift in the last 27 Myr); one re-solve then raised the sea 53–60 m (the land 30.2 →
+24.2 % of the globe), 4.8 million km² of plate 5 left the connected ocean, and that re-solve fell 17 Myr ago on one axis
+and 8.6 Myr ago on the other, so the plains' last recovery (+13 to +42 m) depended on the axis. The owner chose both
+recommendations:
+
+1. **BENCH BOTH CURES**: (a) THE RIVER'S STEP — 16 sweeps and 8 routings a pass, twice today's; (b) THE SEA AND THE CLIMATE
+   RE-SOLVED AT EVERY PASS, so the land's change reaches the sea when it happens, on any axis. Then the gate: 414 against
+   828 passes with both cures, each with its twin; beside it the sea's cure alone on both axes. Price: about twice the
+   first solve (to be measured cleanly); the runs take hours.
+2. **THE BENCHES FIRST**: the coverage gate stops and starts again by itself when they end.
+
+**Example.** Plate 5's young range closes a strait, and an inland sea the size of the Mediterranean is cut off. Today the
+solve notices it only at its next look at the sea, sometimes 9 Myr later, and the plains beside the new dry basin read
+30 m higher or lower for that reason alone; re-solved every pass, the sea follows the range as it rises.
+
+## B69. THE CHEAP CURE; GENERATOR 26 CLOSES BY A FIXED LIST (2026-10-09)
+
+B68's two gates were measured (414 against 828 passes, each with its twin, under the noise rule): THE CHEAP CURE — the sea and
+the climate re-solved at every pass, today's river step — PASSES on every reading (plate 5's old plains −9.1 %, inside even
+the plain 10 %; the plains share +0.78 pt); BOTH CURES (plus 16 sweeps and 8 routings a pass) FAIL on the plains share
+(+2.28 pt) and the tablelands (−2.86 pt), by about the size of the noise. The noise grew with the sea every pass: one twin of
+a pair can end in another state (plate 5 269 / 304 m) through a late event — the young belts cut a large sea off plate 5 in
+the last 5–10 Myr. The owner chose:
+
+1. **THE CHEAP CURE** in generator 26: the climate and the running sea re-solved at every pass (`CLIMATE_EVERY` 20 → 1);
+   the river step stays 8 sweeps and 4 routings a pass.
+2. **THE NOISE RULE AS RULED** (B54, B56): each reading's tolerance is the larger of B47's and its own twin spread, one twin
+   an axis; the late event's sensitivity is registered as a reading.
+3. The owner asked: *"we are trying to solve this for couple of weeks now, we're not proceeding with the development of the
+   game for a while now. Is there any guarantee that when we do this, we're done and we can proceed with other topics
+   according to our plan?"* — answered: no blanket guarantee for the later steps, each of which has its own gate; for the
+   macro solve the cause hunt is over, and GENERATOR 26 CLOSES BY A FIXED LIST — (1) the cure in the game's solve with its
+   documents and tests; (2) a clean timing of a first solve, one job at a time; (3) the final pins (the game's own solve:
+   the golden field, the digest, the sea, the identity) and the release pin gate; (4) the coverage gate green; (5) the
+   census and the pictures on the three bodies for the owner's one look. Only a defect a gate finds, or the owner's look,
+   reopens it; anything else that appears is REGISTERED and does not stop the move to R2's bake unless it breaks a hard rule
+   or a ruling.
+
+**Example.** A pilot over plate 5's old plains sees them at about 265 m whether the world was solved in 414 passes or in
+828: the sea now follows the young range as it rises, pass by pass, instead of jumping 53 m at one late look.
+
+## B70. AFTER GENERATOR 26: BEVY 0.20, EVERY BENEFIT, NOTHING BROKEN (2026-10-09)
+
+The owner: *"When you're done and we ok to proceed, we need to migrate to bevy 0.20 and make sure that we are using all
+benefits that bevy 0.20 is provide, while not breaking anything we have today."*
+
+1. **THE ORDER**: when generator 26 closes by B69's list and the owner gives the word to proceed, the next work is the move
+   from Bevy 0.18 to Bevy 0.20 (amends B35's order: it comes before R2's bake). It LIFTS the owner's upgrade gate of
+   2026-08-27 ("no upgrade until a ship realm is flown in a window" — met: hulls 9, 10 and 11 flown in the window, B29 and
+   B63) and sets the target at 0.20.
+2. **THE SCOPE**: every crate that names Bevy — `bevy_ecs` is the ECS of every shard (sim, node, connection-plane, harness),
+   the client and its renderer (`bevy`, `bevy_egui`), the vendored `bevy_pbr` with its eight atmosphere changes, and every
+   crate the move pulls along (wgpu, naga, glam).
+3. **EVERY BENEFIT**: each feature Bevy 0.19 and 0.20 offer that serves the game is listed with its price, and the owner
+   chooses which to adopt (the owner's standing rule: no new library or feature adopted alone).
+4. **NOTHING BROKEN**: the whole suite, the Tier-A coverage, the process gates, the pin gates, the frozen pictures (within
+   their tolerance, or the owner's look) and a clean frame reading before and after.
+5. **ITS DESIGN STARTS NOW, AS DOCUMENTS ONLY**, by read-only agents of this session (B67's pattern), while generator 26
+   closes; the code changes only after the owner's word.
+
+**Example.** A pilot flies hull 10 from the home planet's plains to orbit on Bevy 0.20 exactly as on 0.18: the same picture
+within the frozen references' tolerance, the same crossings, the same frame cost or better — and the new version's features
+the owner chose, such as a better shadow or a faster frame, on top.
+
+## B71. THE FROZEN PICTURES FOLLOW QUALITY (2026-10-09)
+
+The owner: *"If pictures quality improves in comparison to frozen ones, let's use new ones."*
+
+1. **A CHANGE THAT IMPROVES THE PICTURES RE-FREEZES THEM**: each stand's new picture is shown beside its frozen reference;
+   when it holds no new defect by the gates (no hole, no seam, no pop or flicker by the eye's rule, B27) and its quality is
+   better, the new picture becomes the reference; the owner sees the pairs. This amends B28/B29/B32's "the references change
+   only on the owner's acceptance" for an improvement; the owner's look still judges any picture the gates cannot.
+2. **A WORSE PICTURE IS A DEFECT**, never a reason to re-freeze: its cause is found and cured, then the pair is compared
+   again.
+3. It applies first to generator 26's pictures (the world moved; the references are from generator 22) and to Bevy 0.20's
+   quiet pixel changes (linear bloom, the white-furnace fixes, the sky table's mapping; B70).
+
+**Example.** On Bevy 0.20 the dusk stand's sky gains its new table mapping: the horizon band is smoother and nothing pops on
+the flight leg, so the new dusk picture replaces the frozen one, and the owner sees both side by side.
+
+## B72. LESS WAITING: THE FASTER SOLVE AND A PARALLEL FEATURE TRACK (2026-10-09)
+
+The owner: *"I want to improve the way we implement things. We are in testing mode for several weeks already without any
+new features implementing and most of the time we are waiting. Any suggestions to improve that, while don't compromize on
+quality?"* The causes were stated as measured: one home-planet solve 1.5–4 h on the bench and four of them a gate; about
+three quarters of a solve on one core (the flood, the lakes' hierarchy, the deposit); the coverage gate 6–8 h, apart from
+the solves; many steps waiting on an answer; T1 putting every other feature behind the whole terrain arc. Six changes were
+offered; the owner chose two:
+
+1. **THE FASTER SOLVE**: the flood, the lakes' hierarchy and the deposit on all cores (B64's owed items; the published
+   parallel priority-flood), guarded by the same-bytes gate — a pure speed change, the world's bytes unchanged. It is built
+   beside generator 26's close: the game's own solve records the pins while the code is written, and the release pin gate
+   then runs on the faster solve and proves both the pins and the same bytes; the clean timing measures before and after.
+2. **A PARALLEL FEATURE TRACK — AMENDS T1**: a feature that does not depend on the terrain's final look may move in its own
+   worktree and session, with its own gates, beside the terrain work; the owner names the feature.
+3. NOT ADOPTED: standing rules for routine decisions (each decision still comes to the owner), the bench's checkpoints and a
+   nightly-only coverage gate, and (not now) a rented many-core machine.
+
+**Example.** The release pin gate that seals generator 26 solves the home planet on all cores in a fraction of today's
+hour, and gives the same digest as the one-core solve; meanwhile the block store's design moves in its own session.

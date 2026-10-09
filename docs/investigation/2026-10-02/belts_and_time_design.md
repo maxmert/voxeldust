@@ -1133,3 +1133,65 @@ the wedge with every cure and the landscape's time:
 6. **The whole land's drainage** (runs 29–30): today's game world drains 56.5 % of its land to the sea (its old plains
    47.5 %); with the level plateau and the water's own paths, 66.5 % (the old plains 69.2 %). Earth's closed basins cover
    roughly a fifth of its land [R].
+
+---
+
+## 18. The Andean margins' law, round 2: laws for the ceiling's inputs, the rate and the width (2026-10-04; ruling B52 item 4; a read-only agent beside the build, its sources, scripts and outputs in the scratchpad's `sources6/`, its index `sources6/INDEX.txt`)
+
+[V] read in full; [A] abstract only; [R] recalled; ARITH the agent's own arithmetic. Wiley and AGU refuse scripted
+requests, so England 2018/2024, Lamb 2006 and Wada & Wang 2009 are [A]; Oncken 2006 and Capitanio 2011 were not reached.
+
+**In short.**
+1. A forward law for the ceiling exists, but each of its inputs has only a weak law or a two-state law; a 25 % change in
+   one input moves the crest by 1–3 km (ARITH).
+2. One test case with Earth-typical inputs (μ′ 0.032, the seismogenic base z 50 km, the dip θ 17°, the trench depth d_T
+   5.5 km, the submarine slope γ 2.5° — readings, never a target) gives a 2.2 km crest; today's home ceiling is about
+   2.7 km over the platform (ARITH). The force ceiling alone does not remove the plateau land.
+3. The plateau land follows the influx, and no published law computes the shortening rate from facts the world states.
+
+**The ceiling (A2)** [V, Dielforder & Hampel 2021, Eq. 1a p. 4, Eq. 4a p. 5]:
+`h = 2·F_s/(L·ρ̄·g·cosθ) − 2·P/(L·ρ̄·g) + L − (d_T²/L)·(1 + (ρ̄ − ρ_w)·tanθ/(ρ̄·tanγ))` — `h` the maximum mean elevation
+(m), `F_s` the megathrust's shear force (N/m), `L` the depth where the shear stress ends (70–80 km), `P` the upper plate's
+push (N/m). `F_s` forward from μ′, z and θ reproduces Dielforder et al. 2020's Extended Data Table 3 within 1 % and their
+heights within 0.2 km (ARITH). Sensitivity (ARITH, one input at a time from the base case's 2.2 km): μ′ 0.05 → 3.9 km,
+μ′ 0.095 → 8.1 km; z 40 / 60 km → 1.1 / 3.5 km; θ 13° / 22° → 3.9 / 0.7 km; d_T 4 / 7 km → 3.2 / 0.8 km; gravity nearly
+cancels (`F_s ∝ ρ·g`).
+- **The dip** does not follow the subducting plate's age [V, Lallemand et al. 2005, p. 1]; it follows the upper plate's
+  absolute motion (|R| 0.61; 0.88 where the slab reaches the lower mantle, p. 8); the seismogenic zone's dip follows the
+  subduction speed (R 0.55) [V, Heuret et al. 2011, p. 11]; subduction duration is "the primary parameter" [A, Hu &
+  Gurnis 2020].
+- **The transition depth** z: 51 ± 9 km, below the forearc Moho in 70 % of the zones [V, Heuret et al. 2011]; on 15
+  ocean-under-continent segments it follows age (R 0.65), convergence (0.63) and Φ = age·v_n·sinθ (0.60) (ARITH; a fit, no
+  published law); the slab top's temperature above the decoupling depth is set mainly by the plate's age [V, Holt &
+  Condit 2021, p. 18].
+- **The effective friction** μ′: typical 0.03, range 0.02–0.13 [V, Dielforder & Hampel 2021, p. 12]; two groups on 11
+  margins — most at μ_crust 0.032 ± 0.006, "unable to support elevations >2.5 km"; Tonga and northern Chile at 0.095 ±
+  0.024, where the trench "lacks significant trench fill" [A, Lamb 2006]; the trench fill correlates inversely with the
+  height and the width [V, Hu et al. 2021, pp. 2–3]. NO SOURCE GIVES μ′ AS A FUNCTION OF THE FILL OR THE SUPPLY. The world's
+  rock-to-sea flux could feed a steady fill `h_fill = q_s / v_n` (ARITH), with a pelagic layer (0.5 km on average [V, Heuret
+  et al. 2012, p. 3]) and transport along the trench [V, Hu et al. 2021, p. 2].
+
+**The rate (A1) and the width.** Shortening is the overriding plate's motion less the trench's [V, Schepers et al. 2017]
+— an identity, so a law must still give the trench's motion. Trenches retreat fast only near slab edges [A, Schellart et
+al. 2007]; mountains grow at the centres of subduction zones ≥ ~4 000 km wide whose upper plate moves trenchward at
+0–2 cm/yr [A, Schellart 2008]. Compression thickens the plate "until it reaches the maximum elevation that can be
+sustained" [V, Dielforder & Hampel 2021, p. 4] — no source turns this into a rate law.
+
+**Earth's Andean-type margins** (ARITH; the Heuret 2005 database [V], ETOPO 2022, 100 km swaths): of 77 transects the
+crest is over 2 km on 32.5 % and over 3 km on 19.5 % (all in South America), the median 1 371 m; strong-compression
+transects crest at 3.4 km on average, neutral and extensional ones at 1.2 km; the crest follows the shallow dip (R −0.46)
+and barely age, convergence or trench depth. Earth's land within 800 km of the ten margins: 7.64 % of the land, 3.13 % of
+the land over 1 km (the Andes alone: 3.49 %, 1.52 %). The home planet (run 28): the Andean belts 5.86 % and the Andean
+plateaus 8.76 % of the land.
+
+| Candidate law (chain) | Needs from the world | Calibration | Effect on the home margins (ARITH) | Weakness |
+|---|---|---|---|---|
+| A2 full: Eq. 4a, forward F_s, μ′ in two states by the fill, a thermal z, θ(v_n), d_T(age) | the plate's age at the trench, v_n, the fill, thermal constants, laws for d_T and γ | Dielforder 2020 (10 margins, ±10 MPa); Lamb 2006 (11); England 2018 (82); Heuret 2011 (62) | lubricated crest 2.2 km (0.8 km at d_T 7 km); starved 6–8 km | 25 % on one input moves the crest 1–3 km; μ′ has two states; 2-D; the crest is not the belt's mean |
+| A2 lite: z = the upper plate's crust | the crust (has), d_T, γ, μ′ | Lamb 2006 | lubricated crest 1.7 km | seismogenic zones reach under the Moho; a starved home margin ~7 km |
+| A1 slab-width gate on the kinematic identity | a mantle frame, the margins' lengths, the distance to their ends | Schellart 2007, 2008 | only the centres of margins ≥ 4 000 km shorten | abstracts only; frame-dependent; a gate, not a rate |
+| A1 height-limited influx: the influx stops at the ceiling | the belt's erosion (has) | the ceiling's | the width stops growing; plateaus only where the ceiling is high and the erosion low | inferred, not a published rate law |
+| today's interim | v_n, the window draw | Norabuena 1998; Tibet | 87 % of the plateau land | one margin's rate everywhere; a collision's force |
+
+**What it means for phase 2.** No candidate is a complete published law from the world's own facts: the ceiling's
+chain lacks laws for μ′ and the trench, and the rate has none. The owner decides, when phase 2 reaches the belts, which
+chain the bench tries first (one change of phase 2, B52 item 4); until then the registered interim stands.

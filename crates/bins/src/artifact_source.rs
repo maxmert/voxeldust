@@ -48,9 +48,13 @@ pub struct ArtifactTiles {
     /// the radius. MEASURED before (the picture gate's seam stand): over the radius the shard named
     /// 6 tiles, and the client's chunks waited on 8 more for as long as the pilot stood there.
     body: vd_terrain::BodyDefinition,
-    /// The tallest ground the recipe raises over the radius: the reach is bounded by how far the
-    /// ground can be seen, peaks included (2026-09-21).
+    /// The tallest ground over the radius: the reach is bounded by how far the ground can be seen,
+    /// peaks included (2026-09-21) — the drawn ground's top under the band the head states (ruling
+    /// B55), never the recipe's own bound the solved belts stand over.
     relief_m: f64,
+    /// ★ THE DRAWN GROUND'S RANGE (ruling B55), taken once: `(lowest, highest)` in whole metres over
+    /// the radius, the head's two words — every host sizes its band from them.
+    drawn: (i32, i32),
     top_rung: u8,
     /// ★ THE HANDOVER STEP OF THE FINEST TILE-READING RUNG (2026-09-23, ruling W17), taken ONCE:
     /// the octaves that rung's coarser neighbour drops plus the FIELD's own fold where the two
@@ -71,30 +75,29 @@ pub struct ArtifactTiles {
 impl ArtifactTiles {
     /// A source over `artifact`, the parts not yet encoded.
     #[must_use]
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "seven of the eight are the realm's own address, its body and the facts the reach \
-                  reads; the eighth is the handover step the tile ring must cover (ruling W17), \
-                  and each is a fact the caller already holds apart"
-    )]
     pub fn new(
         realm: vd_core::pose::RealmId,
         world_tag: u64,
         artifact: Arc<Artifact>,
         lattice: MacroLattice,
         body: vd_terrain::BodyDefinition,
-        relief_m: f64,
         top_rung: u8,
         step_m: f64,
     ) -> ArtifactTiles {
         let digest = artifact.digest();
+        // ★ THE DRAWN GROUND'S RANGE (ruling B55), read once off every row and level: the head states
+        // it, and the source's own body and reach read the band it sizes — the very band every client
+        // builds from the same head. A range the ladder refuses keeps the recipe's band.
+        let drawn = artifact.drawn_range_m(&lattice);
+        let body = body.with_band_m(drawn.0, drawn.1).unwrap_or(body);
         ArtifactTiles {
             realm,
             world_tag,
             artifact,
             lattice,
             body,
-            relief_m,
+            relief_m: body.ground_range_m().1,
+            drawn,
             top_rung,
             step_m,
             digest,
@@ -166,7 +169,6 @@ pub fn artifact_source_of(
         Arc::clone(artifact),
         lattice,
         *body,
-        body.relief_bound_m(0),
         top_rung,
         step_m,
     )))
@@ -194,6 +196,8 @@ impl TileSource for ArtifactTiles {
             // ★ NO COAST PART FOLLOWS (ruling B22): the gateway and the client read ZERO as "no
             // mask", and the far view is whole with its pyramid alone.
             coast_parts: 0,
+            low_m: self.drawn.0,
+            high_m: self.drawn.1,
         })
     }
 
@@ -274,7 +278,6 @@ mod tests {
             artifact.clone(),
             moon.macro_lattice().expect("a lattice"),
             moon,
-            moon.relief_bound_m(0),
             moon.ladder().rungs - 1,
             // ★ THE HANDOVER STEP THE TILE RING IS FLOORED BY (ruling W17), the shipped line's own.
             {
@@ -287,6 +290,14 @@ mod tests {
             },
         );
         assert_eq!(source.digest(), artifact.digest());
+        // ★ THE HEAD STATES THE DRAWN GROUND'S RANGE (ruling B55), and the source's own body and reach
+        // read the band it sizes: the moon's craters reach under its recipe band, so the floor moved.
+        let drawn = artifact.drawn_range_m(&moon.macro_lattice().expect("a lattice"));
+        let banded = moon.with_band_m(drawn.0, drawn.1).expect("a band");
+        assert_eq!(source.body.ladder(), banded.ladder());
+        assert_eq!(source.relief_m, banded.ground_range_m().1);
+        assert!(drawn.0 < -(moon.relief_bound_m(0) as i32), "{drawn:?}");
+        assert_ne!(banded.ladder().floor_m, moon.ladder().floor_m);
         let head = postcard::from_bytes::<BulkMsg>(&source.head()).expect("decodes");
         assert_eq!(
             head,
@@ -300,6 +311,8 @@ mod tests {
                 levels: 2,
                 sea_m: artifact.sea_m,
                 coast_parts: 0,
+                low_m: drawn.0,
+                high_m: drawn.1,
             }
         );
         let parts = source.artifact_parts();
@@ -377,7 +390,7 @@ mod tests {
             levels,
             moon.ladder().rungs - 1,
             ground,
-            moon.relief_bound_m(0),
+            source.relief_m,
             r + 20_000.0,
             pixel,
             source.step_m,

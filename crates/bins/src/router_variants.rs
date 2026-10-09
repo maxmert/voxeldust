@@ -27,6 +27,11 @@
 //! Lengths here are the chords of the lattice's own directions in `f64`; the solve's cached chord can
 //! differ by a metre, which only a rewritten link ever reads.
 //!
+//! ★ SINCE PHASE 2 (2026-10-04) this module's own cut is the PRE-PHASE-2 stream-power law ([`GAIN_BITS`]): the game
+//! erodes by the joint law (ruling B43 item 2), so the what-ifs here read the old erosion, and the solve's copy no longer
+//! routes by them (DEFERRED D-TERRAIN-10: their port to the joint law comes when R2 measures D∞, ruling B12). The
+//! rewrites themselves (Rho8's drains, D∞'s facets and the facing reading) do not depend on the cut.
+//!
 //! **Example.** On the high plateau every node of an even slope facing 30° drains north-east under
 //! D8, so the cut makes north-east furrows one node apart. Under Rho8 about a third of those nodes
 //! drain east instead, and the furrows break up; under D∞ each node sends two thirds of its water
@@ -39,7 +44,23 @@ use std::f64::consts::{PI, SQRT_2};
 use vd_core::glam::DVec3;
 use vd_recipe::root::isqrt;
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE, STENCIL};
-use vd_terrain::solve::{DRY, GAIN_BITS, MacroSolve};
+use vd_terrain::solve::{DRY, MacroSolve};
+
+/// ★ THE PRE-PHASE-2 STREAM-POWER ARITHMETIC this what-if's own cut was written on (generator 22's `solve.rs`: the
+/// fraction bits of the sweep's coefficient `Δt·K·√Q/L`). Phase 2 replaced the game's erosion with the joint law (ruling
+/// B43 item 2), so this what-if's cut is NOT the game's any more: its reading of D∞ against the game waits for the cut's
+/// port to the joint law when R2 measures D∞ (ruling B12; DEFERRED D-TERRAIN-10).
+const GAIN_BITS: u32 = 24;
+
+/// The uplift of one pass at a node on an even axis of `passes` (generator 22's `MacroSolve::uplift_step`, kept here
+/// with the what-if's own cut): `total · (pass + 1) / passes − total · pass / passes`, exact.
+fn uplift_step(total: i32, pass: u32, passes: u32) -> i32 {
+    let total = i64::from(total);
+    let passes = i64::from(passes.max(1));
+    let after = (total * (i64::from(pass) + 1)).div_euclid(passes);
+    let before = (total * i64::from(pass)).div_euclid(passes);
+    (after - before) as i32
+}
 
 use crate::grid_bias::unit;
 
@@ -383,7 +404,7 @@ pub fn dinf_cut_skipping(
     let mut report = Sweep::default();
     let one = 1i128 << GAIN_BITS;
     for i in 0..state.node_count() {
-        state.z[i] += MacroSolve::uplift_step(state.uplift[i], pass, passes);
+        state.z[i] += uplift_step(state.uplift[i], pass, passes);
         state.cut_now[i] = 0;
     }
     for k in (0..d.order.len()).rev() {
@@ -1131,9 +1152,58 @@ mod tests {
         assert_eq!(dominant(&mut state, &d), 0);
     }
 
-    /// ★ THE REPLICA IS THE SOLVE: two-link sweeps built from the solve's OWN one receiver and its
-    /// own chord give the solve's own sweep, height for height — so a D∞ run differs from the solve
-    /// only where the links differ.
+    /// ★ THE PRE-PHASE-2 SOLVE'S OWN SWEEP (generator 22's `MacroSolve::sweep`), kept in the tests as the law this
+    /// what-if's cut was written on: the uplift's pass share, the implicit stream-power cut over the one receiver, and
+    /// the routing's deposit. The game erodes by the joint law since phase 2 (ruling B43 item 2).
+    fn stream_power_sweep(
+        state: &mut MacroSolve,
+        gain: u64,
+        pass: u32,
+        passes: u32,
+    ) -> vd_terrain::solve::SweepReport {
+        let mut report = vd_terrain::solve::SweepReport::default();
+        let one = 1i128 << GAIN_BITS;
+        for i in 0..state.node_count() {
+            state.z[i] += uplift_step(state.uplift[i], pass, passes);
+            state.cut_now[i] = 0;
+        }
+        for k in (0..state.order.len()).rev() {
+            let i = state.order[k] as usize;
+            let r = state.receiver[i];
+            if r == NO_NODE {
+                continue;
+            }
+            if state.pit[i] > 0 {
+                report.skipped_lake += 1;
+                continue;
+            }
+            let base = routing_base(state, r);
+            let c = ((u128::from(gain) * u128::from(state.erodibility_q8[i])) >> 8)
+                * u128::from(isqrt(state.discharge[i]))
+                / u128::from(state.chord[i].max(1));
+            let c = c as i128;
+            let numerator = (i128::from(state.z[i]) << GAIN_BITS) + c * i128::from(base);
+            let cut = (i128::from(state.z[i]) - numerator.div_euclid(one + c)) as i32;
+            if cut > 0 {
+                report.lowered += 1;
+                report.max_cut = report.max_cut.max(cut);
+                report.total_cut += cut as u64;
+                state.z[i] -= cut;
+                state.removed[i] = state.removed[i].saturating_add(cut as u32);
+                state.pending[i] = state.pending[i].saturating_add(cut);
+                state.cut_now[i] = cut as u32;
+            }
+        }
+        let (filled, total_fill) = state.deposit();
+        report.filled = filled;
+        report.total_fill = total_fill;
+        report
+    }
+
+    /// ★ THE REPLICA IS THE LAW IT WAS WRITTEN ON: two-link sweeps built from the solve's OWN one receiver and its own
+    /// chord give the pre-phase-2 solve's own sweep, height for height — so a D∞ run differs from that law only where
+    /// the links differ. (Since phase 2 the game's sweep is the joint law; the what-if's port to it is owed, DEFERRED
+    /// D-TERRAIN-10.)
     #[test]
     fn one_link_of_the_whole_share_is_the_solves_own_sweep() {
         let (mut state, _, _) = cone();
@@ -1151,7 +1221,7 @@ mod tests {
         };
         let mut mine = state.clone();
         let gain = 1u64 << 30;
-        let stock = state.sweep(gain, 3, 8);
+        let stock = stream_power_sweep(&mut state, gain, 3, 8);
         let replica = dinf_sweep(&mut mine, &d, gain, 3, 8);
         assert_eq!(mine.z, state.z);
         assert_eq!(mine.pit, state.pit);
