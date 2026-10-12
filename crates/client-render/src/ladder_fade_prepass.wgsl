@@ -42,6 +42,10 @@ struct LadderFade {
 struct BandTable {
     clock: vec4<u32>,
     step: array<vec4<f32>, 3>,
+    // ★ THE REALM'S FRAME (ruling B89): the body's centre in this frame's render space (xyz), and its spin axis there
+    // (xyz) — a vertex's radial is its own place less the centre, so no vertex carries one.
+    centre: vec4<f32>,
+    pole: vec4<f32>,
     rows: array<vec4<f32>>,
 }
 
@@ -148,9 +152,6 @@ struct FadeVertex {
     // THE MORPH METRE (step 5): how far along its own radial the vertex stands from the next
     // coarser rung's surface; the target is the vertex plus its radial times this.
     @location(8) morph_m: f32,
-    // THE RADIAL (step 5): the vertex's unit direction from the body's centre in the chunk's
-    // frame.
-    @location(9) radial: vec3<f32>,
     // THE MORPH NORMAL (item 20): the shade the next coarser rung draws at this vertex's target,
     // blended with the own normal across the fade-out band as the position is.
     @location(11) morph_normal: vec2<f32>,
@@ -218,11 +219,11 @@ fn vertex(vertex: FadeVertex) -> FadeOutput {
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     let own = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     let d = length(own.xyz);
-    // The vertex's radial (its own attribute, turned into the world like a normal), its target
-    // along it, and its sink along it — the morph in world space (step 5: one metre and one
-    // radial per vertex, the sink one number per rung; no centre of the body, so no material
-    // is rewritten as the eye moves).
-    let radial = normalize(mesh_functions::mesh_normal_local_to_world(vertex.radial, vertex.instance_index));
+    // The vertex's radial — ★ its own place less the body's centre in this frame's render space (ruling B89: the realm's
+    // band table carries the centre, rewritten every frame, so no vertex carries a radial and no material is rewritten
+    // as the eye moves) — its target along it, and its sink along it: the morph in world space (step 5: one metre per
+    // vertex, the sink one number per rung).
+    let radial = normalize(own.xyz - table.centre.xyz);
 #ifdef LIGHT_CASTER
     // THE LIGHT CASTER (the shadow ladder): the caster skips the morph and stands under the drawn
     // ground by the caster's own sink (the two rungs' bound), so the fine ground never shades

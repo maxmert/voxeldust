@@ -468,6 +468,7 @@ pub(crate) mod tests {
                 rough_builds: 6,
                 rough_upgrades: 5,
                 rough_resident: 1,
+                chunks_hidden: 0,
                 lattice_edge: 1216,
                 eyes: vec![("Planet(7)".to_owned(), 3.4)],
                 eye_cell: [0, 0, 0],
@@ -829,6 +830,10 @@ pub struct DevTerrainStamp {
     pub rough_upgrades: u64,
     #[serde(default)]
     pub rough_resident: u64,
+    /// ★ THE DRAWN CHUNKS LEFT OUT OF THE PICTURE (ruling B89): held, but hidden by the nearer ground from the eye and the
+    /// eye ahead.
+    #[serde(default)]
+    pub chunks_hidden: u64,
     /// The macro lattice's edge in nodes of the body under the eye as the lane holds it (zero
     /// for a body with none): what the level a rung reads is derived from.
     pub lattice_edge: u32,

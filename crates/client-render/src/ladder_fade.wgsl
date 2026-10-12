@@ -5,7 +5,7 @@
 // Every vertex of a chunk at rung L carries ONE METRE (`morph_m`, step 5): how far along its own
 // radial it stands from the rung L + 1 surface (computed by the client library from the same
 // recipe when the chunk is built); the radial is the vertex's own unit direction from the body's
-// centre (an attribute, step 5), and the target is the vertex plus the radial times the metre. Across the
+// centre (since ruling B89 its place less the centre the band table carries), and the target is the vertex plus the radial times the metre. Across the
 // band `(out_lo, out_hi)` around the rung's switch distance, the vertex slides from its own
 // position to that target, on its own distance from the eye: whole at `out_lo`, on the coarser
 // surface at `out_hi`. At `out_hi` the two surfaces coincide, so the finer ends there (the
@@ -71,6 +71,10 @@ struct LadderFade {
 struct BandTable {
     clock: vec4<u32>,
     step: array<vec4<f32>, 3>,
+    // ★ THE REALM'S FRAME (ruling B89): the body's centre in this frame's render space (xyz), and its spin axis there
+    // (xyz) — a vertex's radial is its own place less the centre, so no vertex carries one.
+    centre: vec4<f32>,
+    pole: vec4<f32>,
     rows: array<vec4<f32>>,
 }
 
@@ -131,9 +135,6 @@ struct FadeVertex {
     // THE MORPH METRE (step 5): how far along its own radial the vertex stands from the next
     // coarser rung's surface; the target is the vertex plus its radial times this.
     @location(8) morph_m: f32,
-    // THE RADIAL (step 5): the vertex's unit direction from the body's centre in the chunk's
-    // frame.
-    @location(9) radial: vec3<f32>,
     // THE MORPH NORMAL (item 20): the shade the next coarser rung draws at this vertex's target,
     // blended with the own normal across the fade-out band as the position is.
     @location(11) morph_normal: vec2<f32>,
@@ -193,11 +194,11 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     let own = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     let d = length(own.xyz);
-    // The vertex's radial (its own attribute, turned into the world like a normal), its target
-    // along it, and its sink along it — the morph in world space (step 5: one metre and one
-    // radial per vertex, the sink one number per rung; no centre of the body, so no material
-    // is rewritten as the eye moves).
-    let radial = normalize(mesh_functions::mesh_normal_local_to_world(vertex.radial, vertex.instance_index));
+    // The vertex's radial — ★ its own place less the body's centre in this frame's render space (ruling B89: the realm's
+    // band table carries the centre, rewritten every frame, so no vertex carries a radial and no material is rewritten
+    // as the eye moves) — its target along it, and its sink along it: the morph in world space (step 5: one metre per
+    // vertex, the sink one number per rung).
+    let radial = normalize(own.xyz - table.centre.xyz);
     let coarser = own.xyz + radial * vertex.morph_m;
     let sink = radial * fade.sink.x;
     // ★ THE ARRIVAL RAMP (slice R1c; `vd_client::arrival::RampVertex::placed`): a chunk that landed
@@ -239,10 +240,11 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
 #ifdef GROUND_SURFACE
     // ★ THE SURFACE HANDS OVER WITH THE SHAPE (ruling B75 item 4): the rock by the same blend as the shade, the height
     // by the same blend as the position, and the snow over the realm's line at that height — on the latitude's sine,
-    // the radial's own spin-axis part (the body's frame, `vd_terrain::surface::POLE_AXIS`). The soil is the rest.
+    // the radial's part along the body's spin axis (`vd_terrain::surface::POLE_AXIS`, carried by the band table). The
+    // soil is the rest.
     let w = whole(d) * ramp;
     let rock = mix(vertex.surface.y, vertex.surface.x, w);
-    let snow = (1.0 - rock) * snow_over(vertex.height_m + vertex.morph_m * (1.0 - w), vertex.radial.z);
+    let snow = (1.0 - rock) * snow_over(vertex.height_m + vertex.morph_m * (1.0 - w), dot(radial, table.pole.xyz));
     out.color = vec4<f32>(ROCK_ALBEDO * rock + SNOW_ALBEDO * snow + SOIL_ALBEDO * (1.0 - rock - snow), 1.0);
 #endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX

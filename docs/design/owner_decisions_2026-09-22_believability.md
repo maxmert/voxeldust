@@ -2293,3 +2293,35 @@ the same machinery, despite of which realm I currently belong."* AMENDS B87 item
 frame by the hull's row. She walks out onto the belt: her eye is now her avatar's position, as the planet's snapshot to
 her client states it. Both views go to the planet's shard the same way, the shard answers both into the gateway's cache
 the same way, and the same call serves her the same pieces from the same spot — there is no seam at the hull's door.
+
+## B89 (2026-10-12) — the speed step: all five items, judged in the window
+
+The owner, after the window look on the one delivery path (*"It looks great now"*) and the measured cost (14 526 pieces
+of ground, 48 million vertices, 2.6 GB of meshes, a frame every 46 ms in the headless picture): *"Ok, do all 5 from the
+speed work please. When you do the changes, please check performance, but not run full gates or anything else — we can
+judge visually in the window please. I don't want to spend week on this."*
+
+1. **ALL FIVE ITEMS**, in the order the first measurement shows: the measurement (the frame split, the count of
+   visible pieces); a frame cap at the screen's refresh and the accepted render scale; smaller vertices; one draw for
+   many pieces; asking only for what can be seen (the planet's horizon and the nearer hills' horizon, around the eye
+   in every direction); fewer vertices on flat ground (our own simplification — no new library).
+2. **CHECKS BY PERFORMANCE AND BY LOOK** — headless readings of the cost, and the owner's look in the window (asked
+   each time); no full gate, no suite, no coverage run in this step.
+3. **SHORT** — days, not a week.
+
+## B90 (2026-10-12) — the most optimized version stays: the new detail rule and the reconstruction at 0.67 by default
+
+The owner, after four window sessions on the speed step (the new detail rule with the reconstruction on and off, flying
+fast and low and then at 20 km/s): *"No, it's the same for all on and off. So if the off (on any tier) performing better,
+we can keep it. Here what happens — I'm flying super fast now. I guess we will not be able to do anything with that at the
+moment, as we have loading limits. So let's take the most optimized version please."*
+
+1. **THE NEW DETAIL RULE STAYS** (B89 item: the fine ground's rungs hand over by their curve's step): the level
+   differences the owner saw are the same with every setting; at 20 km/s they are the LOADING LIMIT — the fine tiles land
+   after the eye, so a chunk stands on the rough ground first (B86's safety net) and its edge shows against the finished
+   ground. The cure is B86 item 4 (sent ahead with the speed), not a ladder change.
+2. **THE RECONSTRUCTION AT 0.67 IS THE WINDOW'S DEFAULT** (amends B24's "MSAA stays the default"): MEASURED a frame every
+   16.8 ms (60 a second) against 32 ms at full size with 4× MSAA; `VD_TEMPORAL=0` turns it off for a run. The headless
+   capture keeps its reference defaults (its pictures change only on the owner's word, B71).
+3. **THE FREEZES STAY OPEN, MEASURED**: ~2 frames a second 50–150 ms late with every setting, the terrain's own work in
+   them ~5 ms and the network thread on time — the drawing side's; found by a profiler next.

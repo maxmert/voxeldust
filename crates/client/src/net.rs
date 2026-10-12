@@ -3444,6 +3444,7 @@ mod tests {
                     rough_builds: 0,
                     rough_upgrades: 0,
                     rough_resident: 0,
+                    chunks_hidden: 0,
                     lattice_edge: 0,
                     eyes: vec![],
                     eye_cell: [0, 0, 0],

@@ -567,6 +567,8 @@ struct DescentJob {
     view: LadderView,
     body: Arc<vd_terrain::BodyDefinition>,
     eye: [f64; 3],
+    /// ★ The eye the picture is drawn from now (ruling B89): a chunk is hidden only when hidden from it and the lead.
+    drawn_eye: [f64; 3],
     artifact: Option<Arc<vd_client::artifact_book::ArtifactCache>>,
     epoch: Option<u64>,
     sent: std::time::Instant,
@@ -636,12 +638,13 @@ fn run_descent(job: DescentJob) -> DescentDone {
         mut view,
         body,
         eye,
+        drawn_eye,
         artifact,
         epoch,
         ..
     } = job;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let wanted = view.wanted(&body, eye, artifact.as_deref());
+        let wanted = view.wanted_seen(&body, eye, Some(drawn_eye), artifact.as_deref());
         let provisional = view.provisional_spans();
         (view, wanted, provisional)
     }));
@@ -1762,7 +1765,10 @@ struct RealmLadder {
 /// One drawn chunk: its entity, its probe twin in Capture mode, and its morph counts (targets
 /// that fell back to the field, vertices on a face seam, vertices), which the stamp sums.
 struct Drawn {
-    entity: Entity,
+    /// ★ `None` FOR A CHUNK WITH NO TRIANGLE (ruling B89, the speed step): a slice of a column wholly over or under the
+    /// ground is held — the ladder counts it built and its parent may leave — but nothing is drawn for it, so it costs
+    /// no entity, no draw and no placement. MEASURED at the hull stand: 4 655 of 17 036 built chunks are empty.
+    entity: Option<Entity>,
     twin: Option<Entity>,
     counts: [u64; 3],
     /// The mesh's bytes as the engine uploads them (M8-2): the vertex buffer and the indices.
@@ -1774,7 +1780,24 @@ struct Drawn {
     tag: u32,
     /// ★ Drawn on the rough ground (ruling B86 item 7): its fine build lands with the arrival ramp.
     rough: bool,
+    /// ★ LEFT OUT OF THE PICTURE (ruling B89): the nearer ground hides it from the eye and the eye ahead, and it casts no
+    /// shadow of its own — held, its entity and twin `Visibility::Hidden` ([`Terrain::show_or_hide`]).
+    hidden: bool,
 }
+
+/// ★ ONE FRAME OF THE TERRAIN SYSTEM, NOTED (ruling B89): its own time on the main thread, the chunks it harvested
+/// (meshes made and entities spawned), the chunks it released, and the wanted sets that landed.
+#[derive(Clone, Copy, Debug, Default)]
+struct FrameNote {
+    work_ms: f64,
+    harvested: u64,
+    released: u64,
+    descents: u64,
+}
+
+/// A frame later than this after the last one is logged as stalled, with the frame before it: two display beats at
+/// 60 Hz and a half, so a frame that only missed one beat is not.
+const STALL_MS: f64 = 50.0;
 
 /// A coarse caster on the shadow layer (the shadow ladder): its entity and its bytes.
 struct Caster {
@@ -1837,6 +1860,13 @@ pub struct Terrain {
     /// terrain material of that realm binds, and this frame's bytes, which the render world
     /// writes into it in its prepare stage.
     band_tables: BTreeMap<RealmId, BandTableGpu>,
+    /// ★ How many drawn chunks each realm leaves out of the picture (ruling B89), as its last set judged them.
+    hidden_drawn: BTreeMap<RealmId, u64>,
+    /// ★ THE STALLED FRAME'S INSTRUMENT (ruling B89, the owner: "I see freezes from time to time"): when this system
+    /// last started, and what it did in that frame — so a frame that comes more than [`STALL_MS`] after the last one
+    /// names what the terrain did just before it, or shows that the terrain did little.
+    last_started: Option<std::time::Instant>,
+    last_frame: FrameNote,
     /// ★ LAST FRAME'S DRAWN PLACEMENT OF EACH REALM (the temporal path's T1, `vd_client::motion`):
     /// the realm's step this frame is `P(last) · P(now)⁻¹`, and a realm absent last frame steps by
     /// nothing.
@@ -2030,6 +2060,9 @@ impl Terrain {
             shadow_bytes: 0,
             ladders: BTreeMap::new(),
             band_tables: BTreeMap::new(),
+            hidden_drawn: BTreeMap::new(),
+            last_started: None,
+            last_frame: FrameNote::default(),
             last_placements: BTreeMap::new(),
             frame_ticks: 1,
             materials: BTreeMap::new(),
@@ -2436,10 +2469,14 @@ impl Terrain {
         if *n > 1 {
             return;
         }
-        if let Some(drawn) = self.entities.get(&(realm, ckey)) {
-            commands
-                .entity(drawn.entity)
-                .remove::<bevy::light::NotShadowCaster>();
+        if let Some(drawn) = self.entities.get_mut(&(realm, ckey)) {
+            if let Some(entity) = drawn.entity {
+                commands.entity(entity).remove::<bevy::light::NotShadowCaster>();
+                // ★ A chunk that casts for a finer one is drawn, hidden or not (ruling B89): its shadow falls on the picture.
+                if std::mem::replace(&mut drawn.hidden, false) {
+                    commands.entity(entity).insert(Visibility::Inherited);
+                }
+            }
         } else if !self.shadow_casters.contains_key(&(realm, ckey)) {
             self.lane.request(realm, ckey, shadow_priority(ckey.rung));
         }
@@ -2458,9 +2495,9 @@ impl Terrain {
         }
         self.shadow_wanted.remove(&(realm, ckey));
         if let Some(drawn) = self.entities.get(&(realm, ckey)) {
-            commands
-                .entity(drawn.entity)
-                .insert(bevy::light::NotShadowCaster);
+            if let Some(entity) = drawn.entity {
+                commands.entity(entity).insert(bevy::light::NotShadowCaster);
+            }
             return;
         }
         if let Some(c) = self.shadow_casters.remove(&(realm, ckey)) {
@@ -2468,6 +2505,44 @@ impl Terrain {
             self.shadow_bytes -= c.bytes;
         }
         self.lane.release(realm, ckey);
+    }
+
+    /// ★ THE DRAW FOLLOWS THE NEARER GROUND (ruling B89, the speed step): each drawn chunk of `realm` the realm's wanted set
+    /// calls hidden ([`WantedSet::is_hidden`]) and that casts no shadow of its own is left out of the picture, its entity
+    /// and twin hidden; one the set shows again is drawn again — each only when its state changes. A chunk the ablation's
+    /// hidden rungs hold is left alone. Example: from the hull on the belt, a valley floor behind the near spur is held,
+    /// built and current, but not drawn; the step that lifts the eye over the spur lands a descent that draws it first.
+    fn show_or_hide(&mut self, commands: &mut Commands, realm: RealmId) -> u64 {
+        let Terrain {
+            entities,
+            ladders,
+            shadow_wanted,
+            config,
+            ..
+        } = self;
+        let Some(ladder) = ladders.get(&realm) else {
+            return 0;
+        };
+        let mut hidden = 0u64;
+        for ((r, key), drawn) in entities.range_mut((realm, FIRST_CHUNK_KEY)..) {
+            if *r != realm {
+                break;
+            }
+            if config.hide_rung.is_some_and(|h| key.rung >= h) {
+                continue;
+            }
+            let hide = ladder.wanted.is_hidden(*key) & !shadow_wanted.contains_key(&(realm, *key));
+            hidden += u64::from(hide);
+            if hide == drawn.hidden {
+                continue;
+            }
+            drawn.hidden = hide;
+            let visibility = if hide { Visibility::Hidden } else { Visibility::Inherited };
+            for entity in drawn.entity.into_iter().chain(drawn.twin) {
+                commands.entity(entity).insert(visibility);
+            }
+        }
+        hidden
     }
 
     /// The chunks on screen per rung, finest first.
@@ -2585,7 +2660,6 @@ fn mesh_of(
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, geometry.vertices.clone())
     .with_inserted_attribute(super::ATTRIBUTE_MORPH, geometry.morph_m.clone())
-    .with_inserted_attribute(super::ATTRIBUTE_RADIAL, geometry.radials.clone())
     .with_inserted_attribute(
         super::ATTRIBUTE_MORPH_NORMAL,
         bevy::mesh::VertexAttributeValues::Snorm16x2(geometry.morph_normals.clone()),
@@ -2633,14 +2707,13 @@ fn mesh_of(
 
 /// THE SPLAT MESH (D8-8's measurement): every surface vertex four times, with the corner it
 /// stands at; the shader spreads the four into a camera-facing square one cell wide. The
-/// normal, the morph and the radial ride along unchanged, so the crossfade and the light are
+/// normal and the morph ride along unchanged, so the crossfade and the light are
 /// the mesh's own; the skirt vertices are left out (a splat has no edge to hide).
 fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung: u8) -> Mesh {
     let n = geometry.skirt_start as usize;
     let corners: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
     let mut positions = Vec::with_capacity(n * 4);
     let mut morph = Vec::with_capacity(n * 4);
-    let mut radials = Vec::with_capacity(n * 4);
     let mut corner = Vec::with_capacity(n * 4);
     let mut packed = Vec::with_capacity(n * 4);
     let mut normals = Vec::with_capacity(n * 4);
@@ -2653,7 +2726,6 @@ fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung:
         for c in corners {
             positions.push(geometry.vertices[i]);
             morph.push(geometry.morph_m[i]);
-            radials.push(geometry.radials[i]);
             corner.push(c);
             packed.push(geometry.packed_normals[i]);
             normals.push(geometry.normals[i]);
@@ -2669,7 +2741,6 @@ fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung:
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(super::ATTRIBUTE_MORPH, morph)
-    .with_inserted_attribute(super::ATTRIBUTE_RADIAL, radials)
     .with_inserted_attribute(super::ATTRIBUTE_SPLAT_CORNER, corner)
     .with_inserted_attribute(
         super::ATTRIBUTE_MORPH_NORMAL,
@@ -2868,6 +2939,25 @@ pub(crate) fn sync_terrain(
         .frame_meter
         .frames
         .store(terrain.frames, std::sync::atomic::Ordering::Relaxed);
+    // ★ THE STALLED FRAME (ruling B89): this frame came more than STALL_MS after the last one — the log names what the
+    // terrain did in the frame before.
+    let frame_started = std::time::Instant::now();
+    if let Some(last) = terrain.last_started.replace(frame_started) {
+        let gap_ms = frame_started.duration_since(last).as_secs_f64() * 1e3;
+        if gap_ms > STALL_MS {
+            let note = terrain.last_frame;
+            tracing::warn!(
+                gap_ms,
+                terrain_ms = note.work_ms,
+                harvested = note.harvested,
+                released = note.released,
+                descents = note.descents,
+                pending = terrain.lane.pending_count(),
+                "A STALLED FRAME: the frame came late; the terrain's own work in the frame before it"
+            );
+        }
+    }
+    terrain.last_frame = FrameNote::default();
     // THE FRAME'S MOMENT: the sample the camera was placed from (step 6), never a second one.
     let Some((now_s, snap)) = render_eye.moment.clone() else {
         terrain.stamp = None;
@@ -3115,6 +3205,11 @@ pub(crate) fn sync_terrain(
         recomputed.push(done.realm);
         descents += 1;
     }
+    // ★ THE DRAW FOLLOWS EACH NEW SET'S HIDDEN CHUNKS (ruling B89).
+    for realm in &recomputed {
+        let hidden = terrain.show_or_hide(&mut commands, *realm);
+        terrain.hidden_drawn.insert(*realm, hidden);
+    }
     work_descent += landing.elapsed();
     let mut descent_seq = terrain.descent_seq;
     let mut to_send: Vec<DescentJob> = Vec::new();
@@ -3160,6 +3255,15 @@ pub(crate) fn sync_terrain(
             &eb.body,
             rungs,
             artifact.as_ref().map_or(0, |a| a.head.levels),
+        )
+        // ★ THE FINE GROUND'S RUNGS HAND OVER BY THEIR CURVE'S STEP (ruling B89): a realm whose fine level applies draws
+        // the curve through its 128 m points under the fine level, and those rungs come in to where their step stands
+        // within the ladder's tolerance.
+        .for_fine_ground(
+            artifact
+                .as_ref()
+                .is_some_and(|a| vd_terrain::fine::read::applies(a.head.sea_m)),
+            rungs,
         );
         ladder.pace.slew(&candidate, rungs, hysteresis, frame_s);
         // A bound the pace takes while the view is away is not lost: the next send carries it.
@@ -3201,6 +3305,7 @@ pub(crate) fn sync_terrain(
                 view,
                 body: Arc::clone(&eb.body),
                 eye: eb.lead,
+                drawn_eye: eb.eye,
                 artifact,
                 epoch,
                 sent: sending,
@@ -3437,7 +3542,9 @@ pub(crate) fn sync_terrain(
                 drawn_stand_ins.remove(&(realm, key));
                 if let Some(drawn) = entities.remove(&(realm, key)) {
                     *released_count.entry(realm).or_default() += 1;
-                    commands.entity(drawn.entity).despawn();
+                    if let Some(entity) = drawn.entity {
+                        commands.entity(entity).despawn();
+                    }
                     if let Some(twin) = drawn.twin {
                         commands.entity(twin).despawn();
                     }
@@ -3482,9 +3589,9 @@ pub(crate) fn sync_terrain(
             });
             if settled & !covered & arrived {
                 drawn.tag = vd_client::arrival::covered_stamp(now_ticks);
-                commands
-                    .entity(drawn.entity)
-                    .insert(bevy::mesh::MeshTag(drawn.tag));
+                if let Some(entity) = drawn.entity {
+                    commands.entity(entity).insert(bevy::mesh::MeshTag(drawn.tag));
+                }
                 if let Some(twin) = drawn.twin {
                     commands.entity(twin).insert(bevy::mesh::MeshTag(drawn.tag));
                 }
@@ -3639,6 +3746,7 @@ pub(crate) fn sync_terrain(
     // body's own frame before and after it, the lead offset, the wanted set's size on both sides,
     // the drawn and lead scenes' row counts, the origin, and the frame the own pose was delivered
     // in at each cursor. A band that dies without a forget dies HERE, and this line says why.
+    let released_now: u64 = released_count.values().sum();
     for (realm, released) in &released_count {
         if *released <= WHOLESALE_RELEASE {
             continue;
@@ -3709,7 +3817,9 @@ pub(crate) fn sync_terrain(
     // rung, the chunks that landed this frame rising with a next-rung chunk drawn, rising with NONE drawn
     // (their drawn stand-in is coarser still), entering whole, and the morph fallbacks of the second kind.
     let mut landing_census: BTreeMap<u8, [u64; 4]> = BTreeMap::new();
+    let mut harvested_now = 0u64;
     for ready in terrain.lane.poll_within(harvest_cap, harvest_bytes) {
+        harvested_now += 1;
         let realm = ready.realm;
         let key = ready.geometry.key;
         let wanted = terrain
@@ -3799,7 +3909,9 @@ pub(crate) fn sync_terrain(
             mesh_of(&ready.geometry, flat, exact_normal_rung, splat)
         };
         let bytes = mesh_bytes(&built);
-        let mesh = meshes.add(built);
+        // ★ A CHUNK WITH NO TRIANGLE IS HELD, NOT DRAWN (ruling B89): no mesh asset and no entity (`Drawn::entity`).
+        let empty = ready.geometry.triangles.is_empty();
+        let mesh = (!empty).then(|| meshes.add(built));
         let part_material = material.clone();
         if terrain.config.covered {
             let g = &ready.geometry;
@@ -3868,59 +3980,17 @@ pub(crate) fn sync_terrain(
         } else {
             terrain.drawn_stand_ins.remove(&(realm, key));
         }
-        let entity = commands
-            .spawn((
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(material.clone()),
-                Transform::default(),
-                TerrainChunk {
-                    realm,
-                    rung: key.rung,
-                },
-                ChunkOrigin(ready.geometry.origin_m),
-                bounds,
-                bevy::mesh::MeshTag(stamp),
-            ))
-            .id();
-        if hide_rung.is_some_and(|r| key.rung >= r) {
-            commands.entity(entity).insert(Visibility::Hidden);
-        }
-        if no_cull {
-            commands
-                .entity(entity)
-                .insert(bevy::camera::visibility::NoFrustumCulling);
-        }
-        if !shadow_cast
-            || shadow_cast_rung.is_some_and(|r| key.rung >= r)
-            || (caster.is_some() && !casts_itself)
-        {
-            commands.entity(entity).insert(bevy::light::NotShadowCaster);
-        }
-        if !shadow_receive {
-            commands
-                .entity(entity)
-                .insert(bevy::light::NotShadowReceiver);
-        }
-        // The other parts of a split chunk ride on it as children: placed with it, despawned with it.
-        if ablate {
-            for part in 1..split_draws {
-                commands.spawn((
-                    Mesh3d(meshes.add(part_of(part))),
-                    MeshMaterial3d(part_material.clone()),
-                    Transform::default(),
-                    bounds,
-                    bevy::mesh::MeshTag(stamp),
-                    ChildOf(entity),
-                ));
-            }
-        }
-        let twin = probe_materials.as_mut().map(|pm| {
-            let probe =
-                terrain.probe_material(pm, realm, PROBE_KIND_TERRAIN, key.rung, &body, &gpu);
-            let twin = commands
+        // ★ BORN HIDDEN (ruling B89): a chunk the set calls hidden and that casts no shadow of its own lands left out.
+        let born_hidden = hide_rung.is_none_or(|r| key.rung < r)
+            & terrain.ladders.get(&realm).is_some_and(|l| l.wanted.is_hidden(key))
+            & !casts_itself;
+        let (entity, twin) = match mesh {
+            None => (None, None),
+            Some(mesh) => {
+            let entity = commands
                 .spawn((
                     Mesh3d(mesh.clone()),
-                    MeshMaterial3d(probe),
+                    MeshMaterial3d(material.clone()),
                     Transform::default(),
                     TerrainChunk {
                         realm,
@@ -3928,20 +3998,75 @@ pub(crate) fn sync_terrain(
                     },
                     ChunkOrigin(ready.geometry.origin_m),
                     bounds,
-                    ProbeTwin,
-                    RenderLayers::layer(PROBE_LAYER),
-                    bevy::light::NotShadowCaster,
-                    // The twin rises with the picture's chunk, so the probe reads what it shows.
                     bevy::mesh::MeshTag(stamp),
                 ))
                 .id();
+            if born_hidden || hide_rung.is_some_and(|r| key.rung >= r) {
+                commands.entity(entity).insert(Visibility::Hidden);
+            }
             if no_cull {
                 commands
-                    .entity(twin)
+                    .entity(entity)
                     .insert(bevy::camera::visibility::NoFrustumCulling);
             }
-            twin
-        });
+            if !shadow_cast
+                || shadow_cast_rung.is_some_and(|r| key.rung >= r)
+                || (caster.is_some() && !casts_itself)
+            {
+                commands.entity(entity).insert(bevy::light::NotShadowCaster);
+            }
+            if !shadow_receive {
+                commands
+                    .entity(entity)
+                    .insert(bevy::light::NotShadowReceiver);
+            }
+            // The other parts of a split chunk ride on it as children: placed with it, despawned with it.
+            if ablate {
+                for part in 1..split_draws {
+                    commands.spawn((
+                        Mesh3d(meshes.add(part_of(part))),
+                        MeshMaterial3d(part_material.clone()),
+                        Transform::default(),
+                        bounds,
+                        bevy::mesh::MeshTag(stamp),
+                        ChildOf(entity),
+                    ));
+                }
+            }
+            let twin = probe_materials.as_mut().map(|pm| {
+                let probe =
+                    terrain.probe_material(pm, realm, PROBE_KIND_TERRAIN, key.rung, &body, &gpu);
+                let twin = commands
+                    .spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(probe),
+                        Transform::default(),
+                        TerrainChunk {
+                            realm,
+                            rung: key.rung,
+                        },
+                        ChunkOrigin(ready.geometry.origin_m),
+                        bounds,
+                        ProbeTwin,
+                        RenderLayers::layer(PROBE_LAYER),
+                        bevy::light::NotShadowCaster,
+                        // The twin rises with the picture's chunk, so the probe reads what it shows.
+                        bevy::mesh::MeshTag(stamp),
+                    ))
+                    .id();
+                if no_cull {
+                    commands
+                        .entity(twin)
+                        .insert(bevy::camera::visibility::NoFrustumCulling);
+                }
+                if born_hidden {
+                    commands.entity(twin).insert(Visibility::Hidden);
+                }
+                twin
+            });
+                (Some(entity), twin)
+            }
+        };
         let counts = [
             u64::from(ready.geometry.morph_fallbacks),
             u64::from(ready.geometry.morph_seam),
@@ -3963,11 +4088,14 @@ pub(crate) fn sync_terrain(
                 caster,
                 tag: stamp,
                 rough: ready.geometry.rough,
+                hidden: born_hidden,
             },
         ) {
             // A key drawn twice (refutation of the ladder, finding 2): the old entity, its twin,
             // its counts and its caster's want all leave with it.
-            commands.entity(old.entity).despawn();
+            if let Some(entity) = old.entity {
+                commands.entity(entity).despawn();
+            }
             if let Some(t) = old.twin {
                 commands.entity(t).despawn();
             }
@@ -3983,6 +4111,12 @@ pub(crate) fn sync_terrain(
         }
     }
     terrain.harvest_nanos += harvest_started.elapsed().as_nanos() as u64;
+    terrain.last_frame = FrameNote {
+        work_ms: frame_started.elapsed().as_secs_f64() * 1e3,
+        harvested: harvested_now,
+        released: released_now,
+        descents: descents_landed,
+    };
     if landing_census.values().any(|row| row[1] > 0) {
         tracing::info!(
             frame = terrain.frame_ticks,
@@ -4487,6 +4621,7 @@ pub(crate) fn sync_terrain(
                     rough_builds: counters.rough_builds,
                     rough_upgrades: counters.rough_upgrades,
                     rough_resident: terrain.lane.rough_resident(*realm) as u64,
+                    chunks_hidden: terrain.hidden_drawn.values().sum(),
                     lattice_edge,
                     eyes: with_bodies
                         .iter()
@@ -4656,7 +4791,6 @@ pub(crate) fn sync_terrain(
                         bevy::mesh::VertexAttributeValues::Snorm16x2(packed),
                     );
                     ball.insert_attribute(super::ATTRIBUTE_MORPH, vec![0.0f32; count]);
-                    ball.insert_attribute(super::ATTRIBUTE_RADIAL, vec![[0.0f32, 1.0, 0.0]; count]);
                     let a = (
                         meshes.add(ball),
                         materials.add(StandardMaterial {
@@ -4767,6 +4901,26 @@ impl BandTableWords {
         );
     }
 
+    /// ★ THE REALM'S FRAME (ruling B89, the speed step), written by the placement with its step: the body's centre in
+    /// this frame's render space (the eye at the origin) and its spin axis there (`vd_terrain::surface::POLE_AXIS` turned
+    /// by the realm's facing). The ground's shaders read each vertex's radial as its own place less the centre, and its
+    /// latitude's sine along the pole — so a vertex carries no radial of its own. Narrowed to `f32` once: the centre's
+    /// half-metre step at six thousand kilometres turns a radial by under 1e-7 rad.
+    fn set_frame(&mut self, centre: DVec3, facing: DQuat) {
+        let pole = facing * DVec3::Z;
+        let words = [
+            [centre.x as f32, centre.y as f32, centre.z as f32, 1.0],
+            [pole.x as f32, pole.y as f32, pole.z as f32, 0.0],
+        ];
+        let mut at = BAND_TABLE_FRAME_AT;
+        for row in words {
+            for value in row {
+                self.bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                at += 4;
+            }
+        }
+    }
+
     /// ★ THE REALM'S STEP (T1), written by the placement once it knows this frame's placement.
     fn set_step(&mut self, step: [[f32; 4]; 3]) {
         let mut at = BAND_TABLE_STEP_AT;
@@ -4781,6 +4935,8 @@ impl BandTableWords {
 
 /// Where the realm's step starts in a band table's bytes: after the clock's four words.
 const BAND_TABLE_STEP_AT: usize = 16;
+/// ★ Where the realm's frame starts (ruling B89): after the step's three rows — its centre, then its pole.
+const BAND_TABLE_FRAME_AT: usize = BAND_TABLE_STEP_AT + 48;
 
 /// The card's device and queue, for the band tables.
 #[derive(SystemParam)]
@@ -4794,6 +4950,8 @@ pub(crate) struct BandGpu<'w> {
 /// - the clock, one `vec4<u32>`: this frame's clock and the ramp's ticks (slice R1c), LAST frame's
 ///   clock, and the count of rows (T1);
 /// - the realm's step, three `vec4<f32>` rows of a 3 × 4 matrix (T1, `vd_client::motion`);
+/// - ★ the realm's frame (ruling B89), two `vec4<f32>`: the body's centre in this frame's render space, then its spin
+///   axis — nought until the placement writes them ([`BandTableWords::set_frame`]);
 /// - this frame's rows, one `vec4<f32>` each, then LAST frame's rows (the same count; this frame's
 ///   again when the count changed, so no row is read past the table);
 /// - ★ THE REALM'S SNOW LINE (ruling B75 item 4), one `vec4<f32>` after them: the row at twice the count, which only
@@ -4811,11 +4969,12 @@ fn band_table_bytes(
         rows
     };
     let count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
-    let mut out = Vec::with_capacity(BAND_TABLE_STEP_AT + 64 + 32 * rows.len());
+    let mut out = Vec::with_capacity(BAND_TABLE_FRAME_AT + 48 + 32 * rows.len());
     for word in [clock[0], clock[1], clock[2], count] {
         out.extend_from_slice(&word.to_le_bytes());
     }
-    for row in step.iter().chain(rows).chain(last).chain([&snow]) {
+    let frame = [[0.0f32; 4]; 2];
+    for row in step.iter().chain(&frame).chain(rows).chain(last).chain([&snow]) {
         for value in row {
             out.extend_from_slice(&value.to_le_bytes());
         }
@@ -4942,6 +5101,7 @@ pub(crate) fn place_chunks(
                 .map(|&(centre, facing)| DrawnPlacement { centre, facing });
             let step = RealmStep::between(last, now);
             table.words.set_step(step.rows());
+            table.words.set_frame(centre, facing);
             if *sky_realm == Some(*realm) {
                 turn = step.rotation;
             }
@@ -5252,6 +5412,7 @@ mod worker_tests {
             view: LadderView::default(),
             body: Arc::clone(body),
             eye: [body.ladder().radius_m() + 2_000.0, 0.0, 0.0],
+            drawn_eye: [body.ladder().radius_m() + 2_000.0, 0.0, 0.0],
             artifact: None,
             epoch: None,
             sent: std::time::Instant::now(),

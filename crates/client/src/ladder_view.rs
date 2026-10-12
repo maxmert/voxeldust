@@ -299,6 +299,33 @@ pub fn switch_floor_m(step_m: f64) -> f64 {
     vd_terrain::artifact::switch_floor_m(step_m, pixel_rad())
 }
 
+/// ★ HOW STEEP AND HOW SHARP THE FINE GROUND'S CURVE CAN STAND, as a factor on the law's slope: the curve between the
+/// 128 m points is Catmull-Rom, whose slope between two points reaches one and a half times the steepest step beside
+/// them (`f'(½) = 1.5·s − (d₀ + d₁)/4`, at `d₀ = d₁ = 0`).
+pub const CURVE_OVERSHOOT: f64 = 1.5;
+
+/// ★ THE STEP A HANDOVER MAKES ON THE FINE GROUND (ruling B89, the speed step), in metres, for a rung finer than the
+/// fine level's own ([`vd_terrain::fine::l1::L1_RUNG`]): where the realm holds its finished 128 m tiles, every such rung
+/// draws ONE surface — the Catmull-Rom curve through the 128 m points, no noise octave under it (ruling B81 Q1) — so
+/// a rung's mesh stands from that curve by no more than a triangle of its cell can miss a curve that steep and that
+/// sharp, and two rungs differ by at most the two misses. The bounds are the law's own: the 128 m solve stands no
+/// point over its receiver steeper than the repose slope (`vd_terrain::body::TAN_REPOSE`, B82), the curve's slope is
+/// that times [`CURVE_OVERSHOOT`], its bend at most `3 · 2 · slope / cell` (a Catmull-Rom's second derivative is at
+/// most three second differences over the cell squared, and a second difference at most two steps), and a triangle's
+/// miss the smaller of the bend's `k · d² / 2` over its diagonal and the slope's `slope · d / √2`.
+///
+/// **Example.** On the home planet the 1 m rung hands over to the 2 m rung with a step of about 12 cm, so the ladder's
+/// own tolerance holds it from 56 m; under the old rule the 1 m ring reached 869 m.
+#[must_use]
+pub fn curve_step_m(rung: u8) -> f64 {
+    let fine_cell = f64::from(cell_m(vd_terrain::fine::l1::L1_RUNG));
+    let slope = vd_terrain::body::TAN_REPOSE * CURVE_OVERSHOOT;
+    let bend = 6.0 * slope / fine_cell;
+    let miss = |d: f64| (bend * d * d / 2.0).min(slope * d * std::f64::consts::FRAC_1_SQRT_2);
+    let d = f64::from(cell_m(rung));
+    miss(d) + miss(2.0 * d)
+}
+
 /// THE TIER RULE: the finest rung whose cell is at least one pixel at distance `d_m`, clamped to the
 /// body's top rung. A distance at or under the pixel's own size reads rung 0.
 #[must_use]
@@ -354,6 +381,10 @@ pub struct AskBound {
     /// EMPTY means no body has been read: every step is zero, the floor is zero and the widening is
     /// one, which is the ladder every earlier flight flew.
     steps_m: Vec<f64>,
+    /// ★ THE BODY'S OWN SWITCH DISTANCE PER RUNG (ruling B89), finest first: the tier rule's ([`switch_m`]) or, on the
+    /// fine ground's rungs, the distance its curve's step stands within the ladder's tolerance
+    /// ([`AskBound::for_fine_ground`]). Empty reads the tier rule's own. The body's row: it never slides.
+    base_m: Vec<f64>,
 }
 
 /// ★ HOW FAST A DELIVERABLE HORIZON MAY MOVE: a quarter of its own length every second.
@@ -493,6 +524,7 @@ pub fn ask_bound(rungs: u8, rate: AskRate) -> AskBound {
         // The builders' own bound reads no body; the caller states the body's row
         // ([`AskBound::for_body`], ruling T7 rules 2 and 3).
         steps_m: Vec::new(),
+        base_m: Vec::new(),
     }
 }
 
@@ -556,6 +588,7 @@ impl AskBound {
             switches: None,
             slack: 0.0,
             steps_m: Vec::new(),
+            base_m: Vec::new(),
         }
     }
 
@@ -597,6 +630,7 @@ impl AskBound {
             switches: Some(switches),
             slack: 0.0,
             steps_m: Vec::new(),
+            base_m: Vec::new(),
         }
     }
 
@@ -620,14 +654,55 @@ impl AskBound {
     /// been read and inert on the home planet's table.
     #[must_use]
     pub fn switch_m(&self, rung: u8) -> f64 {
+        let own = self.base(rung);
         let base = match &self.switches {
-            None => switch_m(rung),
-            Some(s) => s
-                .get(usize::from(rung))
-                .copied()
-                .unwrap_or_else(|| switch_m(rung)),
+            None => own,
+            Some(s) => s.get(usize::from(rung)).copied().unwrap_or(own).min(own),
         };
         base.max(switch_floor_m(self.step_m(rung)))
+    }
+
+    /// ★ The body's own switch distance at a rung (ruling B89): its row's, else the tier rule's.
+    #[must_use]
+    pub fn base(&self, rung: u8) -> f64 {
+        self.base_m
+            .get(usize::from(rung))
+            .copied()
+            .unwrap_or_else(|| switch_m(rung))
+    }
+
+    /// ★ THE SAME BOUND ON THE FINE GROUND (ruling B89, the speed step): where the realm draws its finished 128 m tiles
+    /// (`fine`), every rung finer than the fine level hands over at the step its curve makes ([`curve_step_m`]) — the
+    /// handover's own step (ruling T7), held within the ladder's tolerance by the T7 floor — and never farther out than
+    /// the tier rule's own distance. The rungs from the fine level up keep the body's row. Without the fine ground the
+    /// bound is unchanged.
+    ///
+    /// **Example.** On the home planet with its tiles held, the 1, 2, 4 and 8 m rungs hand over at about 56 m, 225 m,
+    /// 0.9 km and 3.6 km instead of 0.87, 1.7, 3.5 and 7 km, so the near ground holds a few hundred chunks where it held
+    /// ten thousand; the shape each draws stands within the same tolerance of the curve.
+    #[must_use]
+    pub fn for_fine_ground(mut self, fine: bool, rungs: u8) -> AskBound {
+        if !fine {
+            return self;
+        }
+        let top = vd_terrain::fine::l1::L1_RUNG.min(rungs.saturating_sub(1));
+        let mut base = Vec::with_capacity(usize::from(rungs));
+        let mut rung = 0u8;
+        while rung < rungs {
+            let own = if rung < top {
+                let step = curve_step_m(rung);
+                if let Some(s) = self.steps_m.get_mut(usize::from(rung)) {
+                    *s = step;
+                }
+                switch_floor_m(step).min(switch_m(rung))
+            } else {
+                switch_m(rung)
+            };
+            base.push(own);
+            rung += 1;
+        }
+        self.base_m = base;
+        self
     }
 
     /// Every rung's effective switch distance, finest first — the stamp's readout. Empty where the
@@ -665,9 +740,15 @@ impl AskBound {
     pub fn slewed_toward(&self, target: &AskBound, rungs: u8, dt_s: f64) -> AskBound {
         let mut switches = vec![0.0f64; usize::from(rungs)];
         let mut free = true;
+        // ★ THE BODY'S ROW DOES NOT SLIDE (ruling B89): the walk starts from this bound read on the target's own row.
+        let from = AskBound {
+            base_m: target.base_m.clone(),
+            steps_m: target.steps_m.clone(),
+            ..self.clone()
+        };
         let mut rung = 0u8;
         while rung < rungs {
-            let now = self.switch_m(rung);
+            let now = from.switch_m(rung);
             let want = target.switch_m(rung);
             let step = (now + column_span_m(rung)) * ASK_BOUND_SLEW_PER_S * dt_s.max(0.0);
             let gap = want - now;
@@ -677,7 +758,7 @@ impl AskBound {
                 now + step.copysign(gap)
             };
             switches[usize::from(rung)] = next;
-            free &= next >= switch_m(rung);
+            free &= next >= target.base(rung);
             rung += 1;
         }
         if free {
@@ -685,6 +766,7 @@ impl AskBound {
                 switches: None,
                 slack: 0.0,
                 steps_m: target.steps_m.clone(),
+                base_m: target.base_m.clone(),
             };
         }
         AskBound {
@@ -693,6 +775,7 @@ impl AskBound {
             // ★ THE BODY'S OWN ROW COMES FROM THE TARGET (ruling T7): the bound we move toward is
             // the one built from the body this frame, and the body's table does not slide.
             steps_m: target.steps_m.clone(),
+            base_m: target.base_m.clone(),
         }
     }
 
@@ -706,7 +789,7 @@ impl AskBound {
         // of the widening. MEASURED (§25.7): widening every rung cost 0.23 ms of a 3.53 ms
         // descent, and the coarse rungs — whose rings are the widest of all — never moved.
         let slack = |s: f64, rung: u8| {
-            if s < switch_m(rung) { self.slack } else { 0.0 }
+            if s < self.base(rung) { self.slack } else { 0.0 }
         };
         // ★ THE BAND WIDENS BY THE HANDOVER'S OWN STEP (ruling T7 rule 2): the ladder's own half
         // width was sized on a step of one cell, so a step of `r` cells is paid off over `r` times
@@ -979,6 +1062,10 @@ pub struct WantedSet {
     /// onto ground within the sun's reach ([`ShadowReach::caster_bound_m`]); meaningful only
     /// while `bounded` — a descent without a shadow reach lets every chunk cast.
     casting: BTreeSet<ChunkKey>,
+    /// ★ THE HIDDEN CHUNKS (ruling B89, the speed step): the wanted chunks of columns the nearer ground hides from the
+    /// eye and from the eye a step ahead ([`occluded_columns`]) — built and held like every wanted chunk (the next step
+    /// may show them, the walk-gap cure of 2026-09-16), but not drawn while hidden.
+    hidden: BTreeSet<ChunkKey>,
     bounded: bool,
     /// THE ALTITUDE THIS DESCENT RAN AT, in metres over the DRAWN ground under the eye
     /// ([`crate::chunks::drawn_surface_m`]), floored as [`floored_altitude_m`] floors it. The bounded
@@ -1069,7 +1156,20 @@ impl WantedSet {
         }
     }
 
-    /// Whether the set wants a chunk.
+    /// ★ Whether the nearer ground hides a wanted chunk from the eye and the eye a step ahead (ruling B89): held, not
+    /// drawn.
+    #[must_use]
+    pub fn is_hidden(&self, key: ChunkKey) -> bool {
+        self.hidden.contains(&key)
+    }
+
+    /// How many wanted chunks the nearer ground hides (ruling B89).
+    #[must_use]
+    pub fn hidden_count(&self) -> usize {
+        self.hidden.len()
+    }
+
+    /// Whether the set wants `key`.
     #[must_use]
     pub fn contains(&self, key: ChunkKey) -> bool {
         self.set.contains(&key)
@@ -1395,6 +1495,15 @@ pub const KEEP_MARGIN_RAD: f64 = 0.05;
 /// 0.6°, so a peak a walk is about to reveal over a crest is built before it shows.
 pub const WANT_MARGIN_RAD: f64 = 0.01;
 
+/// ★ THE DRAW'S MARGIN (ruling B89, the speed step): a drawn column is left out of the picture only when it stands this far
+/// under the nearer ground's skyline, plus the angle an eye step makes at its distance ([`HIDE_EYE_STEP_M`]) — so the
+/// frame the eye moves enough to see it, a fresh descent has drawn it already.
+pub const HIDE_MARGIN_RAD: f64 = 0.02;
+
+/// The eye's move a hidden column must stay hidden through, in metres: two of the renderer's descent steps (half a metre
+/// each), so the descent that follows always lands first.
+pub const HIDE_EYE_STEP_M: f64 = 1.0;
+
 /// THE GEOMETRY OF A COLUMN as the eye sees it: its centre's straight distance bounds (the nearest
 /// and farthest point, by the circumscribed disc), its centre's central angle and azimuth from
 /// the eye's foot, its footprint on the eye's chart (a wall is raised over it), and the
@@ -1471,6 +1580,70 @@ struct Sweep<'a> {
     /// THE LOWEST GROUND WITHIN THE SHADOW'S REACH, a sampled radius in metres, over the columns
     /// the descent met inside the reach: the ground a caster must stand over to shade.
     low_within_reach_m: f64,
+    /// ★ THE DRAWN COLUMNS (ruling B89): every column that emitted chunks, for the draw's occlusion.
+    drawn: Vec<DrawnColumn>,
+}
+
+/// ★ A DRAWN COLUMN AS THE DRAW'S OCCLUSION READS IT (ruling B89, the speed step): the column, its emitted slices, and
+/// two radii from the body's centre that hold for any eye — no point of its drawn ground over `peak_m`, none under
+/// `floor_m` (the lowest sample less the bounds the peak adds, a cell for the extractor and the sink a crossfade may drop
+/// it by: the skyline's own wall).
+#[derive(Clone, Copy, Debug)]
+struct DrawnColumn {
+    col: Column,
+    z: (i32, i32),
+    peak_m: f64,
+    floor_m: f64,
+}
+
+/// ★ THE COLUMNS THE NEARER GROUND HIDES FROM ONE EYE (ruling B89, the speed step; the skyline's own walls and test,
+/// run near to far — Downs, Möller and Séquin's occlusion horizons, 2001). The columns are judged in the order of their
+/// nearest point; a column raises its wall only once its FARTHEST point lies nearer than the column judged, so a wall
+/// never stands behind what it hides. A column is hidden when its peak cannot show over the walls on any ray it spans,
+/// by [`HIDE_MARGIN_RAD`] plus the angle [`HIDE_EYE_STEP_M`] makes at its nearest point. Every bound leans the safe way, as
+/// the skyline's do: a hidden column is one no point of which the eye can see.
+fn occluded_columns(
+    ladder: &vd_seed::ladder::Ladder,
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    eye: DVec3,
+    columns: &[DrawnColumn],
+) -> BTreeSet<Column> {
+    let len = eye.length();
+    if len.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return BTreeSet::new();
+    }
+    let d = eye / len;
+    let surface = crate::chunks::drawn_surface_m(body, artifact, [d.x, d.y, d.z]);
+    let frame = EyeFrame::new(eye);
+    let geos: Vec<ColumnGeometry> = columns
+        .iter()
+        .map(|c| column_geometry(ladder, &frame, eye, c.col, surface))
+        .collect();
+    let mut by_near: Vec<usize> = (0..columns.len()).collect();
+    by_near.sort_by(|&a, &b| geos[a].near.total_cmp(&geos[b].near));
+    let mut by_far = by_near.clone();
+    by_far.sort_by(|&a, &b| geos[a].far.total_cmp(&geos[b].far));
+    let mut skyline = Skyline::new(len);
+    let mut walls = by_far.into_iter().peekable();
+    let mut hidden = BTreeSet::new();
+    for i in by_near {
+        let geo = &geos[i];
+        while let Some(&w) = walls.peek() {
+            if geos[w].far > geo.near {
+                break;
+            }
+            if geos[w].rho <= WALL_MAX_HALF_ANGLE {
+                skyline.raise(&geos[w].quad, columns[w].floor_m);
+            }
+            walls.next();
+        }
+        let margin = HIDE_MARGIN_RAD + HIDE_EYE_STEP_M / geo.near.max(HIDE_EYE_STEP_M);
+        if !skyline.clears(geo.phi, geo.az, geo.rho, columns[i].peak_m, margin) {
+            hidden.insert(columns[i].col);
+        }
+    }
+    hidden
 }
 
 impl Sweep<'_> {
@@ -1531,6 +1704,15 @@ impl Sweep<'_> {
             if self.shadow.is_some_and(|s| geo.near <= s.reach_m) {
                 self.low_within_reach_m = self.low_within_reach_m.min(span.sampled_low_m);
             }
+            self.drawn.push(DrawnColumn {
+                col,
+                z: (span.lo, span.hi.min(top_z)),
+                peak_m: span.peak_m,
+                floor_m: span.sampled_low_m
+                    - (span.peak_m - span.sampled_high_m)
+                    - f64::from(cell_m(col.rung))
+                    - crate::chunks::sink_m(body, col.rung),
+            });
             let mut z = span.lo;
             while z <= span.hi.min(top_z) {
                 per_rung[col.rung as usize].push((
@@ -1679,6 +1861,19 @@ impl LadderView {
         eye_m: [f64; 3],
         artifact: Option<&ArtifactCache>,
     ) -> WantedSet {
+        self.wanted_seen(body, eye_m, None, artifact)
+    }
+
+    /// ★ [`LadderView::wanted`], ITS HIDDEN CHUNKS JUDGED FROM TWO EYES (ruling B89): the descent's own eye (the lead, a
+    /// step ahead) and `drawn_eye_m`, the eye the picture is drawn from now — a chunk is hidden only when the nearer
+    /// ground hides it from both, so neither the eye now nor the eye ahead sees a chunk the draw leaves out.
+    pub fn wanted_seen(
+        &mut self,
+        body: &BodyDefinition,
+        eye_m: [f64; 3],
+        drawn_eye_m: Option<[f64; 3]>,
+        artifact: Option<&ArtifactCache>,
+    ) -> WantedSet {
         let eye = DVec3::from_array(eye_m);
         let len = eye.length();
         let ladder = *body.ladder();
@@ -1714,6 +1909,7 @@ impl LadderView {
             per_rung: vec![Vec::new(); usize::from(rungs)],
             shadow: self.shadow,
             low_within_reach_m: f64::MAX,
+            drawn: Vec::new(),
         };
         // The roots: every top-rung column of every face.
         let n_top = ladder.cells_per_edge(top) as i32;
@@ -1829,12 +2025,32 @@ impl LadderView {
             }
             level = next;
         }
+        // ★ THE DRAW'S OCCLUSION (ruling B89): the drawn columns the nearer ground hides from this eye and from the eye
+        // the picture is drawn from now.
+        let mut hidden_columns = occluded_columns(&ladder, body, artifact, eye, &sweep.drawn);
+        if let Some(drawn_eye) = drawn_eye_m {
+            let also = occluded_columns(&ladder, body, artifact, DVec3::from_array(drawn_eye), &sweep.drawn);
+            hidden_columns.retain(|c| also.contains(c));
+        }
         let mut out = WantedSet {
             reach_m: reach,
             altitude_m: altitude,
             bounded: sweep.shadow.is_some(),
             ..WantedSet::default()
         };
+        for c in sweep.drawn.iter().filter(|c| hidden_columns.contains(&c.col)) {
+            let mut z = c.z.0;
+            while z <= c.z.1 {
+                out.hidden.insert(ChunkKey {
+                    face: c.col.face,
+                    rung: c.col.rung,
+                    x: c.col.x,
+                    y: c.col.y,
+                    z,
+                });
+                z += 1;
+            }
+        }
         let mut emitted: Vec<(RequestOrder, ChunkKey, Territory)> = Vec::new();
         for rung_keys in &mut sweep.per_rung {
             for (key, territory) in rung_keys.drain(..) {

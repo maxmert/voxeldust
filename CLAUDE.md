@@ -432,6 +432,15 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     drawn realm's row; in the player's own realm the avatar's position, read by the gateway off that realm's snapshot,
     once a beat; elsewhere the realm's centre, the SL7 proxy); no shard ships a tile to a session; the interest width
     and the gateway's relayed-tile record gone; no new data class, no wire arm.
+    ★ B89 (2026-10-12, the owner: "do all 5 from the speed work … check performance, but not run full gates … judge
+    visually in the window … I don't want to spend week on this"): THE SPEED STEP — the measurement, a frame cap + the
+    render scale, smaller vertices, one draw for many pieces, ask only what can be seen (the planet's and the hills'
+    horizon around the eye), fewer vertices on flat ground (our own, no new library); headless readings + the owner's
+    look; no gates.
+    ★ B90 (2026-10-12, the owner: "let's take the most optimized version please"): THE NEW DETAIL RULE STAYS (the fine
+    ground's rungs by their curve's step; the level edges at 20 km/s are the LOADING LIMIT, cured by B86 item 4's
+    send-ahead); THE RECONSTRUCTION AT 0.67 IS THE WINDOW'S DEFAULT (amends B24; 16.8 ms against 32 ms; `VD_TEMPORAL=0`
+    for a run; the capture keeps its reference defaults); THE FREEZES OPEN (~2 a second 50–150 ms, outside the terrain).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

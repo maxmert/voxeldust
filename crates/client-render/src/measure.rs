@@ -91,7 +91,26 @@ impl Default for RenderMeasure {
     }
 }
 
+/// ★ THE WINDOW'S RENDER SCALE BY DEFAULT (ruling B90): the scale the owner judged in flight under the reconstruction (B29:
+/// "flying at 0.67 — All good!"). MEASURED in the window at 2560 × 1440 on the owner's M4 Pro (2026-10-12): a frame every
+/// 16.8 ms (60 a second) against 32 ms at full size with 4× MSAA, where the ground and the sky's per-sample march pass the
+/// display's beat.
+pub(crate) const WINDOW_RENDER_SCALE: f32 = 0.67;
+
 impl RenderMeasure {
+    /// ★ THE WINDOW'S OWN SWITCHES (ruling B90, the owner: "let's take the most optimized version please"): the
+    /// reconstruction ON by default at [`WINDOW_RENDER_SCALE`]; `VD_TEMPORAL=0` turns it off for a run and
+    /// `VD_RENDER_SCALE` states another scale. The headless capture keeps [`RenderMeasure::from_env`]'s defaults: its
+    /// pictures are the gates' references, which change only on the owner's word (B71).
+    pub(crate) fn from_env_window() -> RenderMeasure {
+        let mut measure = RenderMeasure::from_env();
+        measure.temporal = std::env::var(TEMPORAL_ENV).map_or(true, |v| v.trim() != "0");
+        if measure.temporal && measure.render_scale.is_none() {
+            measure.render_scale = Some(WINDOW_RENDER_SCALE);
+        }
+        measure
+    }
+
     pub(crate) fn from_env() -> RenderMeasure {
         let on = |k: &str| std::env::var(k).is_ok_and(|v| v.trim() == "1");
         RenderMeasure {

@@ -182,9 +182,10 @@ pub struct ChunkGeometry {
 pub const RADIAL_STEP_RAD: f64 = 2.0e-7;
 
 /// The bytes a ground vertex costs the engine at the packed rungs (position 12, packed normal
-/// 4, morph normal 4, morph 4, radial 12 — ruling V18's form with item 20 — and the surface 4 and
-/// the height 4, ruling B75 item 4); the exact rungs cost eight more.
-pub const UPLOAD_VERTEX_BYTES: u64 = 44;
+/// 4, morph normal 4, morph 4 — ruling V18's form with item 20 — and the surface 4 and the height 4,
+/// ruling B75 item 4; ★ no radial since ruling B89: the shaders read it from the body's centre); the
+/// exact rungs cost eight more.
+pub const UPLOAD_VERTEX_BYTES: u64 = 32;
 
 impl ChunkGeometry {
     /// THE BYTES THIS CHUNK UPLOADS (ruling V15 item 2, the harvest's byte budget): its vertices

@@ -525,12 +525,10 @@ pub(crate) const ATTRIBUTE_STAR_CORNER: MeshVertexAttribute =
 pub(crate) const ATTRIBUTE_MORPH: MeshVertexAttribute =
     MeshVertexAttribute::new("LadderMorphM", 0x5741_0012, VertexFormat::Float32);
 const MORPH_SHADER_LOCATION: u32 = 8;
-/// THE RADIAL of a ground vertex (step 5): its unit direction from the body's centre in the
-/// realm's frame, three `f32` — shader location 9. The shader needs no centre of the body, so no
-/// material is rewritten as the eye moves.
-pub(crate) const ATTRIBUTE_RADIAL: MeshVertexAttribute =
-    MeshVertexAttribute::new("LadderRadial", 0x5741_0014, VertexFormat::Float32x3);
-const RADIAL_SHADER_LOCATION: u32 = 9;
+// ★ NO RADIAL ATTRIBUTE (ruling B89, the speed step): a ground vertex's unit direction from the body's centre was twelve
+// bytes of each vertex's 44; the shaders now read it from the vertex's own place and the realm's centre in this frame's
+// render space, which the realm's band table carries beside its step (`terrain::BandTableWords::set_frame`) — rewritten
+// every frame like the rest of the table, so no material is rewritten as the eye moves. Shader location 9 stays free.
 /// THE PACKED NORMAL of a ground vertex (ruling V18): two signed 16-bit numbers on the octahedron
 /// (`vd_client::chunks::oct_encode`) — shader location 1, in the engine's normal's place; the
 /// shader unfolds it. Four bytes against the engine's twelve.
@@ -774,8 +772,8 @@ fn msaa_of(word: &str) -> Option<Msaa> {
 
 /// THE GROUND'S VERTEX LAYOUT, for the fade material and the probe alike: the position, the
 /// normal in whichever form the mesh carries (the packed one when the mesh has it, else the
-/// engine's — the renderer packs by rung, `terrain::EXACT_NORMAL_RUNG`), the morph metre and
-/// the radial. The shader learns the form by a define. ★ `paint` (the fade material's): a mesh that
+/// engine's — the renderer packs by rung, `terrain::EXACT_NORMAL_RUNG`) and the morph metre (the
+/// radial is the shader's own since ruling B89). The shader learns the form by a define. ★ `paint` (the fade material's): a mesh that
 /// carries its surface (ruling B75 item 4) hands the vertex stage its rock and height and the
 /// fragment stage the painted colour (the engine's vertex colour).
 fn ground_vertex_layout(
@@ -798,7 +796,6 @@ fn ground_vertex_layout(
         Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
         normal,
         ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
-        ATTRIBUTE_RADIAL.at_shader_location(RADIAL_SHADER_LOCATION),
         ATTRIBUTE_MORPH_NORMAL.at_shader_location(MORPH_NORMAL_SHADER_LOCATION),
     ];
     if layout.0.contains(ATTRIBUTE_SPLAT_CORNER) {
@@ -1353,7 +1350,7 @@ fn run_windowed(handles: RenderHandles) {
     if measure != WindowMeasure::default() {
         tracing::info!(?measure, "the window's measurement switches are set");
     }
-    let render_measure = measure::RenderMeasure::from_env();
+    let render_measure = measure::RenderMeasure::from_env_window();
     App::new()
         .insert_resource(measure)
         .insert_resource(measure.winit_settings())

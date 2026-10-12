@@ -60,6 +60,9 @@ const COMMAND_MAILBOX_CAP: usize = 256;
 /// `--step-hz`.
 const DEFAULT_STEP_HZ: u32 = 20;
 
+/// ★ A core step longer than this is logged as slow (ruling B89): one step's own period at the default 20 Hz.
+const SLOW_CORE_STEP_MS: f64 = 50.0;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     vd_bins::init_tracing();
     let args = parse_args()?;
@@ -527,7 +530,20 @@ fn run_client_loop(
             stop_injected = true;
         }
         let now_s = started_at.elapsed().as_secs_f64();
-        core.step(now_s);
+        // ★ A SLOW CORE STEP, LOGGED (ruling B89, the owner: "I see freezes from time to time"): this thread drains the
+        // network and feeds the picture its positions, so a step that runs long starves the picture's interpolation
+        // buffer and the picture stops while the frames still come. Example: a step that unpacks a burst of fine pieces
+        // for 120 ms names itself here.
+        let step_started = Instant::now();
+        let report = core.step(now_s);
+        let step_ms = step_started.elapsed().as_secs_f64() * 1e3;
+        if step_ms > SLOW_CORE_STEP_MS {
+            tracing::warn!(
+                step_ms,
+                received = report.received,
+                "A SLOW CORE STEP: the network thread's step ran long; the picture's positions wait for it"
+            );
+        }
         // The DevState is consumed ONLY by the dev-control listener (cfg dev-control). A
         // release client (render, no dev-control) builds none of this String-heavy struct
         // every step. `published` is created in `main` regardless (one cheap alloc) so the
