@@ -113,6 +113,14 @@ pub enum ClientControlMsg {
         realm: RealmId,
         digest: [u64; 2],
     },
+    /// ★ THE FINE TILES HELD (the fine ground's way in; owner-approved 2026-10-11 under SL6, ruling B81 Q3: "the client
+    /// acknowledges held tiles"; ruling B87): the finest level of each fine tile the client holds of this realm now,
+    /// stated as tiles land (`(face, tx, ty, level)`), so a gateway that re-sends after a shed send re-sends only what the
+    /// client lacks, never everything. APPENDED (discriminant 9, minor 39).
+    FineHeld {
+        realm: RealmId,
+        tiles: Vec<(u8, u32, u32, u8)>,
+    },
 }
 
 /// The reliable actions a client may take on the world (R-5). One carrier, two consumers (D-39.1).
@@ -481,6 +489,25 @@ pub enum BulkMsg {
         part: u32,
         parts: u32,
         bits: Vec<u8>,
+    },
+    /// ★ ONE PART OF ONE FINISHED FINE TILE (the fine ground's way in, B2; SL6 owner-approved 2026-10-11, ruling B81
+    /// Q3: ONE bulk part variant WITH A LEVEL, never one per level — HR3): `bytes` holds part `part` of `parts` of the
+    /// tile's record (the generator's own form: its side, its square after its cuts and its mean levels, each coded),
+    /// level `level` (1: the 128 m level) of the realm's tile `(face, tx, ty)`. A client assembles the parts and holds
+    /// the tile once every part is here. Parts of at most 32 KiB, so the coder's worst case never passes a frame.
+    /// APPENDED (discriminant 7, minor 37).
+    ///
+    /// **Example.** The belt tile (3, 23, 69) of the home planet leaves its shard as 13 parts of about 420 KB in all,
+    /// shipped to the pilot who stands over it, nearest tiles first.
+    FineTilePart {
+        realm: RealmId,
+        level: u8,
+        face: u8,
+        tx: u32,
+        ty: u32,
+        part: u32,
+        parts: u32,
+        bytes: Vec<u8>,
     },
 }
 
@@ -1322,6 +1349,13 @@ mod tests {
                 },
                 8,
             ),
+            (
+                ClientControlMsg::FineHeld {
+                    realm: RealmId::Planet(7),
+                    tiles: vec![(3, 23, 69, 0)],
+                },
+                9,
+            ),
         ];
         for (msg, index) in client {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
@@ -1457,6 +1491,19 @@ mod tests {
                     bits: vec![0b1010_1010, 0x0F],
                 },
                 6,
+            ),
+            (
+                BulkMsg::FineTilePart {
+                    realm: RealmId::Planet(7),
+                    level: 1,
+                    face: 3,
+                    tx: 23,
+                    ty: 69,
+                    part: 2,
+                    parts: 13,
+                    bytes: vec![1, 2, 3],
+                },
+                7,
             ),
         ];
         for (msg, index) in bulk {

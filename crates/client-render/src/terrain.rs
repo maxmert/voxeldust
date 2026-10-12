@@ -1772,6 +1772,8 @@ struct Drawn {
     /// ★ ITS TAG (`vd_client::arrival`; the entity's and its twin's `MeshTag`): its clock and its
     /// flags — a stand-in's, which the cover switch rewrites.
     tag: u32,
+    /// ★ Drawn on the rough ground (ruling B86 item 7): its fine build lands with the arrival ramp.
+    rough: bool,
 }
 
 /// A coarse caster on the shadow layer (the shadow ladder): its entity and its bytes.
@@ -1867,6 +1869,12 @@ pub struct Terrain {
     /// ★ THE DRAWN STAND-INS (the own-height stand-in): the drawn chunks tagged as stand-ins, so the
     /// cover switch reads them in a walk of their own, never of the drawn set.
     drawn_stand_ins: BTreeSet<(RealmId, ChunkKey)>,
+    /// ★ THE GROUND IN VIEW IS COMPLETE (ruling B86 item 6, the loading screen): latched for the session the first frame
+    /// the picture holds the eye's own realm and every body the eye descends has its wanted set landed, no stand-in drawn
+    /// and nothing on the rough ground; until then the loading screen stands over the running game.
+    pub ground_ready: bool,
+    /// The wanted chunks resident and wanted, over every body the eye descends, while the ground loads.
+    pub ground_progress: (u64, u64),
     /// The drawn chunks' morph counts, summed: fallbacks to the field, seam vertices, vertices.
     morph_totals: [u64; 3],
     /// The drawn chunks' mesh bytes, summed (M8-2's census).
@@ -2016,6 +2024,8 @@ impl Terrain {
             stand_in_keys: BTreeMap::new(),
             awaiting_stand_in: 0,
             drawn_stand_ins: BTreeSet::new(),
+            ground_ready: false,
+            ground_progress: (0, 0),
             shadow_casters: BTreeMap::new(),
             shadow_bytes: 0,
             ladders: BTreeMap::new(),
@@ -2542,11 +2552,14 @@ fn geometry_part(
         normals: pick(&geometry.normals, &kept),
         packed_normals: pick(&geometry.packed_normals, &kept),
         morph_normals: pick(&geometry.morph_normals, &kept),
+        surface: pick(&geometry.surface, &kept),
+        heights: pick(&geometry.heights, &kept),
         radials: pick(&geometry.radials, &kept),
         triangles,
         skirt_start: kept.len() as u32,
         field_level: geometry.field_level,
         built_on: geometry.built_on,
+        rough: geometry.rough,
         bounds: geometry.bounds,
     }
 }
@@ -2577,6 +2590,11 @@ fn mesh_of(
         super::ATTRIBUTE_MORPH_NORMAL,
         bevy::mesh::VertexAttributeValues::Snorm16x2(geometry.morph_normals.clone()),
     )
+    .with_inserted_attribute(
+        super::ATTRIBUTE_SURFACE,
+        bevy::mesh::VertexAttributeValues::Unorm8x4(geometry.surface.clone()),
+    )
+    .with_inserted_attribute(super::ATTRIBUTE_HEIGHT, geometry.heights.clone())
     .with_inserted_indices(packed_indices(geometry));
     // THE NORMAL BY RUNG (ruling V18, `TerrainConfig::exact_normal_rung`): the worker's packed
     // four bytes on the near rungs, the engine's twelve on the far ones; nothing is packed here
@@ -2627,6 +2645,8 @@ fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung:
     let mut packed = Vec::with_capacity(n * 4);
     let mut normals = Vec::with_capacity(n * 4);
     let mut morph_normals = Vec::with_capacity(n * 4);
+    let mut surface: Vec<[u8; 4]> = Vec::with_capacity(n * 4);
+    let mut heights: Vec<f32> = Vec::with_capacity(n * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
     for i in 0..n {
         let base = (i * 4) as u32;
@@ -2638,6 +2658,8 @@ fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung:
             packed.push(geometry.packed_normals[i]);
             normals.push(geometry.normals[i]);
             morph_normals.push(geometry.morph_normals[i]);
+            surface.push(geometry.surface[i]);
+            heights.push(geometry.heights[i]);
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -2653,6 +2675,11 @@ fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung:
         super::ATTRIBUTE_MORPH_NORMAL,
         bevy::mesh::VertexAttributeValues::Snorm16x2(morph_normals),
     )
+    .with_inserted_attribute(
+        super::ATTRIBUTE_SURFACE,
+        bevy::mesh::VertexAttributeValues::Unorm8x4(surface),
+    )
+    .with_inserted_attribute(super::ATTRIBUTE_HEIGHT, heights)
     .with_inserted_indices(bevy::mesh::Indices::U32(indices));
     if geometry.key.rung < exact_normal_rung {
         mesh.insert_attribute(
@@ -3207,6 +3234,21 @@ pub(crate) fn sync_terrain(
             ..
         } = &mut *terrain;
         for (realm, table) in band_tables.iter_mut() {
+            // ★ THE SNOW LINE (ruling B75 item 4): the realm's own, from the moment its artifact is whole; stated in the
+            // log when it changes, at the equator, at 45° and at the pole (metres over the ladder radius).
+            let snow = lane.snow_line(*realm).unwrap_or([0.0; 4]);
+            if snow != table.words.snow {
+                let at = |s: f32| snow[0] + snow[1] * s * s + snow[2] * s.abs();
+                tracing::info!(
+                    realm = ?realm,
+                    drawn = snow[3] > 0.5,
+                    equator_m = at(0.0),
+                    lat45_m = at(std::f32::consts::FRAC_1_SQRT_2),
+                    pole_m = at(1.0),
+                    "the realm's snow line (the summer's freezing line, ruling B75)"
+                );
+            }
+            table.words.snow = snow;
             let (Some(ladder), Some(body)) = (ladders.get(realm), lane.body(*realm)) else {
                 // A realm with no ladder this frame keeps its rows; its clock still moves, so a
                 // ramp under way runs on.
@@ -3520,6 +3562,10 @@ pub(crate) fn sync_terrain(
                             asked.insert((*realm, col));
                         }
                     }
+                } else if lane.upgradable(*realm, *key) {
+                    // ★ A ROUGH CHUNK WHOSE FINE TILES HAVE LANDED (ruling B86 item 7) is built again on the fine
+                    // ground; the rough one stands until it lands.
+                    lane.upgrade(*realm, *key, ladder.wanted.priority_of(index, *key));
                 }
             }
             ladder.landed |= whole;
@@ -3563,6 +3609,31 @@ pub(crate) fn sync_terrain(
         now_s,
     );
     terrain.note_work(WORK_REQUEST, work_request, 1, now_s);
+    // ★ THE LOADING SCREEN'S QUESTION (ruling B86 item 6): is the ground in view complete? Asked of what the renderer
+    // already holds — the picture holds the eye's own realm, and every body the eye descends has its wanted set landed,
+    // no stand-in drawn (the coarse ground at its own height over the valleys) and nothing on the rough ground. Once it
+    // is, the screen goes for the session: in flight the ladder never stands in again.
+    if !terrain.ground_ready {
+        let own_in_picture = picture_realm.is_some_and(|r| scene.get(r).is_some());
+        let (mut resident, mut wanted) = (0u64, 0u64);
+        let mut whole = own_in_picture;
+        for eb in &with_bodies {
+            let Some(ladder) = terrain.ladders.get(&eb.realm) else {
+                whole = false;
+                continue;
+            };
+            wanted += ladder.wanted.keys.len() as u64;
+            resident += ladder.wanted.keys.iter().filter(|k| terrain.lane.is_resident(eb.realm, **k)).count() as u64;
+            whole &= ladder.landed
+                & (terrain.lane.rough_resident(eb.realm) == 0)
+                & !terrain.drawn_stand_ins.iter().any(|(r, _)| *r == eb.realm);
+        }
+        terrain.ground_progress = (resident, wanted);
+        terrain.ground_ready = whole;
+        if whole {
+            tracing::info!(frame = terrain.frames, wanted, "the ground in view is complete: the loading screen goes");
+        }
+    }
     // ★ THE BOARDING INSTRUMENT (2026-09-14): a frame that released a WHOLESALE count of one
     // realm's chunks names itself — the realm, the count, whether the descent ran, the eye in the
     // body's own frame before and after it, the lead offset, the wanted set's size on both sides,
@@ -3756,18 +3827,26 @@ pub(crate) fn sync_terrain(
         // that lands is stamped with this frame's clock, so it enters on the drawn surface of the
         // coarser chunk that stood in for it and rises into its own place over half a second
         // (ruling B18 Q7). A rebuilt key that was already drawn, and a top-rung chunk (no stand-in),
-        // enter whole (nought).
-        let whole = terrain.entities.contains_key(&(realm, key));
+        // enter whole (nought) — ★ but the fine build of a key drawn on the rough ground (ruling B86 item 7) lands like
+        // a new chunk: on the coarser surface, rising into its own shape over the ramp, never a whole jump.
+        let upgrade = terrain
+            .entities
+            .get(&(realm, key))
+            .is_some_and(|d| d.rough & !ready.geometry.rough);
+        let whole = terrain.entities.contains_key(&(realm, key)) & !upgrade;
         // ★ THE OWN-HEIGHT STAND-IN: drawn as a stand-in (asked for as one, no ring wants it), and
         // rising from one that stands at its own height (a next-rung chunk under it, drawn as an
         // uncovered stand-in).
         let drawn_as_stand_in = !wanted & stand_in;
         let parents = vd_client::chunks::parent_keys(&body, key);
-        let own_height = parents.iter().any(|p| {
-            terrain.entities.get(&(realm, *p)).is_some_and(|d| {
-                vd_client::arrival::tag_stand_in(d.tag) & !vd_client::arrival::tag_covered(d.tag)
-            })
-        });
+        // The fine build of a rough key starts on its coarser surface itself, unsunk (B86 item 7): the rough ground it
+        // replaces stood at its own height.
+        let own_height = upgrade
+            || parents.iter().any(|p| {
+                terrain.entities.get(&(realm, *p)).is_some_and(|d| {
+                    vd_client::arrival::tag_stand_in(d.tag) & !vd_client::arrival::tag_covered(d.tag)
+                })
+            });
         let next_drawn = parents
             .iter()
             .any(|p| terrain.entities.contains_key(&(realm, *p)));
@@ -3883,6 +3962,7 @@ pub(crate) fn sync_terrain(
                 bytes,
                 caster,
                 tag: stamp,
+                rough: ready.geometry.rough,
             },
         ) {
             // A key drawn twice (refutation of the ladder, finding 2): the old entity, its twin,
@@ -4404,6 +4484,9 @@ pub(crate) fn sync_terrain(
                     hole_keys,
                     margin_missing,
                     stale_builds: counters.stale_builds,
+                    rough_builds: counters.rough_builds,
+                    rough_upgrades: counters.rough_upgrades,
+                    rough_resident: terrain.lane.rough_resident(*realm) as u64,
                     lattice_edge,
                     eyes: with_bodies
                         .iter()
@@ -4645,6 +4728,9 @@ struct BandTableWords {
     bytes: Vec<u8>,
     rows: Vec<[f32; 4]>,
     clock: u32,
+    /// ★ THE REALM'S SNOW LINE (ruling B75 item 4; `ChunkLane::snow_line`): `[base, per sin², per |sin|, 1]`, or all
+    /// nought where the realm draws no snow; the table's last row, written with every fill.
+    snow: [f32; 4],
 }
 
 impl BandTableWords {
@@ -4656,11 +4742,13 @@ impl BandTableWords {
             RealmStep::IDENTITY.rows(),
             &rows,
             &rows,
+            [0.0; 4],
         );
         BandTableWords {
             bytes,
             rows,
             clock: clock[0],
+            snow: [0.0; 4],
         }
     }
 
@@ -4675,6 +4763,7 @@ impl BandTableWords {
             RealmStep::IDENTITY.rows(),
             &self.rows,
             &last_rows,
+            self.snow,
         );
     }
 
@@ -4706,12 +4795,15 @@ pub(crate) struct BandGpu<'w> {
 ///   clock, and the count of rows (T1);
 /// - the realm's step, three `vec4<f32>` rows of a 3 × 4 matrix (T1, `vd_client::motion`);
 /// - this frame's rows, one `vec4<f32>` each, then LAST frame's rows (the same count; this frame's
-///   again when the count changed, so no row is read past the table).
+///   again when the count changed, so no row is read past the table);
+/// - ★ THE REALM'S SNOW LINE (ruling B75 item 4), one `vec4<f32>` after them: the row at twice the count, which only
+///   the fade shader reads.
 fn band_table_bytes(
     clock: [u32; 3],
     step: [[f32; 4]; 3],
     rows: &[[f32; 4]],
     last_rows: &[[f32; 4]],
+    snow: [f32; 4],
 ) -> Vec<u8> {
     let last = if last_rows.len() == rows.len() {
         last_rows
@@ -4719,11 +4811,11 @@ fn band_table_bytes(
         rows
     };
     let count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
-    let mut out = Vec::with_capacity(BAND_TABLE_STEP_AT + 48 + 32 * rows.len());
+    let mut out = Vec::with_capacity(BAND_TABLE_STEP_AT + 64 + 32 * rows.len());
     for word in [clock[0], clock[1], clock[2], count] {
         out.extend_from_slice(&word.to_le_bytes());
     }
-    for row in step.iter().chain(rows).chain(last) {
+    for row in step.iter().chain(rows).chain(last).chain([&snow]) {
         for value in row {
             out.extend_from_slice(&value.to_le_bytes());
         }
@@ -5002,7 +5094,8 @@ mod band_table_tests {
         let second = vec![[9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]];
         let mut table = BandTableWords::new([100, 512, 0, 0], first.clone());
         let b = &table.bytes;
-        assert_eq!(b.len(), BAND_TABLE_STEP_AT + 48 + 16 * 4);
+        assert_eq!(b.len(), BAND_TABLE_STEP_AT + 48 + 16 * 4 + 16);
+        assert_eq!(row(b, 4), [0.0; 4], "no snow line yet");
         assert_eq!([0, 4, 8, 12].map(|at| word(b, at)), [100, 512, 100, 2]);
         assert_eq!(step(b), RealmStep::IDENTITY.rows());
         assert_eq!(
@@ -5010,9 +5103,11 @@ mod band_table_tests {
             [first[0], first[1], first[0], first[1]]
         );
 
+        table.snow = [4_000.0, -1_500.0, 900.0, 1.0];
         table.fill([117, 512, 0, 0], second.clone());
         let b = &table.bytes;
         assert_eq!([0, 4, 8, 12].map(|at| word(b, at)), [117, 512, 100, 2]);
+        assert_eq!(row(b, 4), [4_000.0, -1_500.0, 900.0, 1.0], "the snow line rides last");
         assert_eq!(step(b), RealmStep::IDENTITY.rows());
         assert_eq!(
             [0, 1, 2, 3].map(|i| row(b, i)),
@@ -5036,7 +5131,8 @@ mod band_table_tests {
         table.fill([134, 512, 0, 0], three.clone());
         let b = &table.bytes;
         assert_eq!([0, 4, 8, 12].map(|at| word(b, at)), [134, 512, 117, 3]);
-        assert_eq!(b.len(), BAND_TABLE_STEP_AT + 48 + 16 * 6);
+        assert_eq!(b.len(), BAND_TABLE_STEP_AT + 48 + 16 * 6 + 16);
+        assert_eq!(row(b, 6), [4_000.0, -1_500.0, 900.0, 1.0]);
         assert_eq!((3..6).map(|i| row(b, i)).collect::<Vec<_>>(), three);
     }
 }

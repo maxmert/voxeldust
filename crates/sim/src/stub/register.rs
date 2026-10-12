@@ -109,8 +109,8 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(crate::stub::containment::ExteriorScan::default());
     world.insert_resource(crate::stub::exterior::RealmStore::default());
     world.insert_resource(crate::stub::artifact_ship::ArtifactSource::default());
-    world.insert_resource(crate::stub::artifact_ship::ArtifactShipped::default());
     world.insert_resource(crate::stub::artifact_ship::ArtifactWants::default());
+    world.insert_resource(crate::stub::fine_ship::FineSource::default());
     world.insert_resource(crate::stub::lineage::LineageOwed::default());
     world.insert_resource(crate::stub::lineage::PendingLineage::default());
     world.insert_resource(RealmRegions::default());
@@ -243,6 +243,8 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
             evaluate_realm_aoi,
             emit_window_rosters,
             crate::stub::artifact_ship::emit_artifact,
+            // ★ THE FINE SHIP (B2) after the artifact's: the same occupants, the same pose.
+            crate::stub::fine_ship::emit_fine,
         )
             .chain()
             .after(emit_realm_frames)

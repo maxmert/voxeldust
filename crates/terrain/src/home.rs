@@ -28,7 +28,7 @@ const HOME_GOLDEN_Z: &str = include_str!("../tests/golden_home_z.txt");
 /// ★ THE MEASURED HALF OF THE HOME WORLD'S IDENTITY (slice 8c stage C4c): the eight self-check
 /// chunks read through the golden fields, folded. Recorded with the fields; a host that folds another
 /// word has drifted, and its world hello is refused by name.
-pub const HOME_IDENTITY_MEASURED: u64 = 0xf182_f5ca_7c79_b497;
+pub const HOME_IDENTITY_MEASURED: u64 = 0xac9e_c6e9_825d_d71a;
 
 /// ★ THE HOME PLANET'S SEA (slice 8c stage C5; gate G-SEA): the level the solve finds for the
 /// planet's water inventory over its eroded field, whole metres over the ladder radius, and the
@@ -39,9 +39,12 @@ pub const HOME_IDENTITY_MEASURED: u64 = 0xf182_f5ca_7c79_b497;
 /// and 7 811 at generator 22; 3 593 m and 7 808 at generator 23 (the smooth rebound and the flats'
 /// potential, phase 1 of the ground step); 3 483 m and 7 584 at generator 24 (phase 2's macro change:
 /// the belts' wedges, the joint law on the mixed axis, the landscape's time, the water's own paths);
-/// 3 487 m and 7 588 at generator 25 (the rock kept exactly and the 414-pass axis, ruling B56).
-pub const HOME_PLANET_SEA_M: i32 = 3_487;
-pub const HOME_PLANET_OCEAN_SHARE_Q4: u32 = 7_588;
+/// 3 487 m and 7 588 at generator 25 (the rock kept exactly and the 414-pass axis, ruling B56);
+/// 3 660 m and 7 604 at generator 26 (Rho8, the first land's relief and margins, the belts by the
+/// crust share, eight sweeps and four routings a pass, the climate and the running sea every pass;
+/// rulings B58–B69), recorded by the one-core solve on 2026-10-09.
+pub const HOME_PLANET_SEA_M: i32 = 3_660;
+pub const HOME_PLANET_OCEAN_SHARE_Q4: u32 = 7_604;
 
 /// The golden fields, parsed from the literal in the build. A torn literal is a defect, not a
 /// refusal: the build carries it, so it panics here and never ships.

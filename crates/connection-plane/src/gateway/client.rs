@@ -143,6 +143,9 @@ pub(crate) fn on_client_control(
                     artifact_held: std::collections::BTreeMap::new(),
                     artifact_parts_sent: std::collections::BTreeMap::new(),
                     artifact_tiles_sent: std::collections::BTreeMap::new(),
+                    fine_sent: std::collections::BTreeMap::new(),
+                    fine_acked: std::collections::BTreeMap::new(),
+                    eye: Default::default(),
                     artifact_redrive: Default::default(),
                     held_bulk: Vec::new(),
                     client,
@@ -271,6 +274,19 @@ pub(crate) fn on_client_control(
             if let Some(session) = session_id.and_then(|id| sessions.by_session.get_mut(&id)) {
                 session.artifact_held.insert(realm, digest);
                 stats.artifact_held_stated += 1;
+            }
+        }
+        // ★ THE FINE TILES HELD (ruling B81 Q3): the finest level of each tile the client holds, kept on the session
+        // so a re-drive re-sends only what the client lacks.
+        ClientControlMsg::FineHeld { realm, tiles } => {
+            let session_id = sessions.by_client.get(&client).copied();
+            if let Some(session) = session_id.and_then(|id| sessions.by_session.get_mut(&id)) {
+                let acked = session.fine_acked.entry(realm).or_default();
+                for (face, tx, ty, level) in tiles {
+                    let held = acked.entry((face, tx, ty)).or_insert(level);
+                    *held = (*held).min(level);
+                    stats.fine_held_stated += 1;
+                }
             }
         }
     }
@@ -588,6 +604,8 @@ pub(crate) fn on_shard_frame(
     // pin on the one hop that must stay sub-millisecond. The re-tag below is a leading-varint splice with
     // no decode at all.
     let mut retagged: BTreeMap<SubId, vd_sim::io::Bytes> = BTreeMap::new();
+    // ★ THE BODY, DECODED AT MOST ONCE (ruling B88), and only when a session behind it wants its eye this beat.
+    let mut decoded = None;
     let targets = recipients.unwrap_or_else(|| sessions.subscribers_of(from));
     for session_id in targets {
         let Some(session) = sessions.by_session.get_mut(&session_id) else {
@@ -635,6 +653,15 @@ pub(crate) fn on_shard_frame(
         if realm_fence.is_stale_against(accepted) {
             stats.stale_frames_dropped += 1;
             continue;
+        }
+        // ★ THE EYE, ONCE A BEAT (ruling B88): the avatar's position in the realm it stands in, read off an accepted
+        // frame of that realm's own shard; a frame that does not hold the avatar leaves the want for the next one.
+        if session.eye.wanted
+            && let Some(entity) = session.eye.entity
+            && let Some(at) = super::artifact::avatar_at(&mut decoded, &snapshot_bytes, entity)
+        {
+            session.eye.at = Some(at);
+            session.eye.wanted = false;
         }
         // 1d.5a: an ACCEPTED, past-fence frame ADVANCES this observer-sub's delivery high-water —
         // the standing (a) demote-predicate input. Only delivered (forwarded) frames count; a

@@ -47,6 +47,7 @@ use crate::carve::{
     CAVERN_STRIDE, CAVERN_STRIDE_LOG2, caverns_carve_at, cell_steps, tube_region, tubes_carve_at,
     tubes_near,
 };
+use crate::fine::read::FineZ;
 use crate::height::biome_of_code;
 use crate::macro_lattice::MacroLattice;
 use crate::strata::{Biome, Stratum};
@@ -330,7 +331,7 @@ impl ColumnRead<'_> {
         // row — a body with no artifact, a pyramid level, a tile not yet here — stands on the
         // STATED default, so the rock is never a guess.
         let mut province = crate::strata::DEFAULT_PROVINCE.code();
-        let z = match (self.field, self.lattice) {
+        let (z, first) = match (self.field, self.lattice) {
             (Some(f), Some(l)) => {
                 // A corner phantom names no cell: its `Z` is the key face's corner node,
                 // which the read reaches by the cell the phantom would be on that face.
@@ -341,17 +342,34 @@ impl ColumnRead<'_> {
                 } else {
                     (Face::from_index(site.face).unwrap_or(face), site.i, site.j)
                 };
-                // ★ THE SOLVED FIELD'S OWN SLOPE (2026-09-21): the share that says whether this
-                // column stands on a RANGE the solve raised or on a PLAIN it left. The column reads
-                // it off the very field its `Z` comes from, so a chunk and its halo agree by
-                // construction — the share is a function of the site, never of which chunk asked.
-                slope_share =
-                    crate::artifact::slope_share(&self.slope_charter, l, f, zf, rung, zi, zj)?;
                 province = crate::artifact::sample_province(l, f, zf, rung, zi, zj)
                     .unwrap_or(crate::strata::DEFAULT_PROVINCE.code());
-                crate::artifact::sample_z(l, f, zf, rung, zi, zj)?
+                match f.fine_z(zf, rung, rung, zi, zj) {
+                    // ★ THE FINE GROUND (B1 (g)): the finished tiles' own height at the column, and NO
+                    // noise octave under it (B81 Q1: the solve's ground is the ground). A tile of the
+                    // stencil not held makes no chunk: the coarser rung stands (F9, B81 Q5).
+                    FineZ::Held(z) => (z, vd_recipe::height::OCTAVES_CAP),
+                    FineZ::Missing(_) => return None,
+                    FineZ::Outside => {
+                        // ★ THE SOLVED FIELD'S OWN SLOPE (2026-09-21): the share that says whether
+                        // this column stands on a RANGE the solve raised or on a PLAIN it left. The
+                        // column reads it off the very field its `Z` comes from, so a chunk and its
+                        // halo agree by construction — the share is a function of the site, never
+                        // of which chunk asked.
+                        slope_share = crate::artifact::slope_share(
+                            &self.slope_charter,
+                            l,
+                            f,
+                            zf,
+                            rung,
+                            zi,
+                            zj,
+                        )?;
+                        (crate::artifact::sample_z(l, f, zf, rung, zi, zj)?, self.first)
+                    }
+                }
             }
-            _ => Gi::ZERO,
+            _ => (Gi::ZERO, self.first),
         };
         let dir =
             vd_recipe::plan::site_direction(self.charter, i32::from(site.face), site.i, site.j);
@@ -360,7 +378,7 @@ impl ColumnRead<'_> {
             dir,
             &FieldRead {
                 z,
-                first: self.first,
+                first,
                 slope_share,
             },
         );
@@ -979,6 +997,24 @@ mod tests {
 
     fn surface_z(m: &BodyDefinition, face: Face, rung: u8, x: i32, y: i32) -> i32 {
         crate::digest::surface_chunk_z(m, face, rung, x, y)
+    }
+
+    /// ★ THE FINE GROUND IN A CHUNK (B1 (g)): a column whose field holds its fine height stands on it with NO noise
+    /// octave (the surface is the bench over the radius and the height alone), and a column whose tile is missing makes
+    /// no chunk, so the coarser rung stands.
+    #[test]
+    fn a_column_on_held_fine_ground_reads_it_with_no_octave_and_a_missing_tile_makes_no_chunk() {
+        use crate::fine::l1::TileKey;
+        use crate::fine::read::test_field::OneFineRead;
+        let body = home_planet();
+        let face = Face::from_index(0).expect("a face");
+        let z0 = Gi::new(250 * STEPS_PER_M) << LENGTH_BITS;
+        let held = OneFineRead(FineZ::Held(z0));
+        let chunk = column_field(&body, Some(&held), face, 3, 10, 12).expect("built");
+        let want = vd_recipe::terrace::terrace(&body.terrace_at(3), body.radius + z0);
+        assert_eq!(chunk.columns.iter().filter(|c| c.1 != want).count(), 0);
+        let missing = OneFineRead(FineZ::Missing(TileKey { face, tx: 0, ty: 0 }));
+        assert!(column_field(&body, Some(&missing), face, 3, 10, 12).is_none());
     }
 
     /// The column of the first `count` sampled columns whose surface stands deepest under the sea,
@@ -1673,12 +1709,12 @@ mod tests {
     fn two_neighbours_agree_on_their_shared_column_under_the_artifact() {
         use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
         use crate::lattice::{HALO, SampleBox, box_setup};
-        use crate::solve::{Schedule, solve_full};
+        use crate::solve::Schedule;
         let moon = home_moon();
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =

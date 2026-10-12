@@ -1370,6 +1370,13 @@ pub fn column_span(
     {
         return (span, false);
     }
+    // ★ THE ROUGH GROUND (ruling B86 item 7): where the fine ground's tiles have not landed, the column's chunks are built
+    // on the field under it — so its span is read there too, provisional, and read again until the tiles land.
+    if let Some(field) = artifact.rough_at_rung(&lattice, col.rung)
+        && let Some(span) = on(&*field)
+    {
+        return (span, true);
+    }
     let whole = (1..=artifact.head.levels)
         .find_map(|k| artifact.level(k))
         .and_then(|level| on(&**level));
@@ -2128,13 +2135,13 @@ mod tests {
         use vd_terrain::home::{
             HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
         };
-        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_terrain::solve::Schedule;
         use vd_wire::channels::BulkMsg;
         let moon = home_moon();
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =

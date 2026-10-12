@@ -41,6 +41,10 @@ use crate::render_snapshot::RenderSnapshot;
 use crate::tuning::ClientInterpTuning;
 use crate::view::DeliveredView;
 
+/// How many fine tiles one `ClientControlMsg::FineHeld` statement carries at most: about eleven bytes a tile, so a
+/// statement stays a few kilobytes on the reliable lane however many tiles land in one frame.
+pub const FINE_HELD_PER_MSG: usize = 512;
+
 /// Where the client is in its session lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientPhase {
@@ -142,6 +146,8 @@ pub struct ClientState {
     /// THE STATEMENTS WAITING TO GO OUT (slice 8c stage C4c): the realms whose pyramid became
     /// whole, with the digest held, each stated once as `ArtifactHeld` on the next send.
     pending_artifact_held: Vec<(vd_core::pose::RealmId, [u64; 2])>,
+    /// How many fine tiles' held levels this client stated (ruling B81 Q3).
+    pub fine_held_sent: u64,
     /// THE ORIGIN MARKER (§2.7): the realm the current scene is composed in, as the level stated
     /// it. `None` before the first level. The diagnosis surface (`DevState.origin`) reads it —
     /// the pixel gates' "origin marker == home realm" assert.
@@ -197,6 +203,7 @@ impl ClientState {
             pending_sky_held: None,
             artifacts: ArtifactReceiver::default(),
             pending_artifact_held: Vec::new(),
+            fine_held_sent: 0,
             sky_draw: None,
             sky_anchor: None,
             sky_anchor_track: None,
@@ -655,6 +662,21 @@ impl ClientState {
                 .expect("closed wire enums serialize");
             let _ = self.send_bytes(transport, MsgClass::Control, buf);
         }
+        // ★ THE FINE TILES HELD (ruling B81 Q3: the client acknowledges held tiles), each tile's finest level once it
+        // lands, by realm, in statements of at most `FINE_HELD_PER_MSG` tiles.
+        let mut by_realm: std::collections::BTreeMap<vd_core::pose::RealmId, Vec<(u8, u32, u32, u8)>> =
+            std::collections::BTreeMap::new();
+        for (realm, tile) in self.artifacts.take_fine_held() {
+            by_realm.entry(realm).or_default().push(tile);
+        }
+        for (realm, tiles) in by_realm {
+            for chunk in tiles.chunks(FINE_HELD_PER_MSG) {
+                let buf = postcard::to_allocvec(&ClientControlMsg::FineHeld { realm, tiles: chunk.to_vec() })
+                    .expect("closed wire enums serialize");
+                let _ = self.send_bytes(transport, MsgClass::Control, buf);
+                self.fine_held_sent += chunk.len() as u64;
+            }
+        }
         // ★ THE WORLD HELLO (slice 7; SL10 clause 3): once, right after `Welcome`, before the first
         // input. The gateway compares both halves with its own and refuses a mismatch by name.
         let mut world_sent = 0;
@@ -1021,6 +1043,15 @@ impl ClientState {
                     .realms()
                     .filter(|(_, c)| c.coast_held())
                     .map(|(r, _)| format!("{r:?}"))
+                    .collect(),
+                // ★ THE FINE TILES (B2): parts in, tiles whole, and each realm's book.
+                fine_parts: self.artifacts.counters.fine_parts,
+                fine_tiles: self.artifacts.counters.fine_tiles,
+                fine_held: self
+                    .artifacts
+                    .book()
+                    .realms()
+                    .filter_map(|(r, c)| c.fine().map(|b| (format!("{r:?}"), b.len() as u64)))
                     .collect(),
             },
             sky: self
@@ -1542,12 +1573,12 @@ mod tests {
     #[test]
     fn artifact_parts_are_assembled_and_the_held_word_goes_out_once() {
         use vd_terrain::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
-        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_terrain::solve::Schedule;
         let moon = home_moon();
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
@@ -3410,6 +3441,9 @@ mod tests {
                     hole_keys: Vec::new(),
                     margin_missing: 0,
                     stale_builds: 0,
+                    rough_builds: 0,
+                    rough_upgrades: 0,
+                    rough_resident: 0,
                     lattice_edge: 0,
                     eyes: vec![],
                     eye_cell: [0, 0, 0],

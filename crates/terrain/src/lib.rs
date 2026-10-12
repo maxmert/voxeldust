@@ -51,6 +51,8 @@ pub mod compose;
 pub mod craters;
 pub mod digest;
 pub mod extract;
+pub mod fine;
+pub mod flood;
 pub mod gf;
 pub mod gpu;
 pub mod height;
@@ -66,7 +68,10 @@ pub mod river;
 pub mod seat;
 pub mod solve;
 pub mod strata;
+pub mod surface;
 pub mod tag;
+#[cfg(test)]
+mod test_solves;
 pub mod units;
 
 pub use body::{BodyDefinition, BodyFacts, OCTAVES};

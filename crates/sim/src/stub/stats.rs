@@ -620,4 +620,8 @@ pub struct StubStats {
     pub artifact_wants_foreign: u64,
     /// THE FAR-VIEW SHIP — wants at a digest this realm does not hold, dropped.
     pub artifact_wants_stale: u64,
+    /// ★ THE FINE SHIP (B2) — parts of finished fine tiles sent, summed over occupants.
+    pub fine_parts_sent: u64,
+    /// THE FINE SHIP — finished fine tiles whose every part went out, each once per session.
+    pub fine_tiles_sent: u64,
 }

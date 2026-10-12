@@ -4,6 +4,9 @@
 //! `vd_terrain::home::HOME_IDENTITY_MEASURED`. Run after a deliberate change of the solve, then
 //! commit the file and the constant together with a `GENERATOR_VERSION` bump.
 //!
+//! ★ ON ONE CORE, ON PURPOSE (ruling B72 item 1): the pins it prints are the one-core solve's, and
+//! the artifact pin gate solves on all the host's cores, so the gate proves the same bytes too.
+//!
 //! `cargo run --release -p vd-bins --example golden_z_record`
 
 use vd_bins::artifact_worker::{SolveJob, run_solve};

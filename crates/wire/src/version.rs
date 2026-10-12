@@ -361,7 +361,21 @@ pub const PROTO_MAJOR: u16 = 1;
 /// every host's band reads them from the head (only the shard holds every row). A FIELD APPEND to an
 /// arm minor 35 shipped, which postcard cannot make additive, so [`PROTO_MINOR_FLOOR`] moves to 36: a
 /// minor-35 client is refused, never served a head it would mis-frame.
-pub const PROTO_MINOR: u16 = 36;
+/// **37** — THE FINE TILES (owner-approved 2026-10-11 under SL6, ruling B81 Q3: "one bulk part variant, the client
+/// acknowledges"): a new `BulkMsg::FineTilePart` (disc 7) carries one part of one finished fine tile — the level, the
+/// tile's key, the part and the part count — on the occupant's own audience, so a client reads the planet's solved
+/// 128 m ground it stands over. APPENDED, so the floor does not move: a gateway relays the variant only to a session
+/// that negotiated 37.
+/// **38** — THE FINE TILES' LEVELS (owner-approved 2026-10-12, ruling B86 item 3: far copies first): a
+/// `BulkMsg::FineTilePart`'s record carries a RANGE of a tile's levels, from a finer one to the coarsest, so a far tile
+/// ships only its coarse copies and its finer levels follow when the occupant comes near. The variant's shape is
+/// unchanged and the same data crosses, but a minor-37 client cannot read the new record's form, so a gateway relays the
+/// fine parts only to a session that negotiated 38; nothing else changed, so the floor does not move.
+/// **39** — THE FINE TILES HELD (owner-approved 2026-10-11 under SL6, ruling B81 Q3: "the client acknowledges held
+/// tiles"; ruling B87): a new `ClientControlMsg::FineHeld` (disc 9) states the finest level of each fine tile the client
+/// holds of a realm, as tiles land, so a gateway re-sends after a shed send only what the client lacks. APPENDED, so the
+/// floor does not move: an older client states nothing and is re-sent everything, as before.
+pub const PROTO_MINOR: u16 = 39;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -625,8 +639,11 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 36,
-            "minor 36 is THE DRAWN GROUND'S RANGE (owner-approved 2026-10-05 under SL6, ruling B55): ArtifactHead carries low_m and high_m, a field append, the floor at 36; \
+            PROTO_MINOR, 39,
+            "minor 39 is THE FINE TILES HELD (owner-approved 2026-10-11 under SL6, ruling B81 Q3): FineHeld (disc 9) on ClientControlMsg, the finest level of each fine tile the client holds, appended, the floor unmoved; \
+             minor 38 is THE FINE TILES' LEVELS (owner-approved 2026-10-12, ruling B86 item 3): a FineTilePart's record carries a range of a tile's levels, the variant's shape unchanged, fine parts relayed only at 38, the floor unmoved; \
+             minor 37 is THE FINE TILES (owner-approved 2026-10-11 under SL6, ruling B81 Q3): FineTilePart (disc 7) on BulkMsg, one part of one finished fine tile with its level and key, appended, the floor unmoved; \
+             minor 36 is THE DRAWN GROUND'S RANGE (owner-approved 2026-10-05 under SL6, ruling B55): ArtifactHead carries low_m and high_m, a field append, the floor at 36; \
              minor 35 is THE WINDOW FRAME'S PARTS (owner-approved 2026-09-27 under SL6): WindowFramePart (disc 17) on ShardToGateway, the window frame plus its part number and the tick's part count, so the gateway builds a tick's picture only from a whole stamp; appended and mesh-only, the floor unmoved; \
              minor 34 is THE COAST MASK (owner-approved 2026-09-22, ruling W10): ArtifactHead carries coast_parts and ArtifactCoast (disc 6) ships the mask's bits, a field append, the floor at 34; \
              minor 33 is THE PYRAMID'S WATER WORD (owner-approved 2026-09-21): ArtifactPyramid carries water_m beside z_m, a reshape, the floor at 33; \

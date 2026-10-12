@@ -69,6 +69,14 @@ pub const PYRAMID_PART_WORDS: usize = 16_384;
 pub const COAST_PART_BYTES: usize = 32_768;
 // One field a part: under the TLV field cap by construction.
 const _: () = assert!(COAST_PART_BYTES < vd_core::tlv::MAX_FIELD_BYTES);
+/// ★ THE FINE TILES' part rows (the fine ground's way in, B2; the way-in design §4.2): one row per part of one tile's
+/// record — the raw solve the shard keeps for a neighbour solved later, or the finished tile it ships. The sim never
+/// names the generator: a part is bytes it stores and ships, and the record's form is the generator's own.
+pub const FINE_PART_SCHEMA: SchemaId = SchemaId(41);
+/// ★ A FINE PART's size in BYTES: 32 KiB, the artifact parts' weight and the wire's cut, so a shard ships what it stores
+/// and the coder's worst case (four bytes a sample) never passes the field cap.
+pub const FINE_PART_BYTES: usize = 32_768;
+const _: () = assert!(FINE_PART_BYTES < vd_core::tlv::MAX_FIELD_BYTES);
 // Two fields a part now (the heights and the water words): each under the cap.
 const _: () = assert!(PYRAMID_PART_WORDS * 2 < vd_core::tlv::MAX_FIELD_BYTES);
 
@@ -135,8 +143,12 @@ const ARTIFACT_HEAD: u8 = 4;
 const ARTIFACT_TILE: u8 = 5;
 const ARTIFACT_PYRAMID: u8 = 6;
 const ARTIFACT_PYRAMID_PART: u8 = 7;
-/// The coast mask's parts (2026-09-22, ruling W10). Append-only numbering: 8 is the next free tag.
+/// The coast mask's parts (2026-09-22, ruling W10).
 const ARTIFACT_COAST_PART: u8 = 8;
+/// ★ THE FINE TILES' families (B2): the raw solves and the finished tiles, each a tile's parts. Append-only numbering:
+/// 11 is the next free tag.
+const FINE_RAW: u8 = 9;
+const FINE_FINISHED: u8 = 10;
 
 /// The artifact rows' tags — their own numbering, one schema each, append-only.
 mod art {
@@ -167,6 +179,127 @@ mod art {
     pub const COAST_INDEX: u16 = 1;
     pub const COAST_COUNT: u16 = 2;
     pub const COAST_BITS: u16 = 3;
+}
+
+/// ★ WHICH FORM OF A FINE TILE a row holds (B2): the raw solve, kept for a neighbour solved later, or the finished tile,
+/// shipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FineForm {
+    Raw,
+    Finished,
+}
+
+/// ★ A FINE TILE's place in the store (B2): its form, the INPUT WORD it was solved from (the artifact's digest and the
+/// generator's fine version folded, so a world change never serves an old tile — the way-in design §4.2), its level, its
+/// face and its index on the face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FineAt {
+    pub form: FineForm,
+    pub input: u64,
+    pub level: u8,
+    pub face: u8,
+    pub tx: u32,
+    pub ty: u32,
+}
+
+/// One stored part of a fine tile's record: which part of how many, and its bytes, opaque to the sim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinePart {
+    pub part: u32,
+    pub parts: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// The key prefix of every part of one fine tile.
+#[must_use]
+pub fn fine_tile_prefix(at: &FineAt) -> Vec<u8> {
+    let family = match at.form {
+        FineForm::Raw => FINE_RAW,
+        FineForm::Finished => FINE_FINISHED,
+    };
+    let mut k = vec![family];
+    k.extend_from_slice(&at.input.to_be_bytes());
+    k.push(at.level);
+    k.push(at.face);
+    k.extend_from_slice(&at.tx.to_be_bytes());
+    k.extend_from_slice(&at.ty.to_be_bytes());
+    k
+}
+
+/// The key of part `part` of one fine tile: the tile's prefix and the part, big end first, so a scan reads the parts in
+/// order.
+#[must_use]
+pub fn fine_part_key(at: &FineAt, part: u32) -> Vec<u8> {
+    let mut k = fine_tile_prefix(at);
+    k.extend_from_slice(&part.to_be_bytes());
+    k
+}
+
+/// One fine part, framed. The writer cuts a part at [`FINE_PART_BYTES`], under the field cap by construction.
+#[must_use]
+pub fn encode_fine_part(part: &FinePart) -> Vec<u8> {
+    TlvWriter::new(FINE_PART_SCHEMA)
+        .required(fine::PART, &part.part)
+        .and_then(|w| w.required(fine::PARTS, &part.parts))
+        .and_then(|w| w.required(fine::BYTES, &part.bytes))
+        .expect("a fine part is cut under the field cap and encodes infallibly")
+        .finish()
+}
+
+/// A fine part read back, or a named refusal.
+///
+/// # Errors
+/// The bytes are not a fine part this build can read.
+pub fn decode_fine_part(bytes: &[u8]) -> Result<FinePart, String> {
+    let r = TlvReader::parse(FINE_PART_SCHEMA, bytes).map_err(|e| format!("a stored fine part does not decode: {e}"))?;
+    Ok(FinePart { part: field(&r, fine::PART, "part")?, parts: field(&r, fine::PARTS, "parts")?, bytes: field(&r, fine::BYTES, "bytes")? })
+}
+
+/// ★ ONE FINE TILE's record read back whole from its part rows: `Ok(None)` with no row (never stored), the record's
+/// bytes when every part is here in order, or a refusal by name (a part missing, out of order or malformed).
+///
+/// # Errors
+/// A part row does not decode, or the parts do not run `0 .. parts` with one count.
+pub fn read_fine_record(store: &dyn crate::io::Store, at: &FineAt) -> Result<Option<Vec<u8>>, String> {
+    let rows = store.scan(&fine_tile_prefix(at));
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for (k, (_, bytes)) in rows.iter().enumerate() {
+        let part = decode_fine_part(bytes)?;
+        if (part.part != k as u32) | (part.parts != rows.len() as u32) {
+            return Err(format!("a stored fine tile's part {} of {} stands at {k} of {}", part.part, part.parts, rows.len()));
+        }
+        out.extend_from_slice(&part.bytes);
+    }
+    Ok(Some(out))
+}
+
+/// ★ ONE FINE TILE's record written as its part rows (staged; the caller commits), every part row an earlier record left
+/// beyond the new count deleted in the same batch. Returns the parts' count.
+pub fn write_fine_record(store: &mut dyn crate::io::Store, at: &FineAt, record: &[u8]) -> u32 {
+    let parts = record.len().div_ceil(FINE_PART_BYTES).max(1) as u32;
+    for part in 0..parts {
+        let start = (part as usize * FINE_PART_BYTES).min(record.len());
+        let end = (start + FINE_PART_BYTES).min(record.len());
+        let row = FinePart { part, parts, bytes: record[start..end].to_vec() };
+        store.put(&fine_part_key(at, part), &encode_fine_part(&row).into());
+    }
+    for (key, _) in store.scan(&fine_tile_prefix(at)) {
+        let index = key.len().checked_sub(4).and_then(|i| key.get(i..)).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+        if index >= parts {
+            store.delete(&key);
+        }
+    }
+    parts
+}
+
+/// The fine part rows' tags — their own numbering, one schema, append-only.
+mod fine {
+    pub const PART: u16 = 1;
+    pub const PARTS: u16 = 2;
+    pub const BYTES: u16 = 3;
 }
 
 /// The key of the owner-fence row (one per realm store).
@@ -935,5 +1068,46 @@ mod tests {
             parked_ticks_max: 1,
         };
         assert_eq!(tuning, tuning.clone(), "six named numbers, none shipped");
+    }
+
+    /// ★ A FINE TILE'S RECORD IN ITS PART ROWS (B2): written in 32 KiB parts under the tile's own prefix, read back whole;
+    /// a shorter record rewritten drops the parts past its count in the same batch; a raw and a finished record of one
+    /// tile, and two input words, never share a row; a part out of place or one that does not decode is refused by name.
+    #[test]
+    fn a_fine_record_is_kept_in_parts_and_read_back_whole() {
+        use super::{FINE_PART_BYTES, FINE_PART_SCHEMA, FineAt, FineForm, FinePart, decode_fine_part, encode_fine_part};
+        use super::{fine_part_key, fine_tile_prefix, read_fine_record, write_fine_record};
+        use crate::io::Store;
+        let mut store = crate::io::mem::MemStore::default();
+        let at = FineAt { form: FineForm::Finished, input: 0xF1E, level: 1, face: 3, tx: 23, ty: 69 };
+        let raw = FineAt { form: FineForm::Raw, ..at };
+        let other = FineAt { input: 0xF1F, ..at };
+        assert_eq!(read_fine_record(&store, &at), Ok(None));
+        let record: Vec<u8> = (0..2 * FINE_PART_BYTES + 100).map(|k| (k % 251) as u8).collect();
+        assert_eq!(write_fine_record(&mut store, &at, &record), 3);
+        store.commit();
+        assert_eq!(read_fine_record(&store, &at), Ok(Some(record)));
+        assert_eq!(read_fine_record(&store, &raw), Ok(None));
+        assert_eq!(read_fine_record(&store, &other), Ok(None));
+        assert_ne!(fine_tile_prefix(&raw)[0], fine_tile_prefix(&at)[0]);
+        // A shorter record: one part, and the two older parts go in the same commit.
+        assert_eq!(write_fine_record(&mut store, &at, &[7, 8, 9]), 1);
+        store.commit();
+        assert_eq!(read_fine_record(&store, &at), Ok(Some(vec![7, 8, 9])));
+        assert_eq!(store.scan(&fine_tile_prefix(&at)).len(), 1);
+        // An empty record is one empty part.
+        assert_eq!(write_fine_record(&mut store, &raw, &[]), 1);
+        store.commit();
+        assert_eq!(read_fine_record(&store, &raw), Ok(Some(Vec::new())));
+        // A part that states another place, or one that does not decode, refuses the record.
+        let stray = FinePart { part: 1, parts: 1, bytes: vec![1] };
+        store.put(&fine_part_key(&other, 0), &encode_fine_part(&stray).into());
+        store.commit();
+        assert!(read_fine_record(&store, &other).is_err());
+        store.put(&fine_part_key(&other, 0), &crate::io::bytes(vec![0xFF]));
+        store.commit();
+        assert!(read_fine_record(&store, &other).is_err());
+        assert_eq!(decode_fine_part(&encode_fine_part(&stray)), Ok(stray));
+        assert_eq!(FINE_PART_SCHEMA, SchemaId(41));
     }
 }

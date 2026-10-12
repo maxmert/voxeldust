@@ -19,14 +19,14 @@
 //!   B37 item 4).
 //! - any case `~fine` / `~finer`: the convergence gate's axis twice / four times as fine (rulings B39, B47): every pass
 //!   length of the solve's own mixed axis halved / quartered, so about twice / four times the passes (and the routings),
-//!   the climate every twice / four times as many passes so its spacing in years stays the axis's.
+//!   the climate every pass on either axis (the solve's own, ruling B69 item 1).
 //! - any case `%K` (last): K sweeps on each pass's one routing, each a K-th of the pass's time — a resolution (the solve's
 //!   own is eight, ruling B62).
 //! - any case `@R` (last of all): the water routed R times a pass, the pass's sweeps shared among the routings — a
 //!   resolution (ruling B63 item 1 measured with it; the solve's own is four, ruling B65).
 //! - any case `^C` (just before `@R`): the climate and the running sea re-solved every C passes, counted in passes on
-//!   either axis — a resolution (ruling B68: the sea's stale spacing near the present); without it the axis keeps the
-//!   climate's spacing in years (the solve's own every 20 passes).
+//!   either axis — a resolution (ruling B68: the sea's stale spacing near the present; `Laws::climate_every`); without
+//!   it every pass, the solve's own since ruling B69 item 1 (`^20` is the game's spacing until then).
 //! - `--ledger=DIR`: each case also writes its PASS LEDGER to `DIR/<case>.csv` — each process's change of volume on the
 //!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause) — and its LEDGER
 //!   BY PLATE AND PASS to `DIR/<case>.plates.csv` (ruling B66 item 1: which process, where, when). `<case>` is the case's
@@ -74,7 +74,7 @@ fn inner_relief_m(e_mm_yr: f64) -> f64 {
 }
 
 /// The release gate's pinned digest of the home planet's artifact (`crates/bins/tests/home_artifact_pin.rs`).
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x81c0_d090_3ce0_129b, 0xb29e_978b_3db0_1040];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6f92_ab73_2b8f_e622, 0xab3a_2d52_064b_b265];
 
 /// Whole metres of a height in sixteenths, rounded half up: the artifact's own rounding.
 fn metres(sixteenths: i32) -> i32 {
@@ -744,9 +744,12 @@ fn main() {
             None => (case.as_str(), None),
         };
         // `case…^C` (just before `@R`): the climate and the sea re-solved every C passes, in passes on either axis — a
-        // resolution (ruling B68 measured with it); without it the axis keeps the climate's spacing in years.
+        // resolution (ruling B68 measured with it); without it every pass, the solve's own (ruling B69 item 1).
         let (case, climate_every) = match case.rsplit_once('^') {
-            Some((c, k)) => (c, Some(k.parse::<u32>().expect("a climate spacing after ^"))),
+            Some((c, k)) => (
+                c,
+                Some(k.parse::<u32>().expect("a climate spacing after ^")),
+            ),
             None => (case, None),
         };
         // `case%K`: K sweeps a pass (a resolution).
@@ -754,8 +757,7 @@ fn main() {
             Some((c, k)) => (c, k.parse::<u32>().expect("a sweep count after %")),
             None => (case, vd_terrain::solve::SUB_SWEEPS),
         };
-        // `case~fine` / `case~finer`: the convergence gate's axis twice / four times as fine, the climate's spacing in
-        // years kept.
+        // `case~fine` / `case~finer`: the convergence gate's axis twice / four times as fine, the climate every pass.
         let (name, fineness) = if let Some(name) = case_axis.strip_suffix("~finer") {
             (name, 4u64)
         } else if let Some(name) = case_axis.strip_suffix("~fine") {
@@ -772,6 +774,9 @@ fn main() {
             "a case is phase2[-water][-lt][-craters][-wedge][-cell][-margins][-spread][-relief][-share][+pass|+flats|+cellK|+airy|+flex|+blendM|+scatterA][~fine][%K]"
         );
         let mut laws = Laws::default();
+        if let Some(every) = climate_every {
+            laws.climate_every = every;
+        }
         for cand in candidates.split('+').filter(|c| !c.is_empty()) {
             match cand {
                 "pass" => laws.pass_share = true,
@@ -830,7 +835,6 @@ fn main() {
         let schedule = Schedule {
             t_min_yr,
             t_max_yr: standard.t_max_yr / fineness,
-            climate_every: climate_every.unwrap_or(standard.climate_every * fineness as u32),
             sub_sweeps,
             routings: routings.unwrap_or(standard.routings),
             ..standard

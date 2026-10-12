@@ -1856,3 +1856,440 @@ offered; the owner chose two:
 
 **Example.** The release pin gate that seals generator 26 solves the home planet on all cores in a fraction of today's
 hour, and gives the same digest as the one-core solve; meanwhile the block store's design moves in its own session.
+
+## B73. THE FASTER SOLVE STOPS HERE; THE ROUTING'S UNREAD WORK IS SKIPPED FOR NOW (2026-10-09)
+
+Generator 26's close (B69's list) measured: the pins recorded by the game's own solve on one core (the digest
+[0x6f92_ab73_2b8f_e622, 0xab3a_2d52_064b_b265], the sea 3 660 m, the ocean 76.04 %), and the release pin gate GREEN on all 14
+cores with the faster solve — the same bytes — in 2 179 s (one core: 11 383 s while the machine paged; not a clean timing).
+On 14 cores half the wall time is still on one core (the budget's merge sweep about 15 %, the receiver order 6 %, the
+routing's flat walk 5 %). FOUND: in a WET body the routing's flood, flat walk, order and discharge run four times a pass and
+the budget's own water tree replaces all of them before anything reads them; only the routing's ocean label is read. The
+owner chose:
+
+1. **THE ROUTING'S UNREAD WORK IS SKIPPED, FOR NOW** (owner: "Skip it for now"): in a wet body's passes the routing does only
+   what the rest of the pass reads — the ocean labelled at the sea's level, an ocean node's flood level its own ground — and
+   the budget's tree does the rest; the bytes stay the same (the release pin gate proves it). The census keeps the routing's
+   readings from the solve's final routing. "For now": the full per-pass routing may return if a later need reads it.
+2. **THE FASTER SOLVE STOPS HERE** (owner: "Stop here"): generator 26 closes by B69's list — the coverage gate once, the clean
+   timing, the census and the pictures; the steps still on one core are REGISTERED (the budget's sweep split by landmass
+   with one renumbering pass, the receiver order, the flat walk, the tree deal, the water tree's spill walk).
+3. **DOCKER STOPPED** (owner: "Yes, stop it") for the coverage gate and the clean timing (its VM held 16.7 GB and pushed the
+   machine into heavy paging on 2026-10-09).
+
+**Example.** The home planet's shard solves its world: each pass it labels the ocean, lets the budget's water find the lakes
+and the rivers, and erodes — it no longer floods the whole planet four times a pass for a tree nobody reads, and the
+artifact it stores is the same, byte for byte.
+
+## B74. FEWER, FASTER TEST RUNS — ASK FIRST; THE VISUAL TESTS OFTEN (2026-10-10)
+
+The owner, after a coverage gate of about 15 hours (most of it whole moon solves inside the tests, run under coverage
+instrumentation): *"We indeed need to find a new strategy for this — we are waiting for tens of hours instead of building
+the game."* Of five offered changes the owner chose:
+
+1. **THE FASTER COVERAGE BUILD**: the instrumented tests with light optimisation — ADOPTED, after a proof on the terrain
+   crate that it reports the same misses as today's build (optimisation can merge or drop counted regions).
+2. **THE SHARED TEST SOLVES**: tests that need a solved moon share one solve per kind and test binary, on all cores (test
+   code only) — ADOPTED.
+3. **TESTS ONLY AFTER A SUBSTANTIAL CHANGE, AND ASK FIRST** (owner: *"run those tests only after substantial changes (like
+   we finished a big implementation or improvement), and I prefer being asked before we are running any tests with
+   information why you think we should run it"*): no test run — a suite, a gate, coverage — starts without the owner's
+   word, and each ask states why it is needed now. This replaces the habit of running the suite after every edit.
+4. **THE VISUAL TESTS MORE OFTEN** (owner: *"The only tests that I want to run a bit more often (but ideally in parallel if
+   possible) is the tests to make sure that we don't break visuals (glitches, flickering, etc)"*): the picture and flight
+   gates that catch a glitch, a crack or a flicker run more often, beside other work where the machine allows.
+5. **NOT ADOPTED NOW**: the parallel feature track ("Not now"), per-crate coverage, a rented machine.
+
+**Example.** After the faster coverage build lands, the agent asks: "the routing change is finished; may I run the terrain
+suite (about 3 minutes) and the coverage gate (about 3 hours) to prove the same bytes and 100 % coverage?" — and runs them
+only on the owner's yes; the flight gate that watches the coast for flicker runs beside the work after each change to the
+drawing path.
+
+## B75. LOOK FIRST: GENERATOR 26 CLOSES ON THE WINDOW LOOK; R2 AND THE SURFACE TOGETHER; BEVY 0.20 LATER (2026-10-10)
+
+The owner looked in the window on generator 26's solved ground (the stand at 16.3° S, hull 12 berthed beside it), and
+said: *"it looked good, but it still VERY far from believable terrain … Please don't run heavy tests. I'm interested in fast
+proceeding with the game development, not waiting for several weeks till gates are fully passed."* The least believable parts,
+in the owner's own choice: THE SHAPES (noise bumps, no valleys that join), THE SURFACE (one look everywhere: no rock on the
+steep ground, no soil, sand or snow), and NO WATER AND NO COVER. Of three orders the owner chose "Look first":
+
+1. **GENERATOR 26 CLOSES ON TODAY'S WINDOW LOOK.** B69's last item (the census and the pictures on three bodies) is
+   REGISTERED as not done; the clean timing stays skipped (B69 item 6, the owner's "Skip the timing").
+2. **THE MOVE TO BEVY 0.20 WAITS** (amends B70 item 1, "before R2"): its design (4.5–6.5 weeks, 90–160 machine hours of gates,
+   no change to the ground) stays ready; it starts on the owner's later word.
+3. **R2 STARTS NOW, BY ITS SMALL FIRST SLICE**: one region eroded at 1 km on the bench and a shaded picture of it for the
+   owner's look, before any bake service, world change or data crossing.
+4. **A FIRST SURFACE LOOK BY LAW, BESIDE R2** (amends B35's order, which put the materials after R3 and the processes): rock
+   on the steep ground, soil in the hollows, snow where the climate law puts it — from the ground the client already holds and
+   by laws the ground step's design names; nothing placed by hand, no new data across a realm boundary without the SL6 ask.
+5. **CHECKS BY LOOK**: the owner's window look and headless pictures; the heavy gates only after a large change and on the
+   owner's word (B74).
+6. **THE PARALLEL FEATURE TRACK: NOT NOW** (B74 item 5 stands).
+
+**Example.** Next the owner sees a shaded picture of a 150 km piece of the home planet's belt eroded at 1 km — valleys that
+join and run to the sea in place of noise bumps — and, in the window, grey rock on a belt's steep flank, soil in the valley
+under it, and snow on the crest where the climate law puts it.
+
+## B76. THE PICTURES DECIDE FIRST, ALSO DURING THE BUILD (2026-10-10)
+
+The owner, on R2's bench pictures after the hillslope law removed the grid's two-cell stripes at 256 m: *"There are still a
+lot of strait lines. Not believable in my opinion. Are you sure we are using good algorithms?"* — then, on the proposed
+order: *"Order is ok, we rely on the visuals first, even when we are building the game."*
+
+1. **THE VISUALS DECIDE FIRST**: a ground step is judged by the owner's look at its pictures before its gates; a step that
+   passes its numbers and does not look believable is not done. This holds on the bench AND during the build into the game.
+2. **R2's ORDER**: the literature report on straight and grid-bound channels → the three suspected causes benched one at a
+   time against today's pictures (the start from the game's own fine relief, not a smooth upsample of the 8 km field;
+   routing that splits the water over many neighbours; the finer cell near the viewer) → the pictures side by side with the
+   straight-line share as a number → R2's build into the game only on the owner's word that the pictures are believable.
+
+**Example.** The belt's flank at 256 m shows no grid stripes but parallel straight gullies: that picture is not done. The
+next picture starts from the flank's own fine relief and splits the water, and the owner compares the two before any bake
+service is built.
+
+## B77. LANDFORMS BY LAW BELOW 8 KM; THE MACRO WORLD'S WATER AND RISE MEASURED BESIDE (2026-10-11)
+
+The owner, on the balance's readings (the land almost still — a present erosion rate of 0.00005 mm/yr at the median — and
+dry — 1.5 % of the land over 1 000 mm of rain): *"Today's reading is enough, and it's not good enough. The terrain should be
+very believable"*, with FOUR NEW REFERENCE PICTURES (kept outside the repository, `~/Downloads/voxeldust_references_2026-10-11/`:
+a forested valley with a lake under a jagged massif with rock towers; a canyon with a stream between rock walls; a dry grass
+plain with red layered mesas under a snowy range; an aerial view of snowy peaks, forested valleys, a red rock massif and
+lakes in fog). Of the offered methods the owner chose:
+
+1. **LANDFORMS BY LAW** (AMENDS B57/B58's R2 bake and the ground step design's R2/R3 as the way the forms under 8 km are
+   made): the macro world still decides WHERE each kind of country is (the belts, the plains, the coasts, the climate, the
+   large rivers); below 8 km THE ONE GENERATOR makes the forms directly, at each point, on both hosts and with no bake, from
+   published laws — eroded mountains from the stream law's analytic solution on a drainage network built first, cliffs,
+   mesas, buttes and towers from the rock beds' hardness and the cliff law, valley floors and river corridors from the
+   discharge; the laws give the numbers (relief, valley spacing, cliff height); nothing is placed by hand (B23), the far
+   view follows the rules of the average and the outline, and no form flickers (B16). The grid erosion benches stay as
+   measuring tools.
+2. **FIRST A DESIGN WITH REVIEWS** (the four references split into landform families, each with its law, its generator
+   function and its checks), THEN ONE FAMILY ON THE BENCH with pictures beside the references, in days (B76: the pictures
+   decide).
+3. **THE MACRO WORLD MEASURED BESIDE** (the owner: "Measure it beside"): a read-only study of why the land gets so little
+   rain and why the belts barely rise today, against the laws' sources; the owner then rules whether the cure is in the macro
+   laws. The shape work does not wait for it.
+
+**Example.** A pilot over the belt sees a sandstone plateau: the generator reads the beds' hardness at each height and the
+cliff law, so the hard cap stands as mesas and red towers over soft slopes; where the climate law gives rain, the river cuts a
+gorge with flat meadows on its floor — the same functions on the desert world and on the moon, with their own facts.
+
+## B78. THE RAIN LAW'S CURE WAITS FOR THE LANDFORMS' FIRST PICTURES (2026-10-11)
+
+The read-only study of B77 item 3 (`docs/investigation/2026-10-11/macro_rain_rise_study.md`) found the land's dryness NOT
+the law's honest answer: a calibration defect (the rain belt's share never renormalised, so the law cannot give back its
+own calibration body) and a missing law (the seasonal circulation of a 55° tilt, allowed by B36 Q3 and never built), plus a
+wrong height law; and the stillness mainly the absence of uplift outside the belts and the scale effect of the joint law
+read on 8 km node falls (its lawful cure is the law at its own scale, B77). Asked when to cure the rain (a world change:
+generator 27, a new first solve, ~3.5–5.5 engineer-weeks by the design's estimate), the owner chose **"Later"**:
+
+1. **THE LANDFORMS FIRST** (B77): today's rain and today's world stand while the landforms' design and their first bench
+   family are made; the rain's cure is discussed again after their first pictures.
+2. **REGISTERED, NOT FORGOTTEN**: the rain belt's unnormalised share, the missing seasonal circulation, the height law and
+   the rain and lift clamps (B23) stay registered defects until that discussion.
+3. The present uplift map (no world change) may be measured for the landforms when their design needs it.
+
+**Example.** The belt's windward ramp still reads 96 mm of rain a year while the first landform family is benched; its
+pictures show the forms the laws make on that dry ground, and the rain's cure comes back to the owner after that look.
+
+## B79. THE LANDFORMS DESIGN'S FIRST FOUR ANSWERS; BENCH STEP 1 ON EARTH STARTS (2026-10-11)
+
+The landforms design, revision 2 (`docs/investigation/2026-10-11/landforms_by_law_design.md`, three adversarial reviews
+answered in its §7), asked ten questions. The four that gate bench step 1, answered as recommended:
+
+1. **Q1 — EARTH'S GROUND AS A MEASURING STICK: YES.** A bench program runs the same generator code on Earth's own 8 km
+   heights and rain (Taiwan, Oregon, a Colorado Plateau tile with its published rock layers) beside Earth's real ground;
+   the data stays outside the repository; nothing in the game reads it; no constant is set from it (B36 Q2, B38 item 4).
+2. **Q3 — THE LAW'S OWN WATER SHIPS (SL6 YES):** one byte per node of the joint law's water (rain × area over the solve's
+   tree), 8.9 MB stored for the home planet, a tile +10 % (40 960 → 45 056 B), with one new first solve when it is built;
+   the bench measures it against the shipped steepness and against today's runoff byte first. (The shipped discharge byte
+   is the budget's runoff, not the law's `Q`.)
+3. **Q10 — THE RIVER TREE IS A LAWFUL INPUT:** the ladder reads each row's receiver slot (its "no receiver" included) and
+   never a sea or lake bit or a water level; the drainage network is the ground's own, so it is no water word in the solid
+   pass (B21, one-volume §2.1).
+4. **Q4 — NOTHING RETIRES BEFORE THE OWNER'S LOOK:** today's fine octaves, ridged band, roughness factor and cap-rock bench
+   stay until a stand passes the owner's look; then they retire only on ground the ladder reaches; the moon, the desert
+   world and the dry sea floor keep today's detail until their own families exist.
+
+Q2 (the far view past rung 9), Q5 (the tall forms' outlines), Q6 (the steep-face hand-over), Q7 (the start ground), Q8
+(the diagnostic under Earth's rain) and Q9 (the beds) come at their steps. **BENCH STEP 1 STARTS**: the method on Earth,
+then the owner's look (B76).
+
+**Example.** The bench builds Taiwan's Central Range from Earth's own 8 km means and rain with the same ladder the game will
+run, and sets its shaded and painted pictures beside Taiwan's real 30 m ground with the straight-valley share of each.
+
+## B80. THE STREAM LAW ON IRREGULAR POINTS: THE LOOK GIVEN AT MAP SCALE (2026-10-11)
+
+After weeks of grid methods that kept straight valleys, 45° directions, stripes and combs (the owner: "Clearly you are
+doing something wrong"; "We are on one step for several weeks now without ANY progress"), the owner named eleven open
+sources to take from. Checked (code, licence, pictures): fastlem (T. Tada, MPL-2.0) runs the stream law's steady state on
+IRREGULAR points; spacesim (MIT) holds a lawful seasonal climate for any tilt; the rest are ideas only or nothing (the
+status file, 2026-10-11). The owner: "Please use whatever you can please, show me the pictures for judgement". The bench
+linked fastlem unmodified for its point graph and ran the joint law's own steady state on it (`S = (U/(K_lp·Q))^(1/2.2)`,
+the 35° threshold law, each node's uplift solved so the fine mean equals the node's own) on Taiwan, Oregon and the home
+belt. THE OWNER ON THE PAIRS: **"I like it WAY BETTER! What's next?"**
+
+1. **THE ROOT NAMED:** the regular grid under every erosion method below 8 km; the cure is the law on irregular points.
+2. **THE DIRECTION BELOW 8 KM** is the joint law's steady state on an irregular point graph, driven by the macro world's
+   node means (the macro says how high, the law makes the form); the earlier ladder and grid bakes stop.
+3. **THE ORDER PROPOSED** (the owner's word on it owed; work starts on item 1): (1) the bench's visible defects (the 8 km
+   squares, the tree that does not settle) and a view at eye height framed like the references; (2) finer ground — the
+   same law inside each point down to 2–4 m; (3) a short design for the way into the game (where the solve runs, what
+   crosses — SL6 —, how two regions meet, the integer form — SL10 —), the owner's answers; (4) the build on the belt
+   stand, the owner's look in the window; (5) the rain (B78) from spacesim's seasonal structure, a world change.
+
+**Example.** The belt's 8 km nodes stand 2.5–3.2 km over the sea; the law on 590 000 points 128 m apart cuts that plateau
+into branching valleys at every angle, and each node's made ground keeps the node's own mean height.
+
+## B81. THE FINE GROUND'S WAY INTO THE GAME: THE RECOMMENDATIONS ACCEPTED, NO SEAMS, GENERIC (2026-10-11)
+
+The design `docs/investigation/2026-10-11/fine_ground_way_in_design.md` (revision 2: three adversarial reviews answered)
+asked eight questions. The owner: **"Let's accept recommendations if they are not breaking ground rules and laws and if
+we don't build seams — all our solutions should be generic and reusable."** Earlier in the step: "Current rungs and all
+mechanic works quite good now (but not very performant). If we can simply change the terrain generation algos, that
+would be good enough. If we can optimize without compromising quality, that would be even better."
+
+1. **The recommendations ACCEPTED, as amendments named:**
+   - **Q1:** below 8 km the ground is the TILE SOLVE — each tile solved once per world version and stored. This AMENDS
+     B77's "no bake: forms per point". Under the finest level the ground is that level's smooth curve until a law level
+     (2–4 m) exists; no noise is added there.
+   - **Q2:** the planet's own shard solves, stores and ships its tiles (SL3, B35).
+   - **Q3: SL6 YES** — the fine tiles cross from the planet's shard to its own clients through the gateway (one new bulk
+     part variant; the client acknowledges held tiles).
+   - **Q4:** while the realm is alive, its idle share solves L1 around its own arrival places. Idle work never keeps a
+     realm alive.
+   - **Q5:** on a never-solved place the coarser rung stands until the tiles are live.
+   - **Q6:** a tile live under a standing body moves the body with the ground over the 0.5 s ramp.
+   - **Q7:** the fine step bound and the band's bound are MEASURED first (P-SWITCH, P-BAND), then chosen.
+   - **Q8:** F2 AMENDED for a new fine law — it may move unbuilt ground; built ground never moves (F1).
+2. **NO BREAK OF A HARD RULE OR A STANDING LAW** (review A found none). The three amendments above are the owner's own
+   rulings, named.
+3. **NO SEAMS.** Every place where two pieces of ground meet gets ONE generic treatment, and G-SEAM is a BLOCKING gate on
+   the bench: a seam seen means no build. Revision 3 removes three seam sources revision 2 still had:
+   - the far levels' straight tile edge — the far levels are made from the stitched ground;
+   - the edge of the rising region — the rise fades smoothly in the map, so the law fades the gullies;
+   - the coast against the sea floor's ground — the solve's coast points take the sea floor's own drawn heights.
+4. **GENERIC AND REUSABLE.** ONE tile machinery (levels in rung cells; solve, store, go live, ship, read, stitch) for
+   every level, every body and every landform family; the fluvial law is its first family. Craters, dunes and the sea
+   floor plug into the same machinery later.
+5. **NEXT: B0, the bench only, no game change.** The decisive test first: two neighbour tiles solved apart and stitched,
+   beside ONE solve of both together; then the speed under the fence, the point sets, the bytes, the bounds.
+
+**Example.** Two L2 tiles on the home belt meet along a node's edge; the bench solves them apart and stitches them by the
+cut, and solves the same 16 km square once whole; the owner sees the two pictures side by side, and the build waits
+until no seam shows.
+
+## B82 (2026-10-11) — the threshold by the level's scale; the straight valleys belong to the 8 km world
+
+The owner, on B0 step 3's first readings (the 128 m tile 65 s → 5.2 s; the design's linear hold refuted; one threshold at
+both levels gives 52 % of the 128 m ground over 45°; a 40 km straight valley on the belt stand from an 8 km river along a
+node column): *"Agree, let's try"*.
+
+1. **THE THRESHOLD SLOPE BY THE LEVEL'S SCALE.** At 128 m the threshold is tan 35° (0.70: Burbank et al. 1996 read the
+   threshold hillslopes at ~32–35° on 90 m relief); at 16 m it is S_c = 1.25 (Roering et al. 1999, Oregon, read at the
+   hillslope's own scale). A slope averaged over a 128 m link is gentler than over a 16 m one. AMENDS the design's A6
+   ("one value at both levels"), refuted by measurement (52 % of the points over 45° at 1.25 against 0.18 % at 0.70).
+2. **THE STRAIGHT VALLEYS ARE A DEFECT OF THE 8 km WORLD**, cured there beside the rain's cure (generator 27, B78): where
+   an 8 km river runs along a node column, each node's own mean keeps the fine valley in that column. The seeded
+   displacement of the macro reads stays OFF (it bends the line, it does not cure it).
+3. **THE 128 m MEAN HOLD IS B80's ROUNDS** (the coarse start, three rounds, then the additive hold); the design's one
+   linear solve (§3.3, B-B4) is refuted by measurement (6 min a tile, the worst node 1.25 km off, cliffs). AMENDS §3.3.
+4. **NEXT, as stated:** why some tiles settle slowly, the cost under the fence (P-COST), then step 4.
+
+**Example.** On the home belt a 128 m tile stands at most at 35° over each link, and its 16 m tiles reach 51° on their own
+short links; the straight north–south valley the 8 km river draws along one node column stays until generator 27 cures the
+river in the 8 km world.
+
+## B83 (2026-10-11) — B0 step 4's choices; the 16 m level must refine the 128 m ground
+
+The owner, on B0 steps 3–4's numbers (the 128 m tile 3.3–6.6 s on one core; the Rice coder within the size gate; no
+added chunk at 128 m; the 16 m tiles stepping up to 974 m at the hand-over to the 128 m ground): *"Agree with the fix if
+it's performant, seamless and will be equal on BE and client on all devices. Please continue with your plan"*.
+
+1. **THE POINT SET IS THE HASHED POISSON-DISK** (Matérn's type II: four hashed candidates a cell, kept unless a higher
+   hashed priority stands within cell/√π) — no lean, the straight share of B80's relaxed set, the same points in every
+   tile.
+2. **THE 128 m TILE SERVES RUNGS 7–12** from its own mean pyramid (amends the design's 7–9; every step from rung 7 to the
+   node measured under the coarser cell's own one-pixel distance).
+3. **THE BAND (B55) WIDENS BY THE LAW'S BOUND**: ±0.70 × the node's half-diagonal (±4.1 km on the home planet) over the
+   rows — it holds before any tile is solved and never changes in flight.
+4. **THE TILE CODER IS THE ADAPTIVE RICE CODE** (JPEG-LS's; measured within the size gate, every level decoded exactly).
+5. **THE 16 m FIX, ON THREE CONDITIONS — PERFORMANT, SEAMLESS, AND EQUAL ON THE SERVER AND THE CLIENT ON EVERY DEVICE:** the
+   16 m solve under the 128 m ground's own drainage and its mean held over each 128 m cell, benched with the rung-step
+   reading (the hand-over step under a pixel at its switch), the seam test and the time, and built only under the fence
+   (the same bytes on every host: P-SAME, G-NO-DRIFT). Before B3; B2 (the 128 m level) does not wait.
+6. **NEXT: STEP 5** — the plain and the belt at 128 m for the owner's look; the 16 m fix benched beside.
+
+**Example.** A walker on the home belt sees the 128 m valleys from 100 km away; as the walker comes nearer, the 16 m
+gullies appear INSIDE those same valleys — the valley floor never jumps to another place when the finer ground arrives.
+
+## B84 (2026-10-11) — the 128 m level is the law alone
+
+The owner, on step 5's pictures and the recommendation to drop the exact mean hold at 128 m: *"Proceed"*.
+
+1. **THE 128 m LEVEL IS THE LAW ALONE — NO ADDITIVE HOLD** (amends B82 item 3). MEASURED: the law leaves no pit; the
+   additive hold dug hollows up to 678–1 245 m deep under their spill (4 % of the points over 1 m); four other hold forms
+   failed (a fill-and-hold loop never converged, the slope hold steepened 10–22 % of the points over 45°, an inner-ring hold
+   made it worse). Without the hold each node's mean differs from its row by at most 1 233 m — 0.15 of a pixel where the
+   rows take over (7 510 km) — every rung step stays under its coarser cell's pixel distance, the band stays inside
+   ±4.1 km, and the seam between tiles stays invisible.
+2. **G-MEAN BECOMES "THE SWAP TO THE COARSER LEVEL UNDER A PIXEL AT ITS SWITCH"** (amends the design's "exactly zero"), the
+   same rule at every level: W16's invisible rung boundary is the law, the exact mean was only one way to it.
+3. **NEXT: THE 16 m FIX** (B83 item 5), judged by the same rule at its own hand-over (rung 6 → 7: under a pixel at 117 km),
+   plus the seam test and the time, under the fence.
+
+**Example.** A pilot 7 500 km over the home belt sees the 8 km rows; diving, the 128 m tile takes over and the massif's
+mean may sit a kilometre off its row — 0.15 of a pixel at that distance, so nothing on the screen moves.
+
+## B85 (2026-10-11) — the planet's shard ships the finished tile; the corner rule
+
+The owner, after a plain explanation (tiles, the cut, the corner problem, who joins the tiles): *"Agree with your proposal
+if we don't sacrifice quality"*.
+
+1. **THE SHARD SHIPS THE FINISHED TILE** — the tile's square already joined to its neighbours by the cut, with its coarser
+   copies (2 × 2 … 32 × 32) — in place of the raw tile with half its buffer and the cut paths (the design's §4.4 amended).
+   The client only reads heights; every host draws one surface; a tile carries 36 % fewer samples. The price: a tile is
+   finished only once its eight neighbours are solved (on never-visited ground the first fine ground ~16 s in place of
+   ~7 s; the coarser rung stands meanwhile, B81 Q5). No rule is broken: SL3 (the planet draws itself, the joining too),
+   SL10 (one generator; the client reads the heights it receives), SL6 (the fine tiles' message approved in B81 Q3, the
+   same message), W16 and no seams (one join, done once), B64.
+2. **THE CORNER RULE** (a repair, not a choice): each tile edge's cut runs in TWO HALVES — from each of the edge's corner
+   points to the edge's MIDPOINT — each corner point a pure function of its four tiles (where the four agree best within
+   the cut's band), each midpoint a pure function of the edge's two tiles; so every cell of a finished tile depends only on
+   the tile and its eight neighbours, and every host and every tile computes the same cut.
+3. **THE CONDITION — NO QUALITY LOST:** the finished tiles are judged against the bench's own stitch at a four-tile corner
+   (the slope break across every cut against the inside, and the pictures) before the build takes them.
+
+**Example.** Four 128 m tiles of the home belt meet at one corner; the point where their ground agrees best is chosen
+from those four alone; the two cuts on each side run from that point to their edges' midpoints; the finished tile ships
+with its corners already joined, and every client draws the same ridge there.
+
+**THE CONDITION MET (measured 2026-10-11, `erosion_bench --fine-corner 3,23,69`):** sixteen generator-solved belt tiles
+(10 s on the M4 Pro's cores), the middle four finished by the corner rule (`fine::stitch::tile_cuts` + `finished_tile`,
+4 ms a tile) against the bench's two-step stitch of the same four raw tiles, the cut's band ±56 cells (a node less the
+blend, so no blend reads past a raster):
+
+| reading | the corner rule | the bench's stitch |
+|---|---|---|
+| a line's largest slope break across the cuts, median / 90th / 99th | 1.165 / 1.444 / 1.669 | 1.166 / 1.445 / 1.669 |
+| the same inside a tile | 1.176 / 1.421 / 1.527 | 1.177 / 1.420 / 1.527 |
+| at the four-tile corner, 99th (a tile's middle 1.278) | 1.304 | 1.307 |
+| the step across the finished tiles' straight edges, median / 99th / largest | 9.17 / 52.42 / 78.58 m | 9.25 / 50.17 / 78.58 m on the same lines |
+
+The two surfaces differ on 4.9 % of the cells (where the two choose another cut through ground the raw tiles disagree on);
+the maps side by side show no line at the corner in either. The finished tile through the coder: 303 KB (1.16 bytes a
+sample) against the raw tile's 463 KB; its five mean levels (rungs 8–12) 115 KB; every level decoded back exactly.
+
+## B86 (2026-10-12) — the final ground from the first frame; the loading screen over the running game
+
+The owner, on the flats of B2's first window look (the 8 km stand-ins at their own height over the solved valleys) and
+on the plain answers (the three cures A/B/C, the client's own solve, a loading screen, the bandwidth a player needs):
+*"Yes please, add those. I also agree with the loading screen, but please no teleport. We need to put player at the
+starting position immediately, so whole loading machinery can kick in, but show the loading screen over the gameplay in
+the meanwhile."*
+
+**Why.** Every temporary ground (the 8 km rows, or a cheaper solve on the client) differs from the final ground, so its
+swap is a jump — a seam. The client's own solve is refused for the speed: each player's machine would repeat 7–8 s of
+work a tile on the cores that make the picture, against ~10 ms to decode the shard's tile.
+
+1. **THE FINAL GROUND FROM THE FIRST FRAME.** A player sees only the final ground, at the detail its distance reads: a
+   finished tile's mean levels far, its full square near; each finer level refines the coarser one under a pixel at its
+   switch (B84 item 2). In the normal case no temporary ground is drawn.
+2. **THE ADVANCE CALCULATION.** The planet's own shard solves every fine tile of its body once per world version (the
+   input word) and stores it — the same worker, the same rows (SL3, HR3). The order: the tiles its occupants and occupied
+   children name; then its arrival places (B81 Q4); then the rest of the body, on the solve's share of the cores (F6).
+   ESTIMATED: ~138 000 L1 tiles on the home planet, ~14 h on 7 cores; 15–60 GB stored a planet (the sea tiles unmeasured).
+   OPEN at its build: how a planet nobody visits completes its solve, while idle work never keeps a realm alive (SL7,
+   B81 Q4).
+3. **FAR COPIES FIRST.** A tile's levels ship apart: a far tile sends only the levels its distance reads, the full square
+   goes only to the near ring, and an arriving finer level refines in place. ESTIMATED ~10–15 MB around a stand in place of
+   ~128 MB.
+4. **SENT AHEAD WITH THE SPEED.** An occupant's reach grows with its closing speed (the movement answers of 2026-08-27,
+   item 2: grow the interest radius with the closing speed, never cap the speed); the order by the time to reach (the
+   way-in design §4.1).
+5. **THE PLAYER'S DISK CACHE.** The client keeps every finished level it received on its own disk, keyed by the world
+   version's input word and the tile; a new world version reads none of the old. On arrival the client reads its disk
+   first, and the shard never sends a piece the client holds: the client's acknowledgement (B81 Q3, approved — "the
+   client acknowledges held tiles") names every tile it holds, from the wire or from its disk. The cache's size is the
+   player's setting (an operational number in the client's config; its default asked at the build).
+6. **THE LOADING SCREEN OVER THE RUNNING GAME, AT LOGIN ONLY. NO TELEPORT, NO SPECIAL LOGIN PATH** (the login builds no
+   world): the player is placed at the starting position at once; every machine (the area of interest, the solve, the
+   ship, the chunks) runs exactly as in play; the client draws a loading screen OVER the running game until the ground in
+   its view is complete (every wanted chunk on its final ground, no stand-in), then the screen goes. The client decides
+   "complete" from what it already holds (its tile book and its chunks) — no new data crosses. (The owner's word of
+   2026-09-30 already allowed "the loading screen before all meshes are loaded" at login.)
+7. **THE SAFETY NET (cure B).** Where a place is truly not solved yet (a new world version, an arrival that beat the
+   queue), the 8 km ground fills ONLY the empty place and never covers final ground that has arrived. AMENDS the own-height
+   stand-in of 2026-09-30 for the fine level: a coarse stand-in stands at its own height only where nothing finer has
+   arrived. Its price — a step at the border between solved ground and the patch while a place loads (up to ~1 km on the
+   belt) — is a defect that items 2 and 4 keep out of the flight (the seam law stays asserted on every flight leg).
+8. **THE BANDWIDTH (ESTIMATES, measured when items 3–5 are built):** the login ~10–15 MB (about 4 s at 25 Mbit/s); travel
+   ~34 KB a km of new ground (28 km/s low over new ground ≈ 8 Mbit/s); a player's link about 10 Mbit/s at the least,
+   25 Mbit/s or more comfortable. The shard's pace (8 parts of 32 KiB a tick, ~5 MiB/s a session) stays a stated pace.
+9. **THE BUILD ORDER** (tests on the owner's word, B74): (1) the face-edge cut — every tile finishes, at a face's edge and
+   at the cube's corner (owed by B2); (2) the safety net; then the owner's look (the flats gone); (3) far copies first;
+   (4) the send-ahead; (5) the loading screen; (6) the advance calculation; (7) the disk cache.
+
+**Example.** A player logs in on the home belt. The player stands at the start position at once, and the loading screen
+covers the running game for a few seconds while the planet's shard ships the near tiles whole and the far tiles as small
+copies. The screen goes; the player boards a hull and flies off fast; the far ridges are already the real ridges, coarse,
+and they sharpen as the hull comes near, with no flat lid and no jump. The next evening the same player logs in again:
+the tiles come from the player's own disk, and the screen goes almost at once.
+
+## B87 (2026-10-12) — the fine ground reaches every viewer by distance, whatever realm the viewer is in
+
+The owner, after the finding that a pilot aboard a hull over the planet received no fine tile (the planet's shard shipped
+them only to its own direct occupants): *"Detailed pieces for players in a hull or any other realm that sees the planet —
+please. It should be based on the distance from the rung, not in which realm I'm. And it's true for ANY realm."*
+
+1. **ONE RULE BY DISTANCE.** What fine ground a viewer receives depends only on its distance from the ground, by the
+   rung's own reach (each fine level out to the edge the client's ladder asks that level's rung at, bounded by the ground
+   the eye can see) — never on which realm the viewer stands in: on foot on the planet, aboard a hull over it, in a
+   station in orbit, or passing by.
+2. **ANY REALM.** The same rule for every realm that draws fine ground (every body where the level applies), and for
+   every viewer of it.
+3. **ONE RULE, ONE CALL** (`vd_terrain::artifact::fine_needs_of_head`, read off the artifact head's three numbers):
+   - every viewer OUTSIDE the realm: the gateway, which composes each session's picture (SL2's clarification: it is not a
+     realm), states the viewer's VIEW of the realm — a direction and a distance from its centre, never a pose entering
+     its simulation — on the existing one tile path (`ArtifactWant { view }`); the realm's shard names the fine tiles
+     that view reads, solves what is missing (the view is the realm's reason, SL3: a realm draws itself, whoever looks),
+     and answers them one level a record, coarse first, to the gateway's cache for the realm; the gateway serves each
+     session the levels its own distance reads;
+   - the realm's OWN occupants: the realm's shard, which alone holds their poses (the gateway cannot see a pose inside a
+     realm), serves them by the same call at their poses, one level a record, coarse first.
+   No new data class crosses and no wire arm is added (the view, the realm audience and the fine part exist).
+
+**Example.** A pilot aboard a hull 10 m over the home belt and a walker on the ground beside it receive the same fine
+tiles, the near ones whole and the far ones as their coarse copies; a pilot in orbit 2 000 km up receives the far copies
+of the tiles under her view, and their finer levels as she descends.
+
+## B88 (2026-10-12) — one path for the ground's pieces, through the gateway, for every viewer in every realm
+
+The owner, on the report of B87's two deliveries (the realm's own occupants served by the realm's shard, every other
+viewer through the gateway): *"Two ways to deliver the same pieces: no, it should be one way only — through gateway!"*;
+and: *"How then picture is drawn? I can be in the hull that stands on the planet. I need all being drawn using exactly
+the same machinery, despite of which realm I currently belong."* AMENDS B87 item 3.
+
+1. **ONE PATH.** Every tile a session draws — the artifact's tiles and the fine levels alike — comes from the gateway's
+   cache for the realm, chosen by the one call from the session's view of the realm. No shard ships a tile to a session
+   directly; the realm's own occupants are served like every other viewer.
+2. **ONE EYE, THE PICTURE'S OWN INPUTS.** The picture is drawn from two inputs: each realm's centre and facing relative
+   to the realm the player stands in (the rows the gateway composes), and the player's own position inside that realm
+   (the realm's own snapshot). The view of every drawn realm comes from the same two, by one formula: the eye in the
+   frame of the realm the player stands in, carried into the drawn realm by its row. That eye is the avatar's own
+   position for the realm the player stands in — the gateway reads it off the snapshot that realm sends the player's
+   client (SL2's clarification: the connection plane is not a realm; a shard handing its own occupants to it is no
+   crossing), once a beat, and the view goes back to that same realm alone — and the centre of the player's realm for
+   every other realm (SL7: an occupied realm stands in for whoever is inside it; SL2: no occupant pose enters another
+   realm). The proxy's error is the player's realm's own size; the fine reach carries one fine tile (64 km on the home
+   planet) past its edge.
+3. **ONE RULE.** The occupant-only width of the tile rule (the interest side) is gone; every viewer is named by the reach
+   rule alone. The gateway's record of tiles relayed straight to a session is gone with the second path; the
+   named-session relay stays for what a realm owes named sessions (slice 9's rows).
+   No new data class crosses and no wire arm is added.
+
+**Example.** A pilot sits in a hull berthed on the home belt: her eye is the hull's centre carried into the planet's
+frame by the hull's row. She walks out onto the belt: her eye is now her avatar's position, as the planet's snapshot to
+her client states it. Both views go to the planet's shard the same way, the shard answers both into the gateway's cache
+the same way, and the same call serves her the same pieces from the same spot — there is no seam at the hull's door.

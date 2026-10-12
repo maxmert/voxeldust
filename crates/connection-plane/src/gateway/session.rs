@@ -275,8 +275,27 @@ pub(crate) enum SubState {
     Draining,
 }
 
-/// A tile of a realm's artifact, by its `(face, tx, ty)`.
-pub(crate) type TileKey = (u8, u32, u32);
+/// ★ THE EYE IN THE REALM A SESSION STANDS IN (ruling B88, the owner: *"one way only — through gateway"*, *"exactly
+/// the same machinery, despite of which realm I currently belong"*). The ground's pieces of every realm a session
+/// draws are chosen by one call from one eye: the eye in the frame of the realm the session stands in, carried into
+/// each drawn realm by the placement the picture already holds. For the realm the session stands in, that eye is its
+/// avatar's own position there — what the realm's own snapshot states to this gateway for the session's client (SL2's
+/// clarification: the connection plane is not a realm, and a shard handing its own occupants to it is no crossing).
+/// The gateway reads it off one frame a beat at most (`wanted`), the avatar alone, and sends it to no realm but the one
+/// that stated it.
+///
+/// **Example.** A walker stands on the home belt 3 km from her hull. The planet's snapshot to her client puts her
+/// avatar 6 341 km from the planet's centre; the gateway reads that once a beat, and the planet's pieces she is served
+/// are the ones a pilot in the hull would be served from the same spot, by the same call.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) struct SessionEye {
+    /// The session's avatar, as the realm's shard named it at the attach (`SubscriptionReady`, a crossing's too).
+    pub(crate) entity: Option<EntityId>,
+    /// The realm whose frame the avatar was last read in, and its position there: metres from that realm's centre.
+    pub(crate) at: Option<(RealmId, [f64; 3])>,
+    /// Whether the next frame that holds the avatar is read (set once a beat by the artifact serve).
+    pub(crate) wanted: bool,
+}
 
 /// ★ THE ARTIFACT DELIVERY'S RE-DRIVE (2026-09-27, the solved-world walk). The gateway sends each
 /// artifact part and tile to a session once, and the transport may SHED a reliable send when the
@@ -288,7 +307,11 @@ pub(crate) type TileKey = (u8, u32, u32);
 /// **Example.** A pilot logs in behind a gateway that holds five planets' artifacts. A beat's parts
 /// outrun the link and the transport sheds some. The gateway sends that pilot nothing for a beat;
 /// then every planet the pilot has not stated whole gets one more pass from its head, and every
-/// tile the pilot was sent goes out again, paced like the first time.
+/// tile the pilot was sent from a realm's cache goes out again, paced like the first time.
+///
+/// ★ ONE PATH (ruling B88): every tile a session is sent comes from a realm's cache by its view, so the
+/// re-drive sends the cache's tiles again; the record of tiles a shard shipped to named sessions is gone
+/// with that second path.
 #[derive(Debug, Default)]
 pub(crate) struct ArtifactRedrive {
     /// The tick of the newest shed toward this client, until the serve acts on it.
@@ -296,12 +319,6 @@ pub(crate) struct ArtifactRedrive {
     /// The realms whose pass starts again from the head once it ends: those the client had not
     /// stated whole when the re-drive came.
     pub(crate) repass: std::collections::BTreeSet<vd_core::pose::RealmId>,
-    /// The tiles a SHARD shipped to this session and the gateway relayed: the ground under the
-    /// occupant, which the gateway serves from no view of its own.
-    pub(crate) relayed:
-        std::collections::BTreeMap<vd_core::pose::RealmId, std::collections::BTreeSet<TileKey>>,
-    /// The relayed tiles to send again, taken in order within the beat's budget.
-    pub(crate) resend: std::collections::BTreeSet<(vd_core::pose::RealmId, TileKey)>,
 }
 
 /// One session's cold record (the hot part is the shared `Arc<SessionHot>`).
@@ -359,6 +376,23 @@ pub(crate) struct Session {
         vd_core::pose::RealmId,
         std::collections::BTreeSet<(u8, u32, u32)>,
     >,
+    /// ★ THE FINE LEVELS THIS SESSION WAS SERVED per realm (ruling B87): each tile's finest level, served coarse first
+    /// from the realm's cache by the session's own distance, whatever realm it stands in; evicted with the realm.
+    pub(crate) fine_sent: std::collections::BTreeMap<
+        vd_core::pose::RealmId,
+        std::collections::BTreeMap<(u8, u32, u32), u8>,
+    >,
+    /// ★ THE FINE LEVELS THIS SESSION'S CLIENT STATED IT HOLDS per realm (ruling B81 Q3,
+    /// `ClientControlMsg::FineHeld`): what a re-drive after a shed send keeps, so only the levels the client lacks go
+    /// again.
+    pub(crate) fine_acked: std::collections::BTreeMap<
+        vd_core::pose::RealmId,
+        std::collections::BTreeMap<(u8, u32, u32), u8>,
+    >,
+    /// ★ THE EYE IN THE REALM THIS SESSION STANDS IN (ruling B88): the avatar and where the realm's own snapshot
+    /// last put it ([`SessionEye`]) — what the ground's pieces of that realm are chosen from, by the same call as every
+    /// other realm's.
+    pub(crate) eye: SessionEye,
     /// ★ THE ARTIFACT DELIVERY'S RE-DRIVE (2026-09-27): what this session is sent again after the
     /// transport shed a send toward its client ([`ArtifactRedrive`]).
     pub(crate) artifact_redrive: ArtifactRedrive,
@@ -571,11 +605,6 @@ pub struct GatewaySessions {
     pub(crate) artifacts: BTreeMap<RealmId, super::artifact::GatewayArtifact>,
     /// When each realm's artifact was last asked for, so a want goes out once a beat at most.
     pub(crate) artifact_wants: BTreeMap<RealmId, vd_core::TickId>,
-    /// ★ THE TILES A SHARD SHIPPED TO NAMED SESSIONS, one copy per tile (2026-09-27): the bytes the
-    /// re-drive sends again after a shed ([`ArtifactRedrive`]). A tile is kept while some session's
-    /// record names it; an active session's record keeps only the realms it draws, and a record
-    /// ends with its session.
-    pub(crate) relayed_tiles: BTreeMap<(RealmId, TileKey), Vec<u8>>,
 }
 
 /// RLM 5f-3d — ONE realm's pre-Active home bootstrap: the state EVERY session booting into that realm

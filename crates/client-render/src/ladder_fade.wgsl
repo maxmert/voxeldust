@@ -142,6 +142,26 @@ struct FadeVertex {
     // of the vertex is.
     @location(10) corner: vec2<f32>,
 #endif
+#ifdef GROUND_SURFACE
+    // ★ THE SURFACE (ruling B75 item 4): the bare rock's share at the vertex (x) and at its morph target (y).
+    @location(12) surface: vec4<f32>,
+    // ★ THE HEIGHT over the ladder radius, metres; the morph target stands `morph_m` higher on the same radial.
+    @location(13) height_m: f32,
+#endif
+}
+
+// ★ THE PAINT TABLE (ruling B75 item 4): each cover's albedo, linear — a first table; the art has its own step.
+const ROCK_ALBEDO: vec3<f32> = vec3<f32>(0.30, 0.29, 0.27);
+const SOIL_ALBEDO: vec3<f32> = vec3<f32>(0.17, 0.12, 0.08);
+const SNOW_ALBEDO: vec3<f32> = vec3<f32>(0.85, 0.87, 0.90);
+
+// ★ OVER THE SNOW LINE (ruling B75 item 4): the realm's line rides the band table's last row (`table.rows[2·count]`,
+// `vd_terrain::surface::SnowLine`): its height over the ladder radius at a latitude's sine `s` is
+// `x + y·s² + z·|s|`, and `w` is one where the realm draws snow at all. One over the line, nought under it.
+fn snow_over(height_m: f32, sin_lat: f32) -> f32 {
+    let line = table.rows[2u * table.clock.w];
+    let at = line.x + line.y * sin_lat * sin_lat + line.z * abs(sin_lat);
+    return select(0.0, 1.0, (line.w > 0.5) && (height_m >= at));
 }
 
 // How whole the rung is at a distance: one below its fade-out band, zero past it.
@@ -216,6 +236,15 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     // chunk starts on its stand-in's shade, which is its morph normal (slice R1c).
     let local_normal = normalize(mix(oct_decode(vertex.morph_normal), own_normal, whole(d) * ramp));
     out.world_normal = mesh_functions::mesh_normal_local_to_world(local_normal, vertex.instance_index);
+#ifdef GROUND_SURFACE
+    // ★ THE SURFACE HANDS OVER WITH THE SHAPE (ruling B75 item 4): the rock by the same blend as the shade, the height
+    // by the same blend as the position, and the snow over the realm's line at that height — on the latitude's sine,
+    // the radial's own spin-axis part (the body's frame, `vd_terrain::surface::POLE_AXIS`). The soil is the rest.
+    let w = whole(d) * ramp;
+    let rock = mix(vertex.surface.y, vertex.surface.x, w);
+    let snow = (1.0 - rock) * snow_over(vertex.height_m + vertex.morph_m * (1.0 - w), vertex.radial.z);
+    out.color = vec4<f32>(ROCK_ALBEDO * rock + SNOW_ALBEDO * snow + SOIL_ALBEDO * (1.0 - rock - snow), 1.0);
+#endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;
 #endif
@@ -232,6 +261,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         discard;
     }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
+#ifdef GROUND_SURFACE
+    // ★ THE PAINT IS THE COLOUR (ruling B75 item 4): the engine multiplied it by the material's own colour, which stays
+    // the look of a mesh with no surface.
+    pbr_input.material.base_color = vec4<f32>(in.color.rgb, 1.0);
+#endif
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);

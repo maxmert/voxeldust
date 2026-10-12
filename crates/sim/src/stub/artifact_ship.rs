@@ -12,35 +12,33 @@
 //!    answers with the HEAD and the PYRAMID's parts, paced, as `BulkFor { audience: Realm }`: the
 //!    gateway caches them once per realm and serves every session that draws the realm. A want at
 //!    a digest this realm does not hold is dropped and counted.
-//! 2. **THE TILES** — for every occupant this realm holds (a session with a dot), the tiles under
-//!    the occupant's pose within the interest side, a bounded number a tick, each once — the valley
-//!    under the boots. Only an occupant wants fine rungs, so only an occupant is shipped tiles.
+//! 2. **THE TILES** — ONE PATH for every viewer (ruling B88, the owner: *"one way only — through gateway"*): each
+//!    gateway states once a beat the VIEW every session behind it has of this realm (`GatewayToShard::ArtifactWant
+//!    { view }`: a direction and a distance from the realm's centre) — the realm's own occupants among them, whose eye
+//!    the gateway reads off the snapshot this realm sends their clients, a pilot aboard a hull over it, anyone who
+//!    draws it. The tiles a view reaches go to the gateway's cache for this realm, a bounded number a tick, each once
+//!    per gateway; the gateway serves every session the ones its own view reaches. No tile goes to a session directly.
 //!
-//! Each goes out on the reliable Control lane to the asking or owning gateway, which relays or
-//! caches the bytes without decoding a tile. Nothing crosses UPWARD and no pose leaves this realm:
-//! the realm holds its occupant's pose (SL7) and decides what it needs (SL2, SL7). A session that
-//! leaves forgets its tiles; a session that returns is served again.
+//! Each goes out on the reliable Control lane to the asking gateway, which caches the bytes without
+//! decoding a tile. Nothing crosses UPWARD and no pose leaves this realm (SL2, SL7).
 //!
 //! **Example.** A pilot in a hull in orbit sees the home planet. Her gateway reads the planet's
 //! artifact digest off the planet's look bag (relayed through the star system's window), asks the
 //! planet's shard once, receives the head and the six pyramid levels over a few ticks, and serves
-//! her the globe from orbit; when she lands, the planet's shard ships the tiles around the landing
-//! site four a tick, and as she walks inland the tiles ahead follow.
+//! her the globe from orbit; when she lands and walks out, her view of the planet is her avatar's
+//! own position, and the tiles around her follow it four a tick into the gateway's cache.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use bevy_ecs::prelude::*;
-use vd_core::frame::transfer_frame;
-use vd_core::pose::LatticePos;
-use vd_core::{Fence, NodeId, SessionId};
+use vd_core::{Fence, NodeId};
 use vd_wire::session_flow::{ArtifactView, BulkAudience, ShardToGateway};
 
-use super::interest::interest_rule;
-use super::{Dots, Placements, RealmAuthority, RealmRegions, StubConfig, StubStats};
+use super::{RealmAuthority, StubConfig, StubStats};
 use crate::io::{Bytes, Durability, MsgClass};
 use crate::runtime::OutboundBox;
 
-/// ★ THE PACE: how many tiles one tick ships to one session — four of 40 KB is 160 KB a tick, 3.2
+/// ★ THE PACE: how many tiles one tick ships to one gateway — four of 40 KB is 160 KB a tick, 3.2
 /// MB a second at twenty ticks, which a reliable link carries without starving the lane the login
 /// shares (the sky's own lesson, 2026-08-29). A stated pace, never a cap: every tile arrives.
 pub const TILES_PER_TICK: usize = 4;
@@ -58,13 +56,12 @@ pub trait TileSource: Send + Sync {
     /// mask's, each encoded as `BulkMsg::ArtifactCoast`. The sim never names a shape: it ships
     /// the list, paced, and the head says how many of each to expect.
     fn artifact_parts(&self) -> Vec<Bytes>;
-    /// The tiles an occupant standing `radial_m` from the realm's centre along the unit direction
-    /// `dir` (in the realm's own frame) needs, in a stated order: at least those within its
-    /// interest side `interest_m`, and as far as the source's own reach rule says the fine rungs
-    /// read (2026-09-20: the interest side alone shipped one tile under a standing dot) — the
-    /// eye's height read over the ground the source's artifact states under it, the client's own
-    /// ground (2026-10-01; over the radius, a pilot over a deep floor waited on tiles never sent).
-    fn tiles_under(&self, dir: [f64; 3], radial_m: f64, interest_m: f64) -> Vec<(u8, u32, u32)>;
+    /// The tiles a view standing `radial_m` from the realm's centre along the unit direction `dir`
+    /// (in the realm's own frame) reaches, in a stated order, as far as the source's own reach rule
+    /// says the fine rungs read — the eye's height read over the ground the source's artifact states
+    /// under it, the client's own ground (2026-10-01; over the radius, a pilot over a deep floor
+    /// waited on tiles never sent). One rule for every viewer (ruling B88).
+    fn tiles_under(&self, dir: [f64; 3], radial_m: f64) -> Vec<(u8, u32, u32)>;
     /// One tile, encoded as `BulkMsg::ArtifactTile`; `None` past the lattice.
     fn tile(&self, face: u8, tx: u32, ty: u32) -> Option<Bytes>;
 }
@@ -81,17 +78,6 @@ impl std::fmt::Debug for ArtifactSource {
             .finish()
     }
 }
-
-/// What each session has been shipped: its tiles, each once.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Shipped {
-    /// The tiles that went out.
-    pub tiles: BTreeSet<(u8, u32, u32)>,
-}
-
-/// The per-session ship record; a session with no dot any more is forgotten.
-#[derive(Resource, Debug, Default)]
-pub struct ArtifactShipped(pub BTreeMap<SessionId, Shipped>);
 
 /// ★ A GATEWAY'S WANT for this realm's artifact at a digest, and how far the answer has gone:
 /// the head goes first, then the parts in order, paced.
@@ -116,17 +102,24 @@ pub struct TileWant {
 }
 
 /// The wants by asking gateway — ONE head want per gateway (a newer want replaces an older,
-/// unfinished one), and one tile record per gateway.
+/// unfinished one), one tile record per gateway, and ★ one FINE record per gateway (ruling B87: the
+/// views its sessions stated in their last beat, the fine tiles they read, what went to its cache).
 #[derive(Resource, Debug, Default)]
-pub struct ArtifactWants(pub BTreeMap<NodeId, Want>, pub BTreeMap<NodeId, TileWant>);
+pub struct ArtifactWants(
+    pub BTreeMap<NodeId, Want>,
+    pub BTreeMap<NodeId, TileWant>,
+    pub BTreeMap<NodeId, super::fine_ship::FineGateway>,
+);
 
 /// ★ THE WANT ARRIVES (`GatewayToShard::ArtifactWant`): recorded for this realm, refused for any
 /// other (the gateway asked the wrong shard — counted, never guessed at).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn on_artifact_want(
     from: NodeId,
     realm: vd_core::pose::RealmId,
     digest: [u64; 2],
     view: Option<ArtifactView>,
+    now: vd_core::TickId,
     config: &StubConfig,
     wants: &mut ArtifactWants,
     stats: &mut StubStats,
@@ -135,14 +128,17 @@ pub(crate) fn on_artifact_want(
         stats.artifact_wants_foreign += 1;
         return;
     }
-    // A viewer's want: the tiles its view reaches, answered by the emitter when the source is here.
+    // A viewer's want: the tiles its view reaches, answered by the emitter when the source is here —
+    // and ★ the fine tiles it reads (ruling B87), the gateway's views of one beat replacing the last's.
     if let Some(view) = view {
         wants.1.entry(from).or_default().views.push(view);
+        wants.2.entry(from).or_default().state(view, now);
         stats.artifact_wants_received += 1;
         return;
     }
-    // A head want starts the gateway's tile record over: its cache is new.
+    // A head want starts the gateway's tile records over: its cache is new.
     wants.1.remove(&from);
+    wants.2.remove(&from);
     wants.0.insert(
         from,
         Want {
@@ -154,17 +150,12 @@ pub(crate) fn on_artifact_want(
     stats.artifact_wants_received += 1;
 }
 
-/// ★ THE EMITTER, once a tick after the interest frames: the wants, then the tiles.
-#[allow(clippy::too_many_arguments)]
+/// ★ THE EMITTER, once a tick after the interest frames: the wants, then the viewers' tiles.
 pub(crate) fn emit_artifact(
     config: Res<StubConfig>,
     authority: Res<RealmAuthority>,
-    regions: Res<RealmRegions>,
-    placements: Res<Placements>,
-    dots: Res<Dots>,
     source: Res<ArtifactSource>,
     mut wants: ResMut<ArtifactWants>,
-    mut shipped: ResMut<ArtifactShipped>,
     mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
 ) {
@@ -230,7 +221,7 @@ pub(crate) fn emit_artifact(
     for (gateway, want) in &mut wants.1 {
         let views = std::mem::take(&mut want.views);
         for view in views {
-            for tile in source.tiles_under(view.dir, view.radial_m, 0.0) {
+            for tile in source.tiles_under(view.dir, view.radial_m) {
                 if !want.sent.contains(&tile) && !want.queued.contains(&tile) {
                     want.queued.push_back(tile);
                 }
@@ -262,75 +253,11 @@ pub(crate) fn emit_artifact(
     for gateway in stale_views {
         wants.1.remove(&gateway);
     }
-    // ★ THE TILES: a session that left forgets its ship.
-    shipped.0.retain(|session, _| dots.0.contains_key(session));
-    if dots.0.is_empty() {
-        return;
-    }
-    let own_frame = regions.own_frame(config.realm);
-    let tier = own_frame.tier();
-    let max_look = dots
-        .0
-        .values()
-        .map(|d| d.look_extent_m)
-        .fold(0.0_f64, f64::max);
-    let radius_m = interest_rule(max_look, config.tick_dt_s).side_m;
-    for (session, dot) in &dots.0 {
-        let record = shipped.0.entry(*session).or_default();
-        // The tiles under the occupant: its pose in this realm's frame, as a direction.
-        let pos = placements
-            .0
-            .at(config.realm, dot.pose.universe_tick)
-            .ok()
-            .and_then(|book| transfer_frame(&dot.pose, own_frame, book).ok())
-            .map_or(dot.pose.pos, |converted| converted.pos);
-        let radial = pos.delta_m(LatticePos::ORIGIN, tier);
-        let dir = radial.normalize_or_zero();
-        if dir == vd_core::glam::DVec3::ZERO {
-            continue; // an occupant at the very centre stands under no tile
-        }
-        let mut sent = 0usize;
-        let named = source.tiles_under(dir.to_array(), radial.length(), radius_m);
-        if record.tiles.is_empty() {
-            tracing::info!(
-                session = ?session,
-                gateway = ?dot.gateway,
-                radial_m = radial.length(),
-                interest_m = radius_m,
-                named = named.len(),
-                "the occupant's tiles: the first tick this session is served"
-            );
-        }
-        for tile in named {
-            if sent >= TILES_PER_TICK {
-                break;
-            }
-            if record.tiles.contains(&tile) {
-                continue;
-            }
-            let Some(bytes) = source.tile(tile.0, tile.1, tile.2) else {
-                continue;
-            };
-            push_bulk(
-                &mut outbox,
-                dot.gateway,
-                realm_fence,
-                BulkAudience::Sessions(vec![*session]),
-                bytes,
-            );
-            record.tiles.insert(tile);
-            if record.tiles.len() <= 16 {
-                tracing::info!(session = ?session, ?tile, sent = record.tiles.len(), "the occupant's tile shipped");
-            }
-            stats.artifact_tiles_sent += 1;
-            sent += 1;
-        }
-    }
 }
 
-/// One `BulkFor` to a gateway, on the reliable Control lane, ephemeral: a session that reconnects
-/// is a new dot and is served afresh; a gateway that restarts asks afresh.
-fn push_bulk(
+/// One `BulkFor` to a gateway, on the reliable Control lane, ephemeral: a gateway that restarts
+/// asks afresh.
+pub(crate) fn push_bulk(
     outbox: &mut OutboundBox,
     gateway: NodeId,
     realm_fence: Fence,
@@ -354,6 +281,7 @@ fn push_bulk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vd_core::SessionId;
 
     /// The push: one bulk on the Control lane to the gateway named, ephemeral, with the audience
     /// and the bytes given.

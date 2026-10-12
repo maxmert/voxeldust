@@ -338,6 +338,10 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 ///    214–215 m at 414 / 828 / 1 656 routings over the age).
 /// 6. **THE ROCK NAMES WHERE PLATES PUSH TOGETHER** (ruling B63 item 2, `land::province_of`): a sinking
 ///    forearc and the diving plate's lifted floor are deep sediment, never rift basalt.
+/// 7. **THE CLIMATE AND THE RUNNING SEA EVERY PASS** (ruling B69 item 1, `solve`): the schedule
+///    states no climate spacing any more. MEASURED before: one late re-solve of the sea raised it
+///    53–60 m at another time on each axis, and plate 5's old plains moved 14.3 % between 414 and
+///    828 passes (9.1 % with the cure, inside the gate).
 ///
 /// The column rule for a chunk with NO artifact does not move, so the SEED-ONLY golden tables stand.
 /// `ARTIFACT_VERSION` stays 9: the artifact's rows keep their form and only their values change.
@@ -363,15 +367,17 @@ pub fn declared_world_tag(universe_seed: u64) -> u64 {
 /// and an artifact stored by the old solve must then be refused and solved again. At 21 the key
 /// equalled the declared tag of generator 21, so every artifact stored before the split still
 /// opened; at 23 (phase 1 of the ground step), at 24 (phase 2's macro change), at 25 (the rock
-/// kept and the finer axis, ruling B56) and at 26 (the first land's relief and margins, Rho8, the
-/// crust share and the capture, rulings B58–B62) the solve moved and every stored artifact solves
-/// again.
+/// kept and the finer axis, ruling B56), at 26 (the first land's relief and margins, Rho8, the
+/// crust share and the capture, rulings B58–B62) and at 27 (generator 26 as pinned: a window preview
+/// of 2026-10-07 stored artifacts of an earlier generator-26 solve under 26, and the solve moved after
+/// it — the forearc's rock, four routings a pass, the climate and the sea every pass, rulings
+/// B63–B69) the solve moved and every stored artifact solves again.
 ///
 /// **Example.** Generator 22 removes the shore law. The home planet's shard boots, finds its
 /// artifact stored under key generation 21, opens it and ships it at once; the client builds the
 /// chunks again under the new column rule, and nobody waits 205 s for a solve that would change
 /// nothing.
-pub const ARTIFACT_KEY_GENERATION: u32 = 26;
+pub const ARTIFACT_KEY_GENERATION: u32 = 27;
 
 /// The key a realm's stored artifact is written and read under: the artifact's own generation
 /// ([`ARTIFACT_KEY_GENERATION`]) folded with the universe seed.
@@ -437,13 +443,13 @@ mod tests {
         );
     }
 
-    /// The artifact's key is its own generation: at 26 the solve moved (the first land's relief and
-    /// margins, Rho8, the crust share and the capture, rulings B58–B62), so every artifact stored under
-    /// 25 is refused, and it folds the seed like the declared tag.
+    /// The artifact's key is its own generation: at 27 the solve moved (generator 26 as pinned, after the
+    /// preview of 2026-10-07 stored artifacts of an earlier generator-26 solve under 26), so every
+    /// artifact stored under 26 is refused, and it folds the seed like the declared tag.
     #[test]
     fn the_artifact_key_is_its_own_generation_folded_with_the_seed() {
         assert_eq!(
-            ARTIFACT_KEY_GENERATION, 26,
+            ARTIFACT_KEY_GENERATION, 27,
             "bump by hand when the home planet's artifact pin moves, and say so"
         );
         assert_eq!(artifact_world_tag(2298), ARTIFACT_KEY_PIN);
@@ -478,5 +484,5 @@ mod tests {
 
     /// The key the home world's artifacts are stored under: generation 26's, which equals generator
     /// 26's declared tag (the solve moved at 26, so no artifact of an older key opens).
-    const ARTIFACT_KEY_PIN: u64 = 6_435_761_202_656_745_901;
+    const ARTIFACT_KEY_PIN: u64 = 15_237_372_007_101_351_852;
 }

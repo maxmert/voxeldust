@@ -1,11 +1,11 @@
 //! ★ THE ARTIFACT SHIP ON THE SCHEDULE (slice 8c stage C4c and the far-view ship): a gateway's
 //! want is answered with the head and the pyramid's parts, paced, on the realm audience, once; a
-//! stale want is dropped; a want for another realm is refused; the tiles under an occupant's pose
-//! go four a tick and each once to that session; a session that leaves is forgotten; nothing ships
-//! with no source, no authority, or an occupant at the centre.
+//! stale want is dropped; a want for another realm is refused; the tiles a viewer's view reaches go
+//! four a tick and each once to that gateway's cache; ★ ONE PATH (ruling B88): an occupant is shipped
+//! no tile of its own — its gateway's view of it is; nothing ships with no source or no authority.
 
 use super::*;
-use crate::stub::artifact_ship::{ArtifactShipped, ArtifactSource, ArtifactWants, TileSource};
+use crate::stub::artifact_ship::{ArtifactSource, ArtifactWants, TileSource};
 use vd_wire::session_flow::{BulkAudience, ShardToGateway};
 
 /// A stated source: one head, eleven pyramid parts (more than one tick's pace), six tiles under
@@ -28,10 +28,9 @@ impl TileSource for Stated {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         (0..11u8).map(|k| crate::io::bytes(vec![0xB0, k])).collect()
     }
-    fn tiles_under(&self, dir: [f64; 3], radial_m: f64, _interest_m: f64) -> Vec<(u8, u32, u32)> {
-        // The occupant's distance from the centre is handed to the source, in metres of the
-        // realm's frame: a stand 1 000 units out along +Z, which is one thousand of the config
-        // frame's own steps.
+    fn tiles_under(&self, dir: [f64; 3], radial_m: f64) -> Vec<(u8, u32, u32)> {
+        // The view's distance from the centre is handed to the source, in metres of the realm's
+        // frame.
         assert!(radial_m > 0.0, "{radial_m}");
         // A view of the far side (down -Z) reads ground this artifact's lattice does not cover:
         // the source names tiles past the lattice, and the gateway gets no tile at all.
@@ -179,19 +178,20 @@ fn a_gateways_want_is_answered_paced_on_the_realm_audience_once() {
     }
 }
 
+/// ★ ONE PATH (ruling B88, the owner: *"one way only — through gateway"*): an occupant standing over
+/// tiles is shipped none of its own, on any audience; the tiles under it go to its gateway's cache
+/// when the gateway states its view, as every other viewer's do. Example: a walker stands on the home
+/// belt; the planet's shard sends her nothing directly, and her gateway's view of her brings the
+/// tiles under her boots into its cache, from which she is served.
 #[test]
-fn the_tiles_under_an_occupant_go_four_a_tick_and_each_once() {
+fn an_occupant_is_shipped_no_tile_of_its_own() {
     let mut rig = Rig::new();
     rig.grant_realm();
     let _ = rig.attach();
-    let audience = BulkAudience::Sessions(vec![SESSION]);
-    // No source: nothing shipped, and the record is empty.
-    assert!(bulks(&rig.tick(vec![]), &audience).is_empty());
-    assert!(rig.world.resource::<ArtifactShipped>().0.is_empty());
+    let realm = config().realm;
     let source = ArtifactSource(Some(Box::new(Stated::default())));
     assert_eq!(format!("{source:?}"), "ArtifactSource { present: true }");
     *rig.world.resource_mut::<ArtifactSource>() = source;
-    // The occupant stands off the centre, so tiles are under it.
     rig.world
         .resource_mut::<Dots>()
         .0
@@ -202,38 +202,18 @@ fn the_tiles_under_an_occupant_go_four_a_tick_and_each_once() {
         DVec3::new(0.0, 0.0, 1_000.0),
         UniverseTick(5),
     );
-    // Tick one: four tiles; tick two: the last the source holds (the sixth is past the lattice
-    // and skipped); tick three: nothing more. No head and no pyramid ride this audience.
-    let out = bulks(&rig.tick(vec![]), &audience);
-    assert_eq!(out.len(), 4);
-    assert_eq!(out[0], vec![0xC0, 2, 0, 0]);
-    assert_eq!(out[3], vec![0xC0, 2, 3, 0]);
-    let out = bulks(&rig.tick(vec![]), &audience);
-    assert_eq!(out, vec![vec![0xC0, 2, 4, 0]]);
-    assert!(bulks(&rig.tick(vec![]), &audience).is_empty());
-    {
-        let stats = rig.world.resource::<StubStats>();
-        assert_eq!(stats.artifact_tiles_sent, 5);
-        assert_eq!(stats.artifact_heads_sent, 0);
-        let shipped = rig.world.resource::<ArtifactShipped>();
-        assert_eq!(shipped.0.get(&SESSION).expect("a record").tiles.len(), 5);
+    for _ in 0..3 {
+        let sent = rig.tick(vec![]);
+        assert!(bulks(&sent, &BulkAudience::Sessions(vec![SESSION])).is_empty());
+        assert!(bulks(&sent, &BulkAudience::Realm(realm)).is_empty());
     }
-    // An occupant at the very centre stands under no tile.
-    let centre = SessionId(0xBB);
-    let mut dot = rig.world.resource::<Dots>().0[&SESSION];
-    dot.pose = StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(5));
-    rig.world.resource_mut::<Dots>().0.insert(centre, dot);
-    assert!(bulks(&rig.tick(vec![]), &BulkAudience::Sessions(vec![centre])).is_empty());
-    // The session that leaves is forgotten; the one that stays keeps its record.
-    rig.world.resource_mut::<Dots>().0.remove(&SESSION);
-    let _ = rig.tick(vec![]);
-    let shipped = rig.world.resource::<ArtifactShipped>();
-    assert!(!shipped.0.contains_key(&SESSION));
-    assert!(shipped.0.contains_key(&centre));
-    // With every dot gone the record empties and nothing is shipped.
-    rig.world.resource_mut::<Dots>().0.clear();
-    assert!(bulks(&rig.tick(vec![]), &audience).is_empty());
-    assert!(rig.world.resource::<ArtifactShipped>().0.is_empty());
+    assert_eq!(rig.world.resource::<StubStats>().artifact_tiles_sent, 0);
+    // Her gateway's view of her: the tiles under it go to the cache, four this tick.
+    let out = bulks(
+        &rig.tick(vec![view_msg(realm, DIGEST, 1_000.0)]),
+        &BulkAudience::Realm(realm),
+    );
+    assert_eq!(out.len(), 4);
 }
 
 /// ★ A TILE QUEUES ONCE PER GATEWAY, whatever its sessions ask: two views of the same ground in
@@ -296,7 +276,7 @@ fn the_ship_waits_for_the_realms_authority() {
     assert_eq!(rig.world.resource::<StubStats>().artifact_heads_sent, 0);
 }
 
-/// A source whose ground under any occupant is twenty tiles, all held.
+/// A source whose ground under any view is twenty tiles, all held.
 struct Twenty;
 
 impl TileSource for Twenty {
@@ -309,7 +289,7 @@ impl TileSource for Twenty {
     fn artifact_parts(&self) -> Vec<crate::io::Bytes> {
         Vec::new()
     }
-    fn tiles_under(&self, _dir: [f64; 3], _radial_m: f64, _interest_m: f64) -> Vec<(u8, u32, u32)> {
+    fn tiles_under(&self, _dir: [f64; 3], _radial_m: f64) -> Vec<(u8, u32, u32)> {
         (0..20).map(|k| (1, k, 0)).collect()
     }
     fn tile(&self, face: u8, tx: u32, ty: u32) -> Option<crate::io::Bytes> {
@@ -317,36 +297,21 @@ impl TileSource for Twenty {
     }
 }
 
-/// ★ MORE THAN SIXTEEN TILES TO ONE SESSION STILL SHIP, EACH ONCE (2026-09-27, an HR5 gap): the log
-/// names only the first sixteen a session is shipped, and every tile past them still goes, four a
-/// tick. Example: a pilot flies low along a coast; the shard ships each new tile under the path,
-/// and its log stops naming them after sixteen.
+/// ★ TWENTY TILES UNDER ONE VIEW SHIP FOUR A TICK, EACH ONCE: the queue drains over five ticks and
+/// every tile goes to the gateway's cache once. Example: a pilot flies low along a coast; the shard
+/// queues each new tile under her gateway's view and ships it once.
 #[test]
-fn more_than_sixteen_tiles_to_one_session_still_ship_each_once() {
+fn twenty_tiles_under_one_view_ship_four_a_tick_each_once() {
     let mut rig = Rig::new();
     rig.grant_realm();
-    let _ = rig.attach();
+    let realm = config().realm;
     *rig.world.resource_mut::<ArtifactSource>() = ArtifactSource(Some(Box::new(Twenty)));
-    rig.world
-        .resource_mut::<Dots>()
-        .0
-        .get_mut(&SESSION)
-        .expect("the attached dot")
-        .pose = StampedPose::at_rest(
-        config().frame,
-        DVec3::new(0.0, 0.0, 1_000.0),
-        UniverseTick(5),
-    );
-    let audience = BulkAudience::Sessions(vec![SESSION]);
-    let shipped: usize = (0..6)
+    let audience = BulkAudience::Realm(realm);
+    let first = bulks(&rig.tick(vec![view_msg(realm, DIGEST, 1_000.0)]), &audience).len();
+    let rest: usize = (0..5)
         .map(|_| bulks(&rig.tick(vec![]), &audience).len())
         .sum();
-    assert_eq!(shipped, 20, "four a tick, every one of the twenty");
-    assert_eq!(
-        rig.world.resource::<ArtifactShipped>().0[&SESSION]
-            .tiles
-            .len(),
-        20
-    );
+    assert_eq!((first, first + rest), (4, 20), "four a tick, every one of the twenty");
+    assert_eq!(rig.world.resource::<ArtifactWants>().1[&GATEWAY].sent.len(), 20);
     assert_eq!(rig.world.resource::<StubStats>().artifact_tiles_sent, 20);
 }

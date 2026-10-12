@@ -76,6 +76,10 @@ pub struct Laws {
     /// descent with the budget's own flat potential. Measures whether the young plateaus' capture speed is the flats'
     /// rule.
     pub routing_flats: bool,
+    /// ★ THE CLIMATE'S SPACING — A RESOLUTION, NOT A LAW (ruling B68 measured with it; the bench's `^C`): the climate
+    /// and the running sea re-solved every this many passes. The game re-solves both every pass (ruling B69 item 1),
+    /// so the default is one; a larger spacing measures the error the game's twenty passes carried until generator 26.
+    pub climate_every: u32,
     /// ★ THE INITIAL LAND (rulings B58 item 2, B59–B61; [`crate::land_copy`]): the game's own by default (generator
     /// 26), or the bench land copy with a law taken out or a diagnostic in.
     pub land: crate::land_copy::LandLaws,
@@ -90,6 +94,7 @@ impl Default for Laws {
             water_paths: true,
             pass_share: false,
             routing_flats: false,
+            climate_every: 1,
             land: crate::land_copy::LandLaws::default(),
         }
     }
@@ -458,6 +463,22 @@ fn land_reading(state: &MacroSolve) -> (f64, f64, f64) {
     (per(height, land), per(over_km, land), per(land, all))
 }
 
+/// One routing of a pass: the game's own (`route_for_pass`, ruling B73 item 1) — the ocean's label alone where the
+/// budget's tree routes the rest (a body with water and the water's own paths in) — and the full routing where a law
+/// taken out (`water_paths`) or a candidate (`routing_flats`) reads the routing's own receivers.
+fn route_copy(
+    state: &mut MacroSolve,
+    has_water: bool,
+    laws: &Laws,
+) -> vd_terrain::solve::RouteReport {
+    if has_water & laws.water_paths & !laws.routing_flats {
+        return state.label_for_budget();
+    }
+    let report = state.route();
+    state.accumulate();
+    report
+}
+
 /// ★ THE COPY of `vd_terrain::solve::solve_full` (phase 2), line for line, with each law's hook marked `LAW`. Every other
 /// line is the solve's own; the control proves it.
 #[must_use]
@@ -577,7 +598,7 @@ pub fn solve_copy_watched(
     } else {
         vec![i32::MAX; n]
     };
-    let mut since_climate = schedule.climate_every;
+    let mut since_climate = laws.climate_every;
     let mut climate: Option<vd_terrain::climate::Climate> = None;
     let mut talus_done = 0u32;
     let mut ledger: Vec<PassLedger> = Vec::new();
@@ -662,7 +683,7 @@ pub fn solve_copy_watched(
         if let Some(w) = watch.as_mut() {
             w(pass, t1, "craters", &state);
         }
-        if since_climate >= schedule.climate_every {
+        if since_climate >= laws.climate_every {
             if let Some(sea) = vd_terrain::land::sea_level_connected(
                 &lattice,
                 &state.z,
@@ -694,8 +715,7 @@ pub fn solve_copy_watched(
             .as_ref()
             .expect("the climate stands from the first pass");
         let clock = std::time::Instant::now();
-        report.routes.push(state.route());
-        state.accumulate();
+        report.routes.push(route_copy(&mut state, has_water, laws));
         times_s[0] += clock.elapsed().as_secs_f64();
         // CANDIDATE (B54): the routing's own receivers, kept for the open land.
         let (routed, routed_chord) = if laws.routing_flats {
@@ -805,8 +825,7 @@ pub fn solve_copy_watched(
         for s in 0..sub_sweeps {
             if schedule.routes_before(s) {
                 let clock = std::time::Instant::now();
-                report.routes.push(state.route());
-                state.accumulate();
+                report.routes.push(route_copy(&mut state, has_water, laws));
                 times_s[0] += clock.elapsed().as_secs_f64();
                 let clock = std::time::Instant::now();
                 basins = if laws.water_paths {

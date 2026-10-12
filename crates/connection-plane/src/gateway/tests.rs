@@ -4058,6 +4058,9 @@ fn freshest_session_confirmed_maxes_over_active_and_selffenced() {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            fine_sent: std::collections::BTreeMap::new(),
+            fine_acked: std::collections::BTreeMap::new(),
+            eye: Default::default(),
             artifact_redrive: Default::default(),
             held_bulk: Vec::new(),
             client: CLIENT,
@@ -4149,6 +4152,9 @@ fn one_active_session() -> (GatewaySessions, SessionId, OutboundBox) {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            fine_sent: std::collections::BTreeMap::new(),
+            fine_acked: std::collections::BTreeMap::new(),
+            eye: Default::default(),
             artifact_redrive: Default::default(),
             held_bulk: Vec::new(),
             client: CLIENT,
@@ -4411,6 +4417,9 @@ fn sweep_keeps_a_shared_reverse_index_entry_with_a_surviving_subscriber() {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            fine_sent: std::collections::BTreeMap::new(),
+            fine_acked: std::collections::BTreeMap::new(),
+            eye: Default::default(),
             artifact_redrive: Default::default(),
             held_bulk: Vec::new(),
             client: NodeId(101),
@@ -5491,6 +5500,9 @@ fn active_session() -> Session {
         artifact_held: std::collections::BTreeMap::new(),
         artifact_parts_sent: std::collections::BTreeMap::new(),
         artifact_tiles_sent: std::collections::BTreeMap::new(),
+        fine_sent: std::collections::BTreeMap::new(),
+        fine_acked: std::collections::BTreeMap::new(),
+        eye: Default::default(),
         artifact_redrive: Default::default(),
         held_bulk: Vec::new(),
         client: CLIENT,
@@ -10893,6 +10905,9 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            fine_sent: std::collections::BTreeMap::new(),
+            fine_acked: std::collections::BTreeMap::new(),
+            eye: Default::default(),
             artifact_redrive: Default::default(),
             held_bulk: Vec::new(),
             client: CLIENT,
@@ -12017,7 +12032,7 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
     use vd_wire::channels::BulkMsg;
     use vd_wire::session_flow::{ArtifactView, BulkAudience};
     let mut rig = Rig::new();
-    let (sid, _) = rig.login(); // window 1 = Occupants(System 7) on SHARD
+    let _ = rig.login(); // window 1 = Occupants(System 7) on SHARD
     let digest = [0xA1u64, 0xB2];
     // The planet states a surface, a charter and an artifact: enough for a body with a lattice.
     let charter = vd_core::look::BodyCharter {
@@ -12231,35 +12246,41 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
         1
     );
     assert_eq!(rig.stats().artifact_parts_stray, 1);
-    // ★ ONE BUDGET A BEAT (2026-09-27): a relayed tile a re-drive owes goes first, and a copy as
-    // large as the whole beat leaves nothing for the view's tile, which waits a beat.
-    let owed = (RealmId::Planet(7), (9u8, 9u32, 9u32));
-    {
-        let mut sessions = rig.world.resource_mut::<GatewaySessions>();
-        sessions
-            .relayed_tiles
-            .insert(owed, vec![0; super::artifact::ARTIFACT_BYTES_PER_BEAT]);
-        let redrive = &mut sessions
-            .by_session
-            .get_mut(&sid)
-            .expect("the session")
-            .artifact_redrive;
-        redrive.relayed.entry(owed.0).or_default().insert(owed.1);
-        redrive.resend.insert(owed);
-    }
     set_tick(&mut rig, 100);
-    let served = parts_to_client(&rig.tick(vec![]));
-    assert_eq!(served.len(), 1, "the relayed copy alone");
-    assert_eq!(served[0].len(), super::artifact::ARTIFACT_BYTES_PER_BEAT);
-    assert_eq!(rig.stats().artifact_tiles_resent, 1);
-    set_tick(&mut rig, 125);
     let served = parts_to_client(&rig.tick(vec![]));
     assert_eq!(served.len(), 1, "{served:?}");
     assert_eq!(
         postcard::from_bytes::<BulkMsg>(&served[0]).expect("decodes"),
         tile
     );
+    // ★ ONE BUDGET A BEAT (2026-09-27): a tile as large as the whole beat leaves nothing for the next
+    // tile the view reaches, which waits a beat.
+    assert!(tiles.len() >= 3, "{tiles:?}");
+    let tile_at = |k: usize, rows: Vec<u8>| BulkMsg::ArtifactTile {
+        realm: RealmId::Planet(7),
+        face: tiles[k].0,
+        tx: tiles[k].1,
+        ty: tiles[k].2,
+        rows,
+    };
+    let large = tile_at(1, vec![0; super::artifact::ARTIFACT_BYTES_PER_BEAT]);
+    set_tick(&mut rig, 101);
+    let _ = rig.tick(vec![bulk(&large), bulk(&tile_at(2, vec![7]))]);
+    set_tick(&mut rig, 125);
+    let served = parts_to_client(&rig.tick(vec![]));
+    assert_eq!(served.len(), 1, "the large tile alone");
+    assert_eq!(
+        postcard::from_bytes::<BulkMsg>(&served[0]).expect("decodes"),
+        large
+    );
     set_tick(&mut rig, 150);
+    let served = parts_to_client(&rig.tick(vec![]));
+    assert_eq!(served.len(), 1, "{served:?}");
+    assert_eq!(
+        postcard::from_bytes::<BulkMsg>(&served[0]).expect("decodes"),
+        tile_at(2, vec![7])
+    );
+    set_tick(&mut rig, 175);
     assert!(parts_to_client(&rig.tick(vec![])).is_empty());
 }
 
@@ -13337,10 +13358,9 @@ fn one_budget_a_beat_serves_the_sessions_realms_in_turn() {
 }
 
 /// ★ THE RE-DRIVE: a shed toward the client holds its serve for a beat, then every realm it was
-/// served and has not stated whole gets one more pass from the head, the tiles it was served from
-/// a view are forgotten (so they go out again), and every tile a shard shipped to it is sent again
-/// from the gateway's copy — a tile whose copy is gone is skipped. A realm the client states whole
-/// is never served again.
+/// served and has not stated whole gets one more pass from the head, and the tiles it was served
+/// from a view are forgotten (so they go out again; ruling B88: every tile comes from a realm's
+/// cache). A realm the client states whole is never served again.
 #[test]
 fn a_shed_holds_the_serve_a_beat_then_serves_again_what_the_client_may_lack() {
     let (r0, r1, r2) = (
@@ -13352,17 +13372,11 @@ fn a_shed_holds_the_serve_a_beat_then_serves_again_what_the_client_may_lack() {
     cache_whole(&mut sessions, r0, [1, 2], 2, 100);
     cache_whole(&mut sessions, r1, [3, 4], 1, 100);
     let mut session = session_drawing(r0, &[r1, r2]);
-    let (t1, t2) = ((0u8, 0u32, 0u32), (0u8, 0u32, 1u32));
-    session
-        .artifact_redrive
-        .relayed
-        .insert(r0, BTreeSet::from([t1, t2]));
     session
         .artifact_tiles_sent
         .insert(r1, BTreeSet::from([(1u8, 2u32, 3u32)]));
     sessions.by_session.insert(SessionId(1), session);
     sessions.by_client.insert(CLIENT, SessionId(1));
-    sessions.relayed_tiles.insert((r0, t1), vec![7; 64]);
     let drawn = BTreeMap::from([(r0, [1, 2]), (r1, [3, 4]), (r2, [5, 6])]);
     let mut stats = GatewayStats::default();
     assert_eq!(serve_beat(&mut sessions, &mut stats, &drawn, 25).len(), 5);
@@ -13388,9 +13402,7 @@ fn a_shed_holds_the_serve_a_beat_then_serves_again_what_the_client_may_lack() {
     // A beat later: the re-drive.
     let sent = serve_beat(&mut sessions, &mut stats, &drawn, 75);
     assert_eq!(stats.artifact_redrives, 1);
-    assert_eq!(stats.artifact_tiles_resent, 1, "t2's copy is gone");
-    assert_eq!(sent[0], vec![7; 64], "the relayed copy first");
-    let parts: Vec<(RealmId, u32)> = sent[1..].iter().map(|b| named_part(b)).collect();
+    let parts: Vec<(RealmId, u32)> = sent.iter().map(|b| named_part(b)).collect();
     assert_eq!(
         parts,
         vec![(r0, u32::MAX), (r0, 0), (r0, 1)],
@@ -13448,35 +13460,6 @@ fn a_pass_owed_by_a_redrive_starts_when_the_pass_in_flight_ends() {
     assert!(serve_beat(&mut sessions, &mut stats, &drawn, 150).is_empty());
 }
 
-/// ★ THE RELAYED TILES' RESEND IS PACED: three copies of 800 KiB owed — the first two go in the
-/// first beat (the second begun inside the budget), the third the next beat.
-#[test]
-fn the_relayed_tiles_owed_are_sent_within_the_beats_budget() {
-    let r0 = RealmId::Planet(10);
-    let mut sessions = GatewaySessions::default();
-    let mut session = session_drawing(r0, &[]);
-    let keys = [(0u8, 0u32, 0u32), (0, 0, 1), (0, 0, 2)];
-    for key in keys {
-        session
-            .artifact_redrive
-            .relayed
-            .entry(r0)
-            .or_default()
-            .insert(key);
-        session.artifact_redrive.resend.insert((r0, key));
-        sessions
-            .relayed_tiles
-            .insert((r0, key), vec![1; 800 * 1024]);
-    }
-    sessions.by_session.insert(SessionId(1), session);
-    let drawn = BTreeMap::from([(r0, [1, 2])]);
-    let mut stats = GatewayStats::default();
-    assert_eq!(serve_beat(&mut sessions, &mut stats, &drawn, 25).len(), 2);
-    assert_eq!(serve_beat(&mut sessions, &mut stats, &drawn, 50).len(), 1);
-    assert!(serve_beat(&mut sessions, &mut stats, &drawn, 75).is_empty());
-    assert_eq!(stats.artifact_tiles_resent, 3);
-}
-
 /// ★ A SHED TOWARD A NODE THAT HOLDS NO SESSION changes nothing: an unknown node, and a client
 /// whose index names a session this gateway no longer holds.
 #[test]
@@ -13489,47 +13472,11 @@ fn a_shed_toward_a_node_with_no_session_arms_nothing() {
     assert_eq!(stats.client_sends_shed, 0);
 }
 
-/// ★ A TILE'S KEY off a shard's bulk: a tile names its realm and key; a head, and bytes that are
-/// no bulk message at all, name nothing.
+/// ★ A NAMED BULK IS RELAYED OR HELD, NEVER RECORDED (ruling B88: no tile rides the named-session
+/// relay, so the relay keeps no copy): relayed to an active session, held for an activating one,
+/// and any bytes go the same way.
 #[test]
-fn only_a_tile_names_a_relayed_key() {
-    use vd_wire::channels::BulkMsg;
-    let tile = BulkMsg::ArtifactTile {
-        realm: RealmId::Planet(7),
-        face: 2,
-        tx: 3,
-        ty: 4,
-        rows: vec![1],
-    };
-    assert_eq!(
-        super::artifact::tile_key_of(&postcard::to_allocvec(&tile).expect("encode")),
-        Some((RealmId::Planet(7), (2, 3, 4)))
-    );
-    let head = BulkMsg::ArtifactHead {
-        realm: RealmId::Planet(7),
-        world_tag: 9,
-        version: 2,
-        edge: 16,
-        digest: [1, 2],
-        tiles_per_edge: 1,
-        levels: 1,
-        sea_m: 0,
-        coast_parts: 0,
-        low_m: 0,
-        high_m: 0,
-    };
-    assert_eq!(
-        super::artifact::tile_key_of(&postcard::to_allocvec(&head).expect("encode")),
-        None
-    );
-    assert_eq!(super::artifact::tile_key_of(&[0xFF, 0xFF, 0xFF]), None);
-}
-
-/// ★ A RELAYED TILE IS RECORDED: relayed to an active session or held for an activating one, the
-/// session's record names it and the gateway keeps the newest copy; a bulk that is no tile is
-/// relayed unrecorded.
-#[test]
-fn a_relayed_tile_is_recorded_with_its_newest_copy() {
+fn a_named_bulk_is_relayed_or_held_and_never_recorded() {
     use super::shard::relay_bulk;
     use vd_wire::channels::BulkMsg;
     let tile = |rows: Vec<u8>| {
@@ -13551,105 +13498,48 @@ fn a_relayed_tile_is_recorded_with_its_newest_copy() {
     sessions.by_session.insert(SessionId(2), activating);
     let mut stats = GatewayStats::default();
     let mut outbox = OutboundBox::default();
-    let key = (RealmId::Planet(7), (1u8, 2u32, 3u32));
-    relay_bulk(
-        NodeId(7),
-        Fence(1),
-        &[SessionId(1)],
-        tile(vec![1]),
-        &mut sessions,
-        &mut stats,
-        &mut outbox,
-    );
-    assert_eq!(sessions.relayed_tiles[&key], tile(vec![1]));
-    relay_bulk(
-        NodeId(7),
-        Fence(1),
-        &[SessionId(2)],
-        tile(vec![2]),
-        &mut sessions,
-        &mut stats,
-        &mut outbox,
-    );
-    assert_eq!(
-        sessions.relayed_tiles[&key],
-        tile(vec![2]),
-        "the newest copy"
-    );
-    for sid in [SessionId(1), SessionId(2)] {
-        assert_eq!(
-            sessions.by_session[&sid].artifact_redrive.relayed[&key.0],
-            BTreeSet::from([key.1])
-        );
+    for (sid, bytes) in [
+        (SessionId(1), tile(vec![1])),
+        (SessionId(2), tile(vec![2])),
+        (SessionId(1), vec![1, 2, 3]),
+    ] {
+        relay_bulk(NodeId(7), Fence(1), &[sid], bytes, &mut sessions, &mut stats, &mut outbox);
     }
-    relay_bulk(
-        NodeId(7),
-        Fence(1),
-        &[SessionId(1)],
-        vec![1, 2, 3],
-        &mut sessions,
-        &mut stats,
-        &mut outbox,
-    );
-    assert_eq!(sessions.relayed_tiles.len(), 1);
     assert_eq!(stats.artifact_parts_relayed, 2);
     assert_eq!(stats.bulk_for_held, 1);
+    assert_eq!(sessions.by_session[&SessionId(2)].held_bulk, vec![tile(vec![2])]);
+    assert!(sessions.by_session[&SessionId(1)].artifact_redrive.repass.is_empty());
 }
 
-/// ★ THE RELAYED RECORDS FOLLOW THE PICTURES: an active session keeps the realms it draws, a
-/// session that still activates keeps everything, and the gateway keeps a copy only while some
-/// record names it. An owed pass of a realm no picture names is forgotten.
+/// ★ AN OWED PASS FOLLOWS THE PICTURES: an owed pass of a realm no picture names is forgotten, the
+/// drawn realm's stays; ★ the beat asks every ACTIVE session for a fresh eye (ruling B88), and a
+/// session that still activates is asked nothing.
 #[test]
-fn the_relayed_records_and_copies_follow_the_pictures() {
-    let (r0, r5, r7, r9) = (
-        RealmId::Planet(10),
-        RealmId::Planet(15),
-        RealmId::Planet(17),
-        RealmId::Planet(19),
-    );
-    let (t, u) = ((0u8, 0u32, 0u32), (0u8, 0u32, 1u32));
+fn an_owed_pass_follows_the_pictures_and_the_beat_asks_for_the_eye() {
+    let (r0, r9) = (RealmId::Planet(10), RealmId::Planet(19));
     let mut sessions = GatewaySessions::default();
     let mut active = session_drawing(r0, &[]);
-    active.artifact_redrive.relayed =
-        BTreeMap::from([(r0, BTreeSet::from([t])), (r9, BTreeSet::from([t]))]);
-    active.artifact_redrive.resend = BTreeSet::from([(r0, t), (r9, t)]);
     active.artifact_redrive.repass = BTreeSet::from([r0, r9]);
     sessions.by_session.insert(SessionId(1), active);
     let mut activating = active_session();
     activating.phase = SessionPhase::AwaitingAttach;
-    activating.artifact_redrive.relayed = BTreeMap::from([(r5, BTreeSet::from([u]))]);
     sessions.by_session.insert(SessionId(2), activating);
-    for key in [(r0, t), (r9, t), (r5, u), (r7, t)] {
-        sessions.relayed_tiles.insert(key, vec![1]);
-    }
     let drawn = BTreeMap::from([(r0, [1, 2])]);
     let mut stats = GatewayStats::default();
     let _ = serve_beat(&mut sessions, &mut stats, &drawn, 25);
-    let active = &sessions.by_session[&SessionId(1)].artifact_redrive;
-    assert_eq!(active.relayed.keys().copied().collect::<Vec<_>>(), vec![r0]);
-    assert!(active.repass.contains(&r0));
-    assert!(!active.repass.contains(&r9));
-    let activating = &sessions.by_session[&SessionId(2)].artifact_redrive;
-    assert_eq!(
-        activating.relayed.keys().copied().collect::<Vec<_>>(),
-        vec![r5]
-    );
-    assert_eq!(
-        sessions.relayed_tiles.keys().copied().collect::<Vec<_>>(),
-        vec![(r0, t), (r5, u)]
-    );
-    assert_eq!(stats.artifact_tiles_resent, 1, "r0's copy, owed and drawn");
+    let active = &sessions.by_session[&SessionId(1)];
+    assert!(active.artifact_redrive.repass.contains(&r0));
+    assert!(!active.artifact_redrive.repass.contains(&r9));
+    assert!(active.eye.wanted);
+    assert!(!sessions.by_session[&SessionId(2)].eye.wanted);
 }
 
-/// ★ A NEW DIGEST MAKES THE RELAYED COPIES STALE: the first head of a realm and the same head from
-/// another node keep what the shard shipped to its sessions; a head at another digest drops the
-/// realm's copies and records, so a re-drive never sends a tile of the old artifact. Every new
-/// transfer forgets an owed pass: it starts from the head anyway.
+/// ★ EVERY NEW TRANSFER FORGETS AN OWED PASS: it starts from the head anyway — the first head of a
+/// realm, the same head from another node, and a head at another digest alike.
 #[test]
-fn a_new_digest_drops_the_realms_relayed_copies() {
+fn every_new_transfer_forgets_an_owed_pass() {
     use vd_wire::channels::BulkMsg;
     let r0 = RealmId::Planet(10);
-    let t = (0u8, 0u32, 0u32);
     let head = |digest: [u64; 2]| {
         postcard::to_allocvec(&BulkMsg::ArtifactHead {
             realm: r0,
@@ -13667,39 +13557,21 @@ fn a_new_digest_drops_the_realms_relayed_copies() {
         .expect("encode")
     };
     let mut sessions = GatewaySessions::default();
-    let mut session = active_session();
-    session.artifact_redrive.relayed = BTreeMap::from([(r0, BTreeSet::from([t]))]);
-    session.artifact_redrive.repass = BTreeSet::from([r0]);
-    sessions.by_session.insert(SessionId(1), session);
-    sessions.relayed_tiles.insert((r0, t), vec![1]);
+    sessions.by_session.insert(SessionId(1), active_session());
     let mut stats = GatewayStats::default();
-    let cache = |sessions: &mut GatewaySessions,
-                 from: NodeId,
-                 digest: [u64; 2],
-                 stats: &mut GatewayStats| {
-        super::artifact::cache_artifact_part(from, r0, head(digest), TickId(1), sessions, stats);
-    };
-    cache(&mut sessions, DEST, [1, 2], &mut stats);
-    cache(&mut sessions, SHARD, [1, 2], &mut stats);
-    assert_eq!(
-        sessions.relayed_tiles.len(),
-        1,
-        "the first head and another node keep it"
-    );
-    let redrive = &sessions.by_session[&SessionId(1)].artifact_redrive;
-    assert!(redrive.relayed.contains_key(&r0));
-    assert!(
-        redrive.repass.is_empty(),
-        "a new transfer starts from the head"
-    );
-    cache(&mut sessions, SHARD, [3, 4], &mut stats);
-    assert!(sessions.relayed_tiles.is_empty());
-    assert!(
-        !sessions.by_session[&SessionId(1)]
+    for (from, digest) in [(DEST, [1, 2]), (SHARD, [1, 2]), (SHARD, [3, 4])] {
+        sessions
+            .by_session
+            .get_mut(&SessionId(1))
+            .expect("the session")
             .artifact_redrive
-            .relayed
-            .contains_key(&r0)
-    );
+            .repass = BTreeSet::from([r0]);
+        super::artifact::cache_artifact_part(from, r0, head(digest), TickId(1), &mut sessions, &mut stats);
+        assert!(
+            sessions.by_session[&SessionId(1)].artifact_redrive.repass.is_empty(),
+            "{from:?} {digest:?}: a new transfer starts from the head"
+        );
+    }
 }
 
 /// ★ TWO WAYS A CACHE IS NOT WHOLE AND ONE STRAY (the far-view ship's intake): a coast part that
@@ -14099,4 +13971,126 @@ fn a_late_part_never_takes_its_planets_out_of_the_picture() {
         },
     )]);
     assert_eq!(rig.stats().window_part_ticks_expired, 1);
+}
+
+/// ★ ONE FORMULA FOR EVERY REALM'S VIEW (ruling B88): the realm a session stands in is viewed from its avatar's position
+/// there, once the realm's snapshot has stated it, and in that realm alone; every other drawn realm from the session's
+/// realm's centre carried by the realm's row (SL7), whatever the avatar's position; an eye at a centre or not a number
+/// gives no view. Example: a walker on the home planet, 6 300 km from its centre along +Z, views the planet from there,
+/// and a far planet whose row stands a million kilometres along +X from her planet's centre along −X.
+#[test]
+fn the_view_of_every_drawn_realm_comes_from_one_formula() {
+    let (home, far) = (RealmId::Planet(7), RealmId::Planet(8));
+    let mut session = session_drawing(home, &[far]);
+    // No avatar read yet: no view of the realm it stands in; the far realm's view stands.
+    assert_eq!(super::artifact::session_view(&session, home), None);
+    let view = super::artifact::session_view(&session, far).expect("the row's view");
+    assert_eq!((view.dir, view.radial_m), ([-1.0, 0.0, 0.0], 1.0e9));
+    // The avatar read in its realm: the view from its position.
+    session.eye.at = Some((home, [0.0, 0.0, 6.3e6]));
+    let view = super::artifact::session_view(&session, home).expect("the avatar's view");
+    assert_eq!((view.dir, view.radial_m), ([0.0, 0.0, 1.0], 6.3e6));
+    // The far realm is viewed from the realm's centre, never from the avatar (SL2, SL7).
+    let view = super::artifact::session_view(&session, far).expect("the row's view");
+    assert_eq!((view.dir, view.radial_m), ([-1.0, 0.0, 0.0], 1.0e9));
+    // An avatar last read in another realm (a crossing's first beat), at the centre, or not a number: no view.
+    for at in [
+        (far, [0.0, 0.0, 6.3e6]),
+        (home, [0.0, 0.0, 0.0]),
+        (home, [f64::NAN, 0.0, 0.0]),
+    ] {
+        session.eye.at = Some(at);
+        assert_eq!(super::artifact::session_view(&session, home), None, "{at:?}");
+    }
+    // A realm the picture does not hold: no view.
+    assert_eq!(super::artifact::session_view(&session, RealmId::Planet(9)), None);
+}
+
+/// ★ THE AVATAR IN A FRAME'S BODY (ruling B88): read off the body once, in its realm's frame; a body without the avatar,
+/// a body that does not decode, and a position that is not a number give nothing — and a body that failed to decode is
+/// not decoded again for the next session behind it.
+#[test]
+fn the_avatar_is_read_off_a_frames_body_decoded_once() {
+    use vd_core::pose::LatticePos;
+    let body = |entities: Vec<EntitySnap>| {
+        postcard::to_allocvec(&SnapshotDatagram {
+            sub: SubId(0),
+            frame_id: 1,
+            source_tick: TickId(5),
+            universe_tick: UniverseTick(50),
+            entities,
+        })
+        .expect("encode")
+    };
+    let at = |entity: u128, pos: LatticePos| EntitySnap {
+        entity: EntityId(entity),
+        pose: StampedPose {
+            pos,
+            ..StampedPose::at_rest(FrameRef::PlanetCentered { planet_seed: 7 }, DVec3::ZERO, UniverseTick(50))
+        },
+    };
+    let tier = FrameRef::PlanetCentered { planet_seed: 7 }.tier();
+    let bytes = body(vec![
+        at(76, LatticePos::from_metres(DVec3::new(9.0, 9.0, 9.0), tier)),
+        at(77, LatticePos::from_metres(DVec3::new(1.0, 2.0, 3.0), tier)),
+        at(78, LatticePos::at(vd_core::glam::I64Vec3::ZERO, DVec3::splat(f64::NAN))),
+    ]);
+    let mut decoded = None;
+    let read = super::artifact::avatar_at(&mut decoded, &bytes, EntityId(77)).expect("the avatar");
+    assert_eq!(read.0, RealmId::Planet(7));
+    for (got, want) in read.1.iter().zip([1.0, 2.0, 3.0]) {
+        assert!((got - want).abs() < 1.0e-6, "{read:?}");
+    }
+    assert!(decoded.is_some());
+    assert_eq!(super::artifact::avatar_at(&mut decoded, &bytes, EntityId(79)), None, "not in the body");
+    assert_eq!(super::artifact::avatar_at(&mut decoded, &bytes, EntityId(78)), None, "not a number");
+    let mut failed = None;
+    assert_eq!(super::artifact::avatar_at(&mut failed, &[0xFF; 3], EntityId(77)), None);
+    assert_eq!(failed, Some(None), "decoded once, kept as a failure");
+}
+
+/// ★ THE EYE IS READ OFF AN ACCEPTED FRAME WHEN WANTED, ONCE (ruling B88): a frame that holds the avatar sets the eye and
+/// clears the want; a frame read while nothing is wanted, a frame without the avatar and a fence-stale frame change
+/// nothing.
+#[test]
+fn the_eye_is_read_off_an_accepted_frame_once_wanted() {
+    let (mut sessions, sid, _) = one_active_session();
+    let mut stats = GatewayStats::default();
+    let mut outbox = OutboundBox::default();
+    let frame = postcard::to_allocvec(&frame_msg(Fence(1), 9)).expect("encode");
+    let eye = |s: &GatewaySessions| s.by_session[&sid].eye;
+    // Nothing wanted: nothing read.
+    sessions.by_session.get_mut(&sid).expect("the session").eye.entity = Some(EntityId(77));
+    on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
+    assert_eq!(eye(&sessions).at, None);
+    // Wanted, but a fence-stale frame: nothing read.
+    sessions.by_session.get_mut(&sid).expect("the session").eye.wanted = true;
+    let stale = postcard::to_allocvec(&frame_msg(Fence(0), 10)).expect("encode");
+    on_shard_frame(SHARD, &stale, &mut sessions, &mut stats, &mut outbox);
+    assert_eq!((eye(&sessions).at, eye(&sessions).wanted), (None, true));
+    // Wanted, the avatar not in the body: the want stays.
+    sessions.by_session.get_mut(&sid).expect("the session").eye.entity = Some(EntityId(78));
+    on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
+    assert_eq!((eye(&sessions).at, eye(&sessions).wanted), (None, true));
+    // Wanted and held: read, and the want cleared.
+    sessions.by_session.get_mut(&sid).expect("the session").eye.entity = Some(EntityId(77));
+    on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
+    assert_eq!((eye(&sessions).at, eye(&sessions).wanted), (Some((RealmId::System(7), [0.0, 0.0, 0.0])), false));
+}
+
+/// ★ THE AVATAR IS NAMED FOR THE EYE AT THE ATTACH AND AGAIN AT A CROSSING (ruling B88), and its position is wanted.
+#[test]
+fn the_avatar_is_named_for_the_eye_at_the_attach_and_at_a_crossing() {
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login();
+    let eye = |rig: &Rig| rig.world.resource::<GatewaySessions>().by_session[&sid].eye;
+    assert!(eye(&rig).entity.is_some(), "the attach names the avatar");
+    {
+        let mut sessions = rig.world.resource_mut::<GatewaySessions>();
+        let session = sessions.by_session.get_mut(&sid).expect("the session");
+        session.eye.entity = None;
+        session.eye.wanted = false;
+    }
+    let _ = rig.tick(vec![subscription_ready(DEST, sid)]);
+    assert_eq!((eye(&rig).entity, eye(&rig).wanted), (Some(EntityId(77)), true));
 }

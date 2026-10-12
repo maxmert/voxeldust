@@ -175,6 +175,15 @@ pub struct DevArtifacts {
     /// sees the shoreline crawl can say at once whether the mask was there.
     #[serde(default)]
     pub coast_held: Vec<String>,
+    /// ★ THE FINE TILES (the fine ground's way in, B2): fine parts received and fine tiles held whole, summed over
+    /// realms, and the tiles each realm's book holds as `{:?}` with their count — what a waiting near chunk is held
+    /// against.
+    #[serde(default)]
+    pub fine_parts: u64,
+    #[serde(default)]
+    pub fine_tiles: u64,
+    #[serde(default)]
+    pub fine_held: Vec<(String, u64)>,
 }
 
 /// The decoded, delivered client state — wire truth, the agent's diagnosis surface.
@@ -456,6 +465,9 @@ pub(crate) mod tests {
                 hole_keys: vec!["PosX 6 984 1157 66".to_owned()],
                 margin_missing: 5,
                 stale_builds: 3,
+                rough_builds: 6,
+                rough_upgrades: 5,
+                rough_resident: 1,
                 lattice_edge: 1216,
                 eyes: vec![("Planet(7)".to_owned(), 3.4)],
                 eye_cell: [0, 0, 0],
@@ -809,6 +821,14 @@ pub struct DevTerrainStamp {
     pub margin_missing: u64,
     /// Chunks refused when they landed built on another artifact than the lane holds.
     pub stale_builds: u64,
+    /// ★ THE ROUGH GROUND (ruling B86 item 7): chunks harvested on it (a fine tile not landed), chunks built again on
+    /// the fine ground once their tiles landed, and the realm's resident chunks on it now.
+    #[serde(default)]
+    pub rough_builds: u64,
+    #[serde(default)]
+    pub rough_upgrades: u64,
+    #[serde(default)]
+    pub rough_resident: u64,
     /// The macro lattice's edge in nodes of the body under the eye as the lane holds it (zero
     /// for a body with none): what the level a rung reads is derived from.
     pub lattice_edge: u32,

@@ -37,10 +37,11 @@
 //! promise (the test below measures it on the home planet).
 
 use crate::body::BodyDefinition;
+use crate::fine::read::FineZ;
 use crate::strata::Biome;
 use crate::units::{direction_of_unit, metres_of_q28, q28_of_metres};
 use vd_recipe::Gi;
-use vd_recipe::height::{biome_of as recipe_biome, relief_parts_from, roughness_factor};
+use vd_recipe::height::{OCTAVES_CAP, biome_of as recipe_biome, relief_parts_from, roughness_factor};
 use vd_recipe::terrace::terrace;
 
 /// The surface's radius along a unit direction at a rung, in GAP STEPS at
@@ -110,23 +111,32 @@ fn field_column(
     let n0 = body.ladder().cells_per_edge(0);
     let i = vd_seed::ladder::index_of(vd_seed::bend::unbend(t), n0);
     let j = vd_seed::ladder::index_of(vd_seed::bend::unbend(s), n0);
-    let z = crate::artifact::sample_z(&lattice, field, face, 0, i, j)?;
-    // ★ THE SAME SLOPE SHARE THE COLUMN READS (2026-09-21): the morph target and the chunk's own
-    // column must stand at one height, so this reads the field the same way — the central difference
-    // over one macro node at the SAME rung-0 cell the `Z` above came from.
-    let slope_share = crate::artifact::slope_share(
-        &crate::artifact::slope_charter(body, &lattice, 0),
-        &lattice,
-        field,
-        face,
-        0,
-        i,
-        j,
-    )?;
+    let (z, first, slope_share) = match field.fine_z(face, rung, 0, i, j) {
+        // ★ THE FINE GROUND (B1 (g)): the curve of the level the rung draws, at the rung-0 cell, and
+        // no octave under it — the chunk's own column stands on the same curve at its sample.
+        FineZ::Held(z) => (z, OCTAVES_CAP, Gi::ZERO),
+        FineZ::Missing(_) => return None,
+        // ★ THE SAME SLOPE SHARE THE COLUMN READS (2026-09-21): the morph target and the chunk's own
+        // column must stand at one height, so this reads the field the same way — the central
+        // difference over one macro node at the SAME rung-0 cell the `Z` came from.
+        FineZ::Outside => (
+            crate::artifact::sample_z(&lattice, field, face, 0, i, j)?,
+            body.first_fine(),
+            crate::artifact::slope_share(
+                &crate::artifact::slope_charter(body, &lattice, 0),
+                &lattice,
+                field,
+                face,
+                0,
+                i,
+                j,
+            )?,
+        ),
+    };
     let unit = direction_of_unit(dir);
     let parts = relief_parts_from(
         body.octave_table(),
-        body.first_fine(),
+        first,
         body.octaves_at(rung).len(),
         unit,
         body.roughness(),
@@ -254,6 +264,23 @@ mod tests {
         crate::home::home_planet()
     }
 
+    /// ★ THE FINE GROUND UNDER A FLOAT DIRECTION (B1 (g)): the eye's and the morph's read stands on the held fine
+    /// height with no octave, the same bench over it as the chunk's column; a missing tile answers nothing.
+    #[test]
+    fn the_float_read_stands_on_held_fine_ground_and_answers_nothing_for_a_missing_tile() {
+        use crate::fine::l1::TileKey;
+        use crate::fine::read::test_field::OneFineRead;
+        let body = home();
+        let face = Face::from_index(2).expect("a face");
+        let dir = cell_dir(&body, face, 1_000, 2_000);
+        let z0 = Gi::new(-1_200 * crate::units::STEPS_PER_M) << crate::units::LENGTH_BITS;
+        let held = OneFineRead(FineZ::Held(z0));
+        let want = metres_of_q28(terrace(&body.terrace_at(5), body.radius + z0));
+        assert_eq!(height_field_m(&body, &held, dir, 5).map(f64::to_bits), Some(want.to_bits()));
+        let missing = OneFineRead(FineZ::Missing(TileKey { face, tx: 0, ty: 0 }));
+        assert_eq!(height_field_m(&body, &missing, dir, 5), None);
+    }
+
     /// The float direction of the rung-0 cell `(i, j)` of a face on this body.
     fn cell_dir(body: &BodyDefinition, face: Face, i: i32, j: i32) -> [f64; 3] {
         let d = vd_seed::bend::direction_q(face, i, j, body.inv_n(0));
@@ -283,12 +310,12 @@ mod tests {
     fn a_tile_whose_neighbour_is_missing_answers_nothing_at_its_edge() {
         use crate::artifact::{TILE_EDGE, TileCache};
         use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
-        use crate::solve::{Schedule, solve_full};
+        use crate::solve::Schedule;
         let moon = home_moon();
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
@@ -322,12 +349,12 @@ mod tests {
         use crate::CHUNK_EDGE;
         use crate::artifact::{PyramidField, TileCache};
         use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
-        use crate::solve::{Schedule, solve_full};
+        use crate::solve::Schedule;
         let moon = home_moon();
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =

@@ -30,6 +30,7 @@
 
 mod aoi;
 pub mod artifact_ship;
+pub mod fine_ship;
 pub mod built_store;
 mod config;
 mod containment;

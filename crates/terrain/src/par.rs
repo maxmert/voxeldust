@@ -74,10 +74,88 @@ pub fn per_range<T: Send>(
 
 /// `f` over every index of `0..n` on `threads` threads, the results in index order — the vector one thread gives.
 pub fn map<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    per_range(n, threads, |r| r.map(&f).collect::<Vec<T>>())
-        .into_iter()
-        .flatten()
-        .collect()
+    join(per_range(n, threads, |r| r.map(&f).collect::<Vec<T>>()))
+}
+
+/// The ranges' parts joined in their order into one vector — the vector one thread gives. Each part moves into the
+/// answer whole (ruling B72 item 1: joining the home planet's 8.9 million values one at a time was a twentieth of a
+/// solve's time on twelve cores, the profile of 2026-10-09).
+pub fn join<T>(parts: Vec<Vec<T>>) -> Vec<T> {
+    let mut out = Vec::with_capacity(parts.iter().map(Vec::len).sum());
+    for mut part in parts {
+        out.append(&mut part);
+    }
+    out
+}
+
+/// ★ UNIQUE KEYS SORTED ON `threads` THREADS (ruling B72 item 1): each thread sorts one range of the keys, and the
+/// sorted runs are merged by `threads` threads, each writing the keys between two SPLITTERS (drawn evenly from the runs)
+/// into its own part of the answer. Each key carries its node's index, so the keys are unique and exactly one order
+/// sorts them: the order one thread's sort gives, byte for byte.
+///
+/// **Example.** The lakes' budget orders the home planet's 2.1 million land nodes by height, by their potential on a
+/// flat, and by index: seven threads sort 300 000 keys each, and seven more merge the seven runs between six splitters.
+#[must_use]
+pub fn sort_keys(mut keys: Vec<u128>, threads: usize) -> Vec<u128> {
+    let parts = ranges(keys.len(), threads);
+    std::thread::scope(|s| {
+        let mut rest: &mut [u128] = &mut keys;
+        for r in &parts {
+            let (run, tail) = rest.split_at_mut(r.len());
+            rest = tail;
+            s.spawn(move || run.sort_unstable());
+        }
+    });
+    let runs: Vec<&[u128]> = parts.iter().map(|r| &keys[r.clone()]).collect();
+    let count = runs.len();
+    // The splitters: from each run as many keys as there are threads, evenly spaced, and of all of them every run's
+    // count-th — so each part of the answer holds about one run's worth of keys.
+    let mut samples: Vec<u128> = runs
+        .iter()
+        .flat_map(|run| (0..count).map(move |k| run[k * run.len() / count]))
+        .collect();
+    samples.sort_unstable();
+    let splitters: Vec<u128> = (1..count).map(|t| samples[t * count]).collect();
+    // Each part: the keys at or over the splitter before it and under the splitter after it, from every run.
+    let bounds: Vec<Vec<usize>> = runs
+        .iter()
+        .map(|run| {
+            std::iter::once(0)
+                .chain(splitters.iter().map(|&x| run.partition_point(|&k| k < x)))
+                .chain(std::iter::once(run.len()))
+                .collect()
+        })
+        .collect();
+    let mut out = vec![0u128; keys.len()];
+    std::thread::scope(|s| {
+        let mut rest: &mut [u128] = &mut out;
+        for t in 0..count {
+            let pieces: Vec<&[u128]> = runs
+                .iter()
+                .zip(&bounds)
+                .map(|(run, b)| &run[b[t]..b[t + 1]])
+                .collect();
+            let (part, tail) = rest.split_at_mut(pieces.iter().map(|p| p.len()).sum());
+            rest = tail;
+            s.spawn(move || merge_into(&pieces, part));
+        }
+    });
+    out
+}
+
+/// The sorted `pieces` merged into `out`, which holds exactly their keys: at each place the least of the pieces' heads.
+fn merge_into(pieces: &[&[u128]], out: &mut [u128]) {
+    let mut head = vec![0usize; pieces.len()];
+    for slot in out.iter_mut() {
+        let mut best = usize::MAX;
+        for (p, piece) in pieces.iter().enumerate() {
+            let take = (head[p] < piece.len())
+                && ((best == usize::MAX) || (piece[head[p]] < pieces[best][head[best]]));
+            best = [best, p][usize::from(take)];
+        }
+        *slot = pieces[best][head[best]];
+        head[best] += 1;
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +192,31 @@ mod tests {
         assert_eq!(sums.len(), 4);
         assert_eq!(sums.iter().sum::<usize>(), one.iter().sum::<usize>());
         assert_eq!(map(0, 3, f), Vec::<usize>::new());
+    }
+
+    /// ★ The key sort on many threads is the one-thread sort, key for key: few keys and many, fewer keys than threads,
+    /// none, and keys that crowd into a few values above their index bits.
+    #[test]
+    fn the_key_sort_on_many_threads_is_the_one_thread_sort() {
+        let hash = |i: u64| {
+            let mut x = i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            x ^= x >> 31;
+            x.wrapping_mul(0xbf58_476d_1ce4_e5b9)
+        };
+        for (len, spread) in [(100_000u64, 8u32), (100_000, 61), (5, 8), (1, 8), (0, 8)] {
+            let keys: Vec<u128> = (0..len)
+                .map(|i| (u128::from(hash(i) >> spread) << 32) | u128::from(i))
+                .collect();
+            let mut want = keys.clone();
+            want.sort_unstable();
+            for threads in [1, 2, 3, 7, 14] {
+                assert_eq!(
+                    sort_keys(keys.clone(), threads),
+                    want,
+                    "{len} keys, {threads} threads"
+                );
+            }
+        }
     }
 
     /// A panic in a solve thread is the caller's panic.

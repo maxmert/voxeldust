@@ -209,7 +209,6 @@ fn main() {
     schedule.t_min_yr = env_yr("VD_CENSUS_T_MIN_YR", schedule.t_min_yr);
     schedule.t_max_yr = env_yr("VD_CENSUS_T_MAX_YR", schedule.t_max_yr);
     schedule.sub_sweeps = env("VD_CENSUS_SUB_SWEEPS", schedule.sub_sweeps);
-    schedule.climate_every = env("VD_CENSUS_CLIMATE_EVERY", schedule.climate_every);
     schedule.talus_passes = env("VD_CENSUS_TALUS_PASSES", schedule.talus_passes);
     println!("schedule: {schedule:?}");
     let started = std::time::Instant::now();

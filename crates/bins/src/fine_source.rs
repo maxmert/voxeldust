@@ -1,0 +1,445 @@
+//! ★ THE FINE TILES' PROVIDER (the fine ground's way in, B2; rulings B81 Q2 and B85: the planet's shard solves, stores
+//! and ships its finished 128 m tiles): the composition root's side of the sim's fine ship
+//! ([`vd_sim::stub::fine_ship`]).
+//!
+//! - **The reasons** are the realm's own occupants (SL7): each tick the sim names the finished tiles each one's view
+//!   reads, nearest first ([`FineTiles::want`]); the next tick's work follows those lists, interleaved by rank so a fast
+//!   flier never starves a walker (the design's §4.1).
+//! - **The work** runs on worker threads on the solve's share of the cores (`VD_SOLVE_CORES`, ruling B64), one tile a
+//!   thread, never more in flight than threads, so the order always follows the newest reasons. A finished tile wants
+//!   its 3 × 3 RAW solves (B85: a tile depends on its eight neighbours only — across a face's edge too, and seven at a
+//!   cube corner); a raw solve or a finished tile already in
+//!   the realm's store is read back, never solved again (a tile is a pure function of its inputs, §3.7).
+//! - **The store** is the realm's own (`RealmStore`): each raw solve and each finished record as its part rows, keyed by
+//!   the input word (the artifact's digest and the fine version), so a world change never serves an old tile.
+//! - **The shard's own book** holds the finished tiles of its reasons, decoded, for its own ground read; what no reason
+//!   names leaves memory (it stays in the store).
+//!
+//! **Example.** A hull lands on the home planet's belt: the planet's shard names the 128 m tiles within its reach, the
+//! workers read the stored ones and solve the rest nearest first, each tile finishes once its eight neighbours are raw,
+//! and the finished record goes to the pilot in about thirteen parts.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+
+use vd_core::pose::RealmId;
+use vd_sim::io::{Bytes, Store};
+use vd_sim::stub::built_store::{FINE_PART_BYTES, FineAt, FineForm, read_fine_record, write_fine_record};
+use vd_sim::stub::fine_ship::{FineName, FineTiles, NONE_HELD};
+use vd_terrain::BodyDefinition;
+use vd_terrain::artifact::{Artifact, fine_needs};
+use vd_terrain::fine::finish::block_keys;
+use vd_terrain::fine::l1::{L1_RUNG, TileKey, cells_per_node_shift, solve_l1};
+use vd_terrain::fine::read::{FineBook, MEAN_LEVELS};
+use vd_terrain::fine::stitch::Field;
+use vd_terrain::fine::tile::{decode_levels, decode_raw, encode_levels, encode_raw, finish, input_word, range_record, raw_field};
+use vd_terrain::macro_lattice::MacroLattice;
+use vd_seed::bend::Face;
+use vd_wire::channels::BulkMsg;
+
+/// The 128 m level's number on the wire (`BulkMsg::FineTilePart::level`).
+pub const LEVEL_L1: u8 = 1;
+
+/// A finish's nine raw fields with their tiles (NW … SE; none past a cube corner).
+type Block = Box<[Option<(TileKey, Arc<Field>)>; 9]>;
+
+/// One piece of work.
+enum Job {
+    /// Solve a raw tile.
+    Solve(TileKey),
+    /// Read a stored raw record back.
+    LoadRaw(TileKey, Vec<u8>),
+    /// Finish a tile from its nine raw fields (NW … SE; none past a cube corner).
+    Finish(TileKey, Block),
+    /// Read a stored finished record back.
+    LoadFinished(TileKey, Vec<u8>),
+}
+
+/// One answer: a raw field (and its record when freshly solved, to store), or a finished record and its levels (and
+/// whether to store it).
+enum Answer {
+    Raw(TileKey, Option<Arc<Field>>, Option<Vec<u8>>),
+    Finished(TileKey, Option<(Vec<u8>, Vec<Vec<i32>>)>, bool),
+}
+
+/// What a worker reads: the body, its lattice, its artifact, and the level's numbers.
+struct Ctx {
+    body: BodyDefinition,
+    lattice: MacroLattice,
+    artifact: Arc<Artifact>,
+    /// Rung 7's cells to a node, as a shift.
+    shift: u32,
+    /// A tile's side in rung-7 cells, as a shift.
+    ts: u32,
+    /// Rung 7's cells along a face's edge.
+    n7: i32,
+}
+
+/// ★ ONE JOB'S WORK, the same on any thread and any host.
+fn work(ctx: &Ctx, job: Job) -> Answer {
+    match job {
+        Job::Solve(key) => {
+            let raw = solve_l1(&ctx.body, &ctx.lattice, &ctx.artifact, key).map(|t| raw_field(key, t, ctx.shift));
+            let record = raw.as_ref().and_then(|f| encode_raw(f, ctx.shift));
+            Answer::Raw(key, raw.map(Arc::new), record)
+        }
+        Job::LoadRaw(key, bytes) => Answer::Raw(key, decode_raw(&bytes, key, ctx.n7).map(Arc::new), None),
+        Job::Finish(key, block) => {
+            let slots: [Option<(TileKey, &Field)>; 9] = std::array::from_fn(|k| block[k].as_ref().map(|(t, f)| (*t, &**f)));
+            let levels = finish(slots, ctx.shift, ctx.n7);
+            let out = levels.and_then(|levels| encode_levels(&levels, ctx.ts).map(|record| (record, levels)));
+            Answer::Finished(key, out, true)
+        }
+        Job::LoadFinished(key, bytes) => {
+            let levels = decode_levels(&bytes).filter(|(ts, _)| *ts == ctx.ts).map(|(_, levels)| levels);
+            Answer::Finished(key, levels.map(|levels| (bytes, levels)), false)
+        }
+    }
+}
+
+/// The workers: threads on a channel, or none (the work runs at submission, on the tick's thread — the Tier-A rig's
+/// shape, as the artifact's `InlineWorker`).
+enum Pool {
+    Threads { jobs: crossbeam_channel::Sender<Job>, answers: crossbeam_channel::Receiver<Answer>, threads: usize },
+    Inline { done: Vec<Answer> },
+}
+
+/// The provider's moving parts.
+struct State {
+    pool: Pool,
+    /// Held raw fields, finished records, their levels' wire parts as sessions asked for them (by the first level and the
+    /// level past the last), and the shard's own book of finished levels.
+    raw: BTreeMap<TileKey, Arc<Field>>,
+    finished: BTreeMap<TileKey, Arc<Vec<u8>>>,
+    wire: BTreeMap<(TileKey, u8, u8), Arc<[Bytes]>>,
+    book: FineBook,
+    /// Work in flight: `(tile, finished?)`.
+    in_flight: BTreeSet<(TileKey, bool)>,
+    /// Records the store does not hold: `(tile, finished?)`.
+    unstored: BTreeSet<(TileKey, bool)>,
+    /// Tiles whose solve or finish answered nothing: `(tile, finished?)`.
+    refused: BTreeSet<(TileKey, bool)>,
+    /// This tick's lists, by occupant, and the merged order of the last.
+    named: Vec<Vec<TileKey>>,
+    reasons: Vec<TileKey>,
+}
+
+/// ★ THE PROVIDER over one realm's artifact (see the module's head).
+pub struct FineWork {
+    realm: RealmId,
+    ctx: Arc<Ctx>,
+    input: u64,
+    /// The head's three numbers the reach reads — the drawn ground's lowest and highest metres and the sea (rulings
+    /// B55, B87): the gateway reads the same off the head, so both name the same tiles at the same levels.
+    head_band: (i32, i32, i16),
+    state: Mutex<State>,
+}
+
+impl FineWork {
+    /// A provider over `artifact` with `threads` workers (none: the work runs on the tick's thread). `None` where the
+    /// body has no lattice, its rung-7 cells do not nest in its nodes, or the level does not apply to it.
+    #[must_use]
+    pub fn new(realm: RealmId, body: BodyDefinition, artifact: Arc<Artifact>, threads: usize) -> Option<FineWork> {
+        let lattice = body.macro_lattice()?;
+        let shift = cells_per_node_shift(&body, &lattice, L1_RUNG)?;
+        let book = FineBook::new(&body, &lattice, artifact.sea_m)?;
+        if !vd_terrain::fine::read::applies(artifact.sea_m) {
+            return None;
+        }
+        let drawn = artifact.drawn_range_m(&lattice);
+        let head_band = (drawn.0, drawn.1, artifact.sea_m);
+        let ctx = Arc::new(Ctx {
+            body,
+            lattice,
+            artifact: Arc::clone(&artifact),
+            shift,
+            ts: book.side_shift(),
+            n7: (lattice.edge << shift) as i32,
+        });
+        let pool = if threads == 0 {
+            Pool::Inline { done: Vec::new() }
+        } else {
+            let (jobs, job_rx) = crossbeam_channel::unbounded::<Job>();
+            let (answer_tx, answers) = crossbeam_channel::unbounded::<Answer>();
+            for k in 0..threads {
+                let (rx, tx, ctx) = (job_rx.clone(), answer_tx.clone(), Arc::clone(&ctx));
+                std::thread::Builder::new()
+                    .name(format!("fine-solve-{k}"))
+                    .spawn(move || {
+                        // The provider dropped (the shard shut down): the channel closes and the thread ends.
+                        for job in rx.iter() {
+                            if tx.send(work(&ctx, job)).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("a fine worker spawns");
+            }
+            Pool::Threads { jobs, answers, threads }
+        };
+        Some(FineWork {
+            realm,
+            ctx,
+            input: input_word(artifact.digest()),
+            head_band,
+            state: Mutex::new(State {
+                pool,
+                raw: BTreeMap::new(),
+                finished: BTreeMap::new(),
+                wire: BTreeMap::new(),
+                book,
+                in_flight: BTreeSet::new(),
+                unstored: BTreeSet::new(),
+                refused: BTreeSet::new(),
+                named: Vec::new(),
+                reasons: Vec::new(),
+            }),
+        })
+    }
+
+    /// How far the work stands: raw fields held, finished tiles held, jobs in flight — a reading for the log and the
+    /// bench.
+    #[must_use]
+    pub fn progress(&self) -> (usize, usize, usize) {
+        let state = self.lock();
+        (state.raw.len(), state.finished.len(), state.in_flight.len())
+    }
+
+    /// The shard's own book of finished tiles (its ground read), as it stands.
+    #[must_use]
+    pub fn book(&self) -> FineBook {
+        self.lock().book.clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn at(&self, key: TileKey, finished: bool) -> FineAt {
+        FineAt {
+            form: if finished { FineForm::Finished } else { FineForm::Raw },
+            input: self.input,
+            level: LEVEL_L1,
+            face: key.face.index(),
+            tx: key.tx as u32,
+            ty: key.ty as u32,
+        }
+    }
+
+    /// The finished record's wire parts, cut at the store's own size.
+    fn wire_parts(&self, key: TileKey, record: &[u8]) -> Arc<[Bytes]> {
+        let parts = record.len().div_ceil(FINE_PART_BYTES).max(1);
+        (0..parts)
+            .map(|part| {
+                let start = (part * FINE_PART_BYTES).min(record.len());
+                let end = (start + FINE_PART_BYTES).min(record.len());
+                let msg = BulkMsg::FineTilePart {
+                    realm: self.realm,
+                    level: LEVEL_L1,
+                    face: key.face.index(),
+                    tx: key.tx as u32,
+                    ty: key.ty as u32,
+                    part: part as u32,
+                    parts: parts as u32,
+                    bytes: record[start..end].to_vec(),
+                };
+                vd_sim::io::bytes(postcard::to_allocvec(&msg).expect("a closed wire enum serializes"))
+            })
+            .collect()
+    }
+
+    /// The tiles around `key` (NW … SE) on any face; none past a cube corner (B2's face-edge cut: every tile finishes).
+    fn block_of(&self, key: TileKey) -> [Option<TileKey>; 9] {
+        block_keys(key, self.ctx.shift, self.ctx.n7)
+    }
+
+    /// Hands `job` to the workers (or runs it, inline).
+    fn submit(state: &mut State, ctx: &Ctx, job: Job) {
+        match &mut state.pool {
+            Pool::Threads { jobs, .. } => {
+                let _ = jobs.send(job);
+            }
+            Pool::Inline { done } => done.push(work(ctx, job)),
+        }
+    }
+
+    /// The answers landed since the last call.
+    fn answers(state: &mut State) -> Vec<Answer> {
+        match &mut state.pool {
+            Pool::Threads { answers, .. } => answers.try_iter().collect(),
+            Pool::Inline { done } => std::mem::take(done),
+        }
+    }
+}
+
+impl FineTiles for FineWork {
+    fn tick(&self, mut store: Option<&mut dyn Store>) {
+        let mut state = self.lock();
+        let state = &mut *state;
+        // ★ THE ANSWERS LAND: stored (a fresh solve or finish), then held.
+        let mut wrote = false;
+        for answer in Self::answers(state) {
+            match answer {
+                Answer::Raw(key, field, record) => {
+                    state.in_flight.remove(&(key, false));
+                    match field {
+                        Some(field) => {
+                            if let (Some(store), Some(record)) = (store.as_deref_mut(), record) {
+                                write_fine_record(store, &self.at(key, false), &record);
+                                state.unstored.remove(&(key, false));
+                                wrote = true;
+                            }
+                            state.raw.insert(key, field);
+                        }
+                        None => {
+                            state.refused.insert((key, false));
+                        }
+                    }
+                }
+                Answer::Finished(key, out, store_it) => {
+                    state.in_flight.remove(&(key, true));
+                    match out {
+                        Some((record, levels)) => {
+                            if let Some(store) = store.as_deref_mut().filter(|_| store_it) {
+                                write_fine_record(store, &self.at(key, true), &record);
+                                state.unstored.remove(&(key, true));
+                                wrote = true;
+                            }
+                            state.finished.insert(key, Arc::new(record));
+                            state.book.insert(key, levels);
+                        }
+                        None => {
+                            state.refused.insert((key, true));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(store) = store.as_deref_mut().filter(|_| wrote) {
+            store.commit();
+        }
+        // ★ THE REASONS: the last tick's lists, interleaved by rank (round-robin across occupants), each tile once.
+        let named = std::mem::take(&mut state.named);
+        let longest = named.iter().map(Vec::len).max().unwrap_or(0);
+        let mut seen = BTreeSet::new();
+        state.reasons = (0..longest)
+            .flat_map(|rank| named.iter().filter_map(move |list| list.get(rank).copied()))
+            .filter(|key| seen.insert(*key))
+            .collect();
+        // ★ WHAT NO REASON NAMES LEAVES MEMORY (it stays in the store): the finished tiles outside the reasons, and the
+        // raw fields no unfinished reason's block reads.
+        let wanted: BTreeSet<TileKey> = state.reasons.iter().copied().collect();
+        let mut keep_raw = BTreeSet::new();
+        for key in &state.reasons {
+            if !state.finished.contains_key(key) {
+                keep_raw.extend(self.block_of(*key).into_iter().flatten());
+            }
+        }
+        state.finished.retain(|key, _| wanted.contains(key));
+        state.wire.retain(|(key, _, _), _| wanted.contains(key));
+        let gone: Vec<TileKey> = state.book.keys().filter(|key| !wanted.contains(key)).collect();
+        for key in gone {
+            state.book.remove(key);
+        }
+        state.raw.retain(|key, _| keep_raw.contains(key));
+        // ★ THE NEXT WORK, nearest first, never more in flight than threads (the order follows the newest reasons).
+        let threads = match &state.pool {
+            Pool::Threads { threads, .. } => *threads,
+            Pool::Inline { .. } => 1,
+        };
+        let reasons = state.reasons.clone();
+        for key in reasons {
+            if state.in_flight.len() >= threads {
+                break;
+            }
+            if state.finished.contains_key(&key) | state.in_flight.contains(&(key, true)) | state.refused.contains(&(key, true)) {
+                continue;
+            }
+            // A stored finished record is read back, never made again.
+            if !state.unstored.contains(&(key, true)) {
+                match store.as_deref().map(|s| read_fine_record(s, &self.at(key, true))) {
+                    Some(Ok(Some(bytes))) => {
+                        state.in_flight.insert((key, true));
+                        Self::submit(state, &self.ctx, Job::LoadFinished(key, bytes));
+                        continue;
+                    }
+                    Some(Err(reason)) => tracing::warn!(?key, reason, "a stored fine tile is refused; it is finished again"),
+                    _ => {}
+                }
+                state.unstored.insert((key, true));
+            }
+            let block = self.block_of(key);
+            if block.iter().flatten().any(|b| state.refused.contains(&(*b, false))) {
+                continue;
+            }
+            if block.iter().flatten().all(|b| state.raw.contains_key(b)) {
+                let slots = block.map(|b| b.and_then(|b| state.raw.get(&b).map(|f| (b, Arc::clone(f)))));
+                state.in_flight.insert((key, true));
+                Self::submit(state, &self.ctx, Job::Finish(key, Box::new(slots)));
+                continue;
+            }
+            for raw in block.into_iter().flatten() {
+                if state.in_flight.len() >= threads {
+                    break;
+                }
+                if state.raw.contains_key(&raw) | state.in_flight.contains(&(raw, false)) {
+                    continue;
+                }
+                state.in_flight.insert((raw, false));
+                let stored = if state.unstored.contains(&(raw, false)) {
+                    None
+                } else {
+                    store.as_deref().and_then(|s| read_fine_record(s, &self.at(raw, false)).ok().flatten())
+                };
+                match stored {
+                    Some(bytes) => Self::submit(state, &self.ctx, Job::LoadRaw(raw, bytes)),
+                    None => {
+                        state.unstored.insert((raw, false));
+                        Self::submit(state, &self.ctx, Job::Solve(raw));
+                    }
+                }
+            }
+        }
+    }
+
+    fn want(&self, dir: [f64; 3], radial_m: f64) -> Vec<(FineName, u8)> {
+        // ★ BY DISTANCE ALONE (rulings B86 item 3, B87), over the TRUE ground under the view (this realm holds it): the
+        // tiles the client's own ladder reads, and no more to solve. The gateway, which reads no ground, serves its
+        // sessions by the head's band (`fine_needs_of_head`), a reach that holds this one, so a session is never
+        // served a tile this realm does not name.
+        let ctx = &self.ctx;
+        let pixel_rad = vd_core::geometry::drawable_theta_min_rad();
+        let ground_m = vd_terrain::height::height_field_m(&ctx.body, &*ctx.artifact, dir, 0).unwrap_or(radial_m);
+        let relief_m = ctx.body.with_fine_band_m(self.head_band.0, self.head_band.1, self.head_band.2).unwrap_or(ctx.body).ground_range_m().1;
+        let named = fine_needs(&ctx.lattice, dir, radial_m, (ground_m, ground_m), relief_m, pixel_rad);
+        self.hold(&named.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+        named
+    }
+
+    fn hold(&self, tiles: &[FineName]) {
+        let keys: Vec<TileKey> = tiles
+            .iter()
+            .map(|&(f, tx, ty)| TileKey { face: Face::from_index(f).unwrap_or(Face::PosX), tx: tx as i32, ty: ty as i32 })
+            .collect();
+        self.lock().named.push(keys);
+    }
+
+    fn levels(&self) -> u8 {
+        (MEAN_LEVELS + 1) as u8
+    }
+
+    fn parts(&self, tile: FineName, lo: u8, hi: u8) -> Option<Arc<[Bytes]>> {
+        let key = TileKey { face: Face::from_index(tile.0)?, tx: tile.1 as i32, ty: tile.2 as i32 };
+        let mut state = self.lock();
+        if let Some(parts) = state.wire.get(&(key, lo, hi)) {
+            return Some(Arc::clone(parts));
+        }
+        // ★ THE LEVELS A SESSION LACKS (ruling B86 item 3): `lo` up to the finest it holds, cut from the finished record.
+        let record = Arc::clone(state.finished.get(&key)?);
+        let top = MEAN_LEVELS + 1;
+        let end = if hi == NONE_HELD { top } else { u32::from(hi).min(top) };
+        let parts = self.wire_parts(key, &range_record(&record, u32::from(lo), end)?);
+        state.wire.insert((key, lo, hi), Arc::clone(&parts));
+        Some(parts)
+    }
+}

@@ -29,14 +29,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use vd_core::pose::LatticePos;
 use vd_core::pose::RealmId;
-use vd_core::{NodeId, TickId};
+use vd_core::glam::{DQuat, DVec3};
+use vd_core::{EntityId, NodeId, TickId};
 use vd_sim::io::MsgClass;
 use vd_sim::runtime::{ClockSample, OutboundBox};
-use vd_wire::channels::{BulkMsg, ServerControlMsg};
+use vd_wire::channels::{BulkMsg, ServerControlMsg, SnapshotDatagram};
 use vd_wire::session_flow::{ArtifactView, GatewayToShard};
 
 use super::routing::{push_control, push_to_shard};
 use super::{GatewayConfig, GatewaySessions, GatewayStats, Session, SessionPhase};
+
+/// ★ The minor a session must have negotiated to read a fine record (the levels' record, minor 38; ruling B86 item 3).
+pub(crate) const FINE_MINOR: u16 = 38;
+/// The fine levels a finished tile carries (its square and five mean levels): a session that holds none of a tile
+/// holds "from past the coarsest".
+const FINE_LEVELS: u8 = vd_terrain::fine::read::MEAN_LEVELS as u8 + 1;
 
 /// How many artifact bytes one beat may carry to one client, over every realm it draws: a
 /// megabyte a beat (thirty-two parts of 32 KB), the sky's own pace — a pace, never a cap. A beat
@@ -80,10 +87,9 @@ pub(crate) fn forget_for_session(session: &mut Session, realm: RealmId) {
     session.artifact_held.remove(&realm);
     session.artifact_parts_sent.remove(&realm);
     session.artifact_tiles_sent.remove(&realm);
-    let redrive = &mut session.artifact_redrive;
-    redrive.repass.remove(&realm);
-    redrive.relayed.remove(&realm);
-    redrive.resend.retain(|(named, _)| *named != realm);
+    session.fine_sent.remove(&realm);
+    session.fine_acked.remove(&realm);
+    session.artifact_redrive.repass.remove(&realm);
 }
 
 /// ★ A SEND TOWARD A NODE WAS SHED (2026-09-27): when the node is a client that holds a session,
@@ -102,23 +108,6 @@ pub(crate) fn note_send_shed(
     };
     session.artifact_redrive.shed_at = Some(now);
     stats.client_sends_shed += 1;
-}
-
-/// ★ A TILE'S KEY, read off a shard's bulk (2026-09-27): `Some` when the bytes are one tile of a
-/// realm's artifact — the only shape a shard ships to named sessions — and `None` for anything
-/// else, which is relayed as before and never sent again.
-#[must_use]
-pub(crate) fn tile_key_of(bytes: &[u8]) -> Option<(RealmId, super::session::TileKey)> {
-    match postcard::from_bytes::<BulkMsg>(bytes) {
-        Ok(BulkMsg::ArtifactTile {
-            realm,
-            face,
-            tx,
-            ty,
-            ..
-        }) => Some((realm, (face, tx, ty))),
-        _ => None,
-    }
 }
 
 /// ★ AN ARTIFACT THE GATEWAY HOLDS for the realms its sessions draw: the shard it came from, the
@@ -145,6 +134,24 @@ pub(crate) struct GatewayArtifact {
     /// ★ THE TILES HELD (the one tile path): the shard's answers to the viewers' wants, by tile,
     /// shared by every session that draws the realm.
     pub(crate) tiles: BTreeMap<(u8, u32, u32), Vec<u8>>,
+    /// ★ THE HEAD'S THREE NUMBERS THE FINE REACH READS (ruling B87): the drawn ground's lowest and highest metres and
+    /// the sea — the shard names its answers by the same three.
+    pub(crate) band: (i32, i32, i16),
+    /// ★ THE FINE LEVELS HELD (ruling B87): each tile's levels the shard answered, one record a level, as the wire's
+    /// own part messages in order, shared by every session that draws the realm; and the record assembling now, by tile
+    /// (its level, read off its first part, and its parts so far).
+    pub(crate) fine: BTreeMap<(FineTile, u8), Vec<Vec<u8>>>,
+    fine_assembling: BTreeMap<(u8, u32, u32), FineAssembling>,
+}
+
+/// A fine tile's name: its face and its index there.
+pub(crate) type FineTile = (u8, u32, u32);
+
+/// One fine record assembling on the gateway: its level once its first part is here, and its parts so far.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct FineAssembling {
+    level: Option<u8>,
+    parts: Vec<Option<Vec<u8>>>,
 }
 
 impl GatewayArtifact {
@@ -182,6 +189,9 @@ pub(crate) fn cache_artifact_part(
             digest,
             levels,
             coast_parts,
+            sea_m,
+            low_m,
+            high_m,
             ..
         }) if named == realm => {
             match sessions.artifacts.get_mut(&realm) {
@@ -198,19 +208,6 @@ pub(crate) fn cache_artifact_part(
                         levels,
                         "the artifact's head is cached; the pyramid's parts follow"
                     );
-                    // ★ A NEW DIGEST makes every relayed copy of the realm's tiles stale
-                    // (2026-09-27): a re-drive must never send a tile of the old artifact. The
-                    // first head, or the same one from another node, keeps them — the tiles under
-                    // a pilot's boots often come before the gateway caches the realm's head.
-                    let stale = sessions
-                        .artifacts
-                        .get(&realm)
-                        .is_some_and(|cache| cache.digest != digest);
-                    if stale {
-                        sessions
-                            .relayed_tiles
-                            .retain(|(named, _), _| *named != realm);
-                    }
                     sessions.artifacts.insert(
                         realm,
                         GatewayArtifact {
@@ -225,15 +222,17 @@ pub(crate) fn cache_artifact_part(
                             seen: BTreeSet::new(),
                             coast_seen: BTreeSet::new(),
                             tiles: BTreeMap::new(),
+                            band: (low_m, high_m, sea_m),
+                            fine: BTreeMap::new(),
+                            fine_assembling: BTreeMap::new(),
                         },
                     );
                     for session in sessions.by_session.values_mut() {
                         session.artifact_parts_sent.remove(&realm);
                         session.artifact_tiles_sent.remove(&realm);
+                        session.fine_sent.remove(&realm);
+                        session.fine_acked.remove(&realm);
                         session.artifact_redrive.repass.remove(&realm);
-                        if stale {
-                            session.artifact_redrive.relayed.remove(&realm);
-                        }
                     }
                 }
             }
@@ -313,27 +312,84 @@ pub(crate) fn cache_artifact_part(
             cache.last_part_at = now;
             stats.artifact_parts_cached += 1;
         }
+        // ★ A FINE RECORD'S PART (ruling B87): the shard's answer to the viewers' views, one level a record, held whole
+        // in the realm's cache for every session whose distance reads it. The record's level is read off its first
+        // part's own label (the levels' record's form and first level: never a height); a part out of order, past its
+        // count, for a realm with no head, or from another node is a stray.
+        Ok(BulkMsg::FineTilePart {
+            realm: named,
+            face,
+            tx,
+            ty,
+            part,
+            parts,
+            bytes: piece,
+            ..
+        }) if named == realm => {
+            let Some(cache) = sessions.artifacts.get_mut(&realm) else {
+                stats.artifact_parts_stray += 1;
+                return;
+            };
+            if cache.shard != from || parts == 0 || part >= parts {
+                stats.artifact_parts_stray += 1;
+                return;
+            }
+            let tile = (face, tx, ty);
+            let assembling = cache.fine_assembling.entry(tile).or_default();
+            if assembling.parts.len() != parts as usize || part == 0 {
+                // A record's first part, or another cut: the record starts over.
+                *assembling = FineAssembling { level: None, parts: vec![None; parts as usize] };
+            }
+            if part == 0 {
+                assembling.level = vd_terrain::fine::tile::range_label(&piece).map(|(lo, _)| lo);
+            }
+            assembling.parts[part as usize] = Some(bytes);
+            let whole = assembling.parts.iter().all(Option::is_some);
+            if let (true, Some(level)) = (whole, assembling.level) {
+                let done = std::mem::take(&mut assembling.parts);
+                cache.fine_assembling.remove(&tile);
+                cache.fine.insert((tile, level), done.into_iter().flatten().collect());
+            }
+            cache.last_part_at = now;
+            stats.artifact_parts_cached += 1;
+        }
         _ => stats.artifact_parts_stray += 1,
     }
 }
 
-/// ★ A SESSION'S VIEW OF A DRAWN REALM (the one tile path): the eye's direction and distance from
-/// the realm's centre, in the realm's own frame, read off the row the gateway composed for the
-/// session — the realm's centre and facing in the picture's frame, whose origin is the session's
-/// own realm. The eye stands at the picture's origin within its own realm's size: a pilot in a
-/// hull is placed by the hull, the SL7 proxy. `None` for the session's own realm (its shard ships
-/// its occupants' tiles itself), for a row at the centre, and for a row whose length is not a
-/// number — a diverged shard may state a non-finite pose, and a NaN reach names every tile.
-fn session_view(session: &Session, realm: RealmId) -> Option<ArtifactView> {
-    if session.shadow.origin == Some(realm) {
-        return None;
-    }
-    let row = session.shadow.drawn_rows().find(|r| r.realm == realm)?;
-    let centre = row
-        .pose
-        .pos
-        .delta_m(LatticePos::ORIGIN, row.pose.frame.tier());
-    let eye = row.pose.orient.inverse() * (-centre);
+/// ★ A SESSION'S VIEW OF A DRAWN REALM (the one tile path; ruling B88: ONE MACHINERY FOR EVERY REALM): the eye's
+/// direction and distance from the realm's centre, in the realm's own frame, by one formula for every realm the session
+/// draws — the realm it stands in among them. The eye is first placed in the frame of the realm the session stands in
+/// (the picture's origin), then carried into the drawn realm by the placement the picture already holds for it: its
+/// centre and facing in the origin's frame (for the origin itself, its own centre and no turn).
+///
+/// The eye in the origin's frame is the avatar's own position for the origin itself — the realm's own snapshot states
+/// it ([`SessionEye`](super::session::SessionEye)), and the view goes back to that realm alone — and the origin's centre
+/// for every other realm: a session inside a hull is placed by the hull (SL7: an occupied realm stands in for whoever
+/// is inside it; SL2: no occupant pose enters another realm). The proxy's error is the origin's own size, and the
+/// fine reach carries one fine tile (eight 8 km nodes) past its edge. `None` until the avatar is read, for an eye at a
+/// centre, and for a length that is not a number — a diverged shard may state a non-finite pose, and a NaN reach names
+/// every tile.
+///
+/// **Example.** A pilot sits in a hull berthed on the home belt; her eye is the hull's centre carried into the planet's
+/// frame. She walks out onto the belt: her eye is now her avatar's position, which the planet's snapshot states. Both
+/// views go to the planet's shard the same way, and the same call names the same pieces from the same spot.
+pub(crate) fn session_view(session: &Session, realm: RealmId) -> Option<ArtifactView> {
+    let (eye_at_origin, centre, orient) = if session.shadow.origin == Some(realm) {
+        let (stated_in, at) = session.eye.at?;
+        if stated_in != realm {
+            return None; // the avatar was last read in another realm: a crossing's first beat
+        }
+        (DVec3::from_array(at), DVec3::ZERO, DQuat::IDENTITY)
+    } else {
+        let row = session.shadow.drawn_rows().find(|r| r.realm == realm)?;
+        let centre = row
+            .pose
+            .pos
+            .delta_m(LatticePos::ORIGIN, row.pose.frame.tier());
+        (DVec3::ZERO, centre, row.pose.orient)
+    };
+    let eye = orient.inverse() * (eye_at_origin - centre);
     let radial_m = eye.length();
     if !radial_m.is_finite() || radial_m <= 0.0 {
         return None;
@@ -343,6 +399,23 @@ fn session_view(session: &Session, realm: RealmId) -> Option<ArtifactView> {
         dir: [dir.x, dir.y, dir.z],
         radial_m,
     })
+}
+
+/// ★ THE AVATAR IN A FRAME'S BODY (ruling B88): the realm whose frame it stands in and its metres from that realm's
+/// centre, read off the snapshot body the realm's shard sent this gateway for the session's client. The body is
+/// decoded at most once per frame (`decoded`), and only when a session behind it wants its eye; a body that does not
+/// decode, does not hold the avatar or states a position that is not a number gives nothing.
+pub(crate) fn avatar_at(
+    decoded: &mut Option<Option<SnapshotDatagram>>,
+    body: &[u8],
+    entity: EntityId,
+) -> Option<(RealmId, [f64; 3])> {
+    let snapshot = decoded
+        .get_or_insert_with(|| postcard::from_bytes::<SnapshotDatagram>(body).ok())
+        .as_ref()?;
+    let pose = &snapshot.entities.iter().find(|e| e.entity == entity)?.pose;
+    let at = pose.pos.delta_m(LatticePos::ORIGIN, pose.frame.tier());
+    at.is_finite().then(|| (pose.frame.realm(), at.to_array()))
 }
 
 /// The body a realm's look bag states, for the tile reach: its seed off the surface's frame, its
@@ -473,27 +546,11 @@ pub(crate) fn serve_artifacts(
             .artifact_redrive
             .repass
             .retain(|realm| drawn.contains_key(realm));
-        // ★ THE RELAYED RECORD (2026-09-27) keeps the realms an ACTIVE session draws; a session that
-        // still activates has no picture yet and keeps everything the shard shipped it.
+        // ★ THE EYE IS READ AGAIN for the next beat (ruling B88), off the next frame that holds the avatar.
         if matches!(session.phase, SessionPhase::Active { .. }) {
-            let mine: BTreeSet<RealmId> = drawn_realms(session).collect();
-            let redrive = &mut session.artifact_redrive;
-            redrive.relayed.retain(|realm, _| mine.contains(realm));
-            redrive.resend.retain(|(realm, _)| mine.contains(realm));
+            session.eye.wanted = true;
         }
     }
-    // One copy of each relayed tile, kept while some session's record names it.
-    let named: BTreeSet<(RealmId, super::session::TileKey)> = sessions
-        .by_session
-        .values()
-        .flat_map(|s| {
-            s.artifact_redrive
-                .relayed
-                .iter()
-                .flat_map(|(realm, tiles)| tiles.iter().map(move |tile| (*realm, *tile)))
-        })
-        .collect();
-    sessions.relayed_tiles.retain(|key, _| named.contains(key));
     // The wants: a realm whose artifact is not held at the stated digest — or held in part with
     // nothing landing for a beat (a stalled answer) — is asked for, once a beat at most, from the
     // shard the directory names for it; a realm without a resolved head waits for the head poll
@@ -572,18 +629,45 @@ pub(crate) fn serve_artifacts(
         );
         stats.artifact_wants_sent += 1;
     }
+    // ★ THE FINE LEVELS EACH VIEW READS (ruling B87), by the one call the realm's shard names its answers by — for every
+    // session and drawn realm whose view went to the shard this beat; a tile no view reads any more leaves the realm's
+    // cache (the shard lets it go from its record by the same views).
+    let pixel_rad = vd_core::geometry::drawable_theta_min_rad();
+    let mut fine_needs: BTreeMap<(vd_core::SessionId, RealmId), Vec<(FineTile, u8)>> = BTreeMap::new();
+    for (sid, session) in &sessions.by_session {
+        if !matches!(session.phase, SessionPhase::Active { .. }) {
+            continue;
+        }
+        for (realm, digest) in drawn {
+            let Some(cache) = sessions.artifacts.get(realm).filter(|c| c.digest == *digest) else {
+                continue;
+            };
+            if let Some(view) = session_view(session, *realm)
+                && let Some(bag) = sessions.windows.values().find_map(|w| w.ingest.look_of(*realm))
+                && let Some(body) = body_of_bag(bag)
+            {
+                let needs =
+                    vd_terrain::artifact::fine_needs_of_head(&body, cache.band, view.dir, view.radial_m, pixel_rad);
+                fine_needs.insert((*sid, *realm), needs);
+            }
+        }
+    }
+    let read: BTreeSet<(RealmId, (u8, u32, u32))> =
+        fine_needs.iter().flat_map(|((_, realm), needs)| needs.iter().map(move |(t, _)| (*realm, *t))).collect();
+    for (realm, cache) in sessions.artifacts.iter_mut() {
+        cache.fine.retain(|(tile, _), _| read.contains(&(*realm, *tile)));
+    }
     // The serve: each session that draws a realm whose artifact is whole here, and has not stated
     // it holds it, gets the head then the parts, paced, each once — within ONE budget a beat for the
-    // whole session ([`ARTIFACT_BYTES_PER_BEAT`]), the relayed tiles a re-drive owes first, then each
-    // drawn realm's tiles and parts in the picture's order.
+    // whole session ([`ARTIFACT_BYTES_PER_BEAT`]), each drawn realm's tiles and parts in the picture's
+    // order.
     let GatewaySessions {
         by_session,
         artifacts,
         windows,
-        relayed_tiles,
         ..
     } = sessions;
-    for session in by_session.values_mut() {
+    for (sid, session) in by_session.iter_mut() {
         if !matches!(session.phase, SessionPhase::Active { .. }) {
             continue;
         }
@@ -596,27 +680,13 @@ pub(crate) fn serve_artifacts(
             Redrive::Now => redrive(session, artifacts, stats),
         }
         let mut budget = ARTIFACT_BYTES_PER_BEAT;
-        let redrive = &mut session.artifact_redrive;
-        while budget > 0 {
-            let Some(key) = redrive.resend.pop_first() else {
-                break;
-            };
-            // A tile whose copy is gone was forgotten with every record of it: nothing to send.
-            let Some(bytes) = relayed_tiles.get(&key) else {
-                continue;
-            };
-            push_control(
-                outbox,
-                session.client,
-                &ServerControlMsg::ArtifactPart {
-                    bytes: bytes.clone(),
-                },
-            );
-            stats.artifact_tiles_resent += 1;
-            budget = budget.saturating_sub(bytes.len());
-        }
+        // ★ COARSE FIRST, EVERY REALM, THEN THE FINE LEVELS (rulings B86 item 3 and B88): every drawn realm's tiles and its
+        // head and pyramid — the ground every rung stands on, and a far planet's whole look — go before any realm's fine
+        // levels, which only refine that ground. MEASURED before (the walker on the home belt, the first run on one path):
+        // the fine levels went first inside the home planet's turn and took the beat's megabyte for about 30 s, the
+        // pyramid waited, the client built 16 pieces of ground in those 30 s, and the far planets' heads waited 20 s.
         let drawn_here: Vec<RealmId> = drawn_realms(session).collect();
-        for realm in drawn_here {
+        for &realm in &drawn_here {
             let Some(cache) = artifacts.get(&realm).filter(|a| a.whole()) else {
                 continue;
             };
@@ -695,18 +765,56 @@ pub(crate) fn serve_artifacts(
             }
             session.artifact_parts_sent.insert(realm, next);
         }
+        for &realm in &drawn_here {
+            let Some(cache) = artifacts.get(&realm).filter(|a| a.whole()) else {
+                continue;
+            };
+            // ★ THE FINE LEVELS BY THIS SESSION'S OWN DISTANCE (ruling B87), whatever realm it stands in: the nearest tile
+            // first, each tile's levels the session lacks the coarsest first, from the realm's cache, in the beat's
+            // budget; a level not cached yet waits with every finer level of its tile, and the session draws the coarser
+            // ones meanwhile. Only to a session that reads them. The nearest tile whole first, as the shard answers them
+            // (`vd_sim::stub::fine_ship`): the near pieces the client builds first need its finest levels first.
+            if session.negotiated_minor >= FINE_MINOR
+                && let Some(needs) = fine_needs.get(&(*sid, realm))
+            {
+                let named: BTreeSet<FineTile> = needs.iter().map(|(t, _)| *t).collect();
+                let sent = session.fine_sent.entry(realm).or_default();
+                sent.retain(|tile, _| named.contains(tile));
+                for &(tile, need) in needs {
+                    let mut held = sent.get(&tile).copied().unwrap_or(FINE_LEVELS);
+                    while (budget > 0) & (held > need) {
+                        let Some(record) = cache.fine.get(&(tile, held - 1)) else {
+                            break;
+                        };
+                        for bytes in record {
+                            push_control(outbox, session.client, &ServerControlMsg::ArtifactPart { bytes: bytes.clone() });
+                            stats.artifact_parts_served += 1;
+                            budget = budget.saturating_sub(bytes.len());
+                        }
+                        held -= 1;
+                        sent.insert(tile, held);
+                    }
+                    if budget == 0 {
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
 
 /// ★ THE RE-DRIVE, ONCE (2026-09-27): a shed toward the session's client came a beat or more ago.
-/// Every realm it was served and has not stated whole owes one more pass from the head, every tile
-/// served from a view goes out again, and every tile a shard shipped to it is queued again; the
+/// Every realm it was served and has not stated whole owes one more pass from the head, and every
+/// tile served from a view goes out again (ruling B88: every tile comes from a realm's cache); the
 /// client drops what it already holds.
 fn redrive(
     session: &mut Session,
     artifacts: &BTreeMap<RealmId, GatewayArtifact>,
     stats: &mut GatewayStats,
 ) {
+    // ★ The fine levels served go out again from the realms' caches (ruling B87) — only those the client has not
+    // stated it holds (ruling B81 Q3): the levels it acknowledged stand.
+    session.fine_sent = session.fine_acked.clone();
     let held = &session.artifact_held;
     let owed: Vec<RealmId> = session
         .artifact_parts_sent
@@ -721,17 +829,11 @@ fn redrive(
     let redrive = &mut session.artifact_redrive;
     redrive.shed_at = None;
     redrive.repass.extend(owed);
-    for (realm, tiles) in &redrive.relayed {
-        redrive
-            .resend
-            .extend(tiles.iter().map(|tile| (*realm, *tile)));
-    }
     session.artifact_tiles_sent.clear();
     stats.artifact_redrives += 1;
     tracing::info!(
         client = ?session.client,
         repass = redrive.repass.len(),
-        resend = redrive.resend.len(),
         "a send toward the client was shed: its artifacts are served again"
     );
 }

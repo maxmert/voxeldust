@@ -150,6 +150,8 @@ pub struct GatewayStats {
     pub bulk_for_held: u64,
     /// ★ THE ARTIFACT SHIP (slice 8c stage C4c): bulk parts relayed to named sessions.
     pub artifact_parts_relayed: u64,
+    /// ★ THE FINE TILES HELD (ruling B81 Q3): tiles a client stated it holds, recorded on sessions.
+    pub fine_held_stated: u64,
     /// THE ARTIFACT SHIP: `ArtifactHeld` statements recorded on sessions.
     pub artifact_held_stated: u64,
     /// ★ THE FAR-VIEW SHIP: wants sent to realms' shards for artifacts the pictures name.
@@ -175,8 +177,6 @@ pub struct GatewayStats {
     /// THE RE-DRIVE: re-drives run — a session's unheld realms given one more pass and its tiles
     /// sent again.
     pub artifact_redrives: u64,
-    /// THE RE-DRIVE: tiles a shard shipped to a session that the gateway sent again from its copy.
-    pub artifact_tiles_resent: u64,
     /// CATALOGUE PARTS NOT SENT because the client already held that sky (S11). This is the saving,
     /// counted: every skipped part is bytes that did not cross for a galaxy that did not move.
     pub sky_parts_skipped: u64,

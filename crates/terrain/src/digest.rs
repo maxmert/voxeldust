@@ -878,12 +878,12 @@ mod tests {
     fn the_field_span_asks_the_slices_the_fields_own_ground_stands_in() {
         use crate::artifact::{PyramidField, TileCache, ZField};
         use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
-        use crate::solve::{Schedule, solve_full};
+        use crate::solve::Schedule;
         let moon = home_moon();
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =

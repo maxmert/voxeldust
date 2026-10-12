@@ -345,6 +345,93 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     generator 26's close, the release pin gate proving pins and bytes at once) and A PARALLEL FEATURE TRACK (AMENDS T1: a
     feature that does not depend on the terrain's final look moves in its own worktree and session with its own gates;
     the owner names it); not adopted: standing rules, bench checkpoints, nightly-only coverage, a rented machine (not now).
+    ★ B73 (2026-10-09; the pins recorded on one core, the release pin gate GREEN on 14 cores with the faster solve, the same
+    bytes): THE ROUTING'S UNREAD WORK SKIPPED FOR NOW (in a wet body the routing's flood, flat walk, order and discharge are
+    replaced by the budget's tree before anything reads them; only the ocean label is kept); THE FASTER SOLVE STOPS HERE (the
+    steps still on one core registered); DOCKER STOPPED for the coverage gate and the clean timing.
+    ★★ B74 (2026-10-10, the owner: "we are waiting for tens of hours instead of building the game"): THE FASTER COVERAGE
+    BUILD (light optimisation, proved first on the terrain crate: the same misses) and THE SHARED TEST SOLVES (one moon solve
+    per kind and test binary, on all cores) ADOPTED; ★ TESTS ONLY AFTER A SUBSTANTIAL CHANGE AND ASK FIRST — no suite, gate or
+    coverage run starts without the owner's word, each ask states why it is needed now; THE VISUAL TESTS (glitch, crack,
+    flicker) run more often, beside other work where the machine allows; the parallel feature track NOT NOW.
+    ★★ B75 (2026-10-10, the owner after the window look: "VERY far from believable terrain … fast proceeding with the game
+    development"; the shapes, the surface, no water and no cover the worst): LOOK FIRST — GENERATOR 26 CLOSES ON THE WINDOW
+    LOOK (the census registered, not done); BEVY 0.20 WAITS (amends B70); R2's SMALL FIRST SLICE NOW (one region eroded at
+    1 km on the bench + a shaded picture); A FIRST SURFACE LOOK BY LAW BESIDE IT (rock on the steep ground, soil in hollows,
+    snow by the climate law; amends B35's order); checks by look, heavy gates only on the owner's word; feature track not now.
+    ★★ B76 (2026-10-10, the owner on R2's 256 m pictures: "still a lot of strait lines … Are you sure we are using good
+    algorithms?" → "we rely on the visuals first, even when we are building the game"): THE PICTURES DECIDE FIRST, on the
+    bench AND in the build; R2's order: the literature on straight channels → bench the three causes one at a time (the
+    start from the game's own fine relief, routing that splits the water, the finer cell) → pictures side by side with a
+    straight-line number → R2's build only on the owner's word that they look believable.
+    ★★ B77 (2026-10-11, the owner on the balance's readings — the land almost still and dry — with four new reference
+    pictures: "it's not good enough. The terrain should be very believable"): LANDFORMS BY LAW BELOW 8 KM (amends B57/B58's
+    R2 bake): the macro world says WHERE, the one generator makes the forms at each point with no bake from published laws
+    (eroded mountains by the stream law's analytic solution on a drainage network built first; cliffs, mesas, towers by the
+    beds' hardness and the cliff law; valley floors by the discharge); a design with reviews first, then one family on the
+    bench beside the references; the macro world's rain and rise MEASURED BESIDE (a read-only study), the shapes not waiting.
+    ★ B78 (2026-10-11): the macro study found the dryness a DEFECT (the rain belt's share never renormalised) and a MISSING
+    LAW (the 55° tilt's seasonal circulation, B36 Q3, never built), plus the wrong height law; the owner chose "Later" —
+    THE LANDFORMS FIRST, the rain's cure (generator 27) discussed again after their first pictures; the defects registered.
+    ★ B79 (2026-10-11): the landforms design REVISION 2 (`docs/investigation/2026-10-11/landforms_by_law_design.md`,
+    three reviews answered) — Q1 EARTH AS A MEASURING STICK YES (bench only, data outside the repo, no constant from it);
+    Q3 THE LAW'S OWN WATER SHIPS (SL6 yes: one byte a node of rain × area over the tree, 8.9 MB, tile +10 %, a re-solve when
+    built); Q10 THE RIVER TREE IS LAWFUL (no water word); Q4 NOTHING RETIRES BEFORE THE OWNER'S LOOK; BENCH STEP 1 ON EARTH
+    STARTS (Taiwan, Oregon, a Colorado Plateau tile), then the owner's look; Q2, Q5–Q9 at their steps.
+    ★★ B80 (2026-10-11, the owner on the pairs: "I like it WAY BETTER! What's next?"): THE ROOT WAS THE REGULAR GRID under
+    every erosion method below 8 km; THE DIRECTION IS THE JOINT LAW'S STEADY STATE ON IRREGULAR POINTS (fastlem's point graph,
+    MPL-2.0, bench only; each node's uplift solved so the fine mean equals the node's own); the ladder and grid bakes stop.
+    THE ORDER (owner's word owed): bench defects + an eye-height view → finer ground to 2–4 m → a short design for the way
+    into the game (SL6, SL10, region seams) → the build on the belt stand → the rain (B78) from spacesim's seasonal structure.
+    ★★ B81 (2026-10-11, the owner: "Let's accept recommendations if they are not breaking ground rules and laws and if we
+    don't build seams — all our solutions should be generic and reusable"): the way-in design's eight recommendations
+    ACCEPTED — Q1 THE TILE SOLVE below 8 km (AMENDS B77's "no bake"; no noise under the finest level), Q2 the planet's
+    shard solves/stores/ships, Q3 SL6 YES (one bulk part variant, the client acknowledges), Q4 idle L1 near arrival places,
+    Q5 the coarser rung stands until live, Q6 a standing body moves with the ground, Q7 the bounds MEASURED first, Q8 F2
+    AMENDED (a new fine law may move unbuilt ground; built ground never moves); NO SEAMS (one generic stitch, G-SEAM
+    BLOCKING); ONE GENERIC TILE MACHINERY for every level, body and landform family; NEXT B0 (bench only).
+    ★ B82 (2026-10-11, the owner: "Agree, let's try"): THE THRESHOLD BY THE LEVEL'S SCALE — tan 35° at 128 m (Burbank
+    1996), S_c 1.25 at 16 m (Roering 1999; amends A6, refuted: 52 % of the 128 m ground over 45° at 1.25); THE STRAIGHT
+    VALLEYS ARE THE 8 km WORLD'S DEFECT (an 8 km river along a node column), cured there with the rain (generator 27), the
+    seeded displacement OFF; THE 128 m HOLD IS B80's ROUNDS (coarse start + three rounds + the additive hold; the design's
+    linear solve refuted, amends §3.3); NEXT the slow tiles, P-COST, step 4.
+    ★ B83 (2026-10-11, the owner: "Agree with the fix if it's performant, seamless and will be equal on BE and client on
+    all devices"): THE HASHED POISSON-DISK POINTS; THE 128 m TILE SERVES RUNGS 7–12 (its mean pyramid); THE BAND ±4.1 km
+    (0.70 × the node's half-diagonal); THE ADAPTIVE RICE CODER; THE 16 m LEVEL MUST REFINE THE 128 m GROUND (solved under
+    its drainage, held per 128 m cell) — fast, seamless, the same bytes on server and every client — before B3; NEXT
+    step 5 (the plain and the belt at 128 m for the owner's look).
+    ★ B84 (2026-10-11, the owner: "Proceed"): THE 128 m LEVEL IS THE LAW ALONE — NO ADDITIVE HOLD (amends B82 item 3: the
+    hold dug hollows up to 1.2 km deep; without it no pit, each node's mean ≤ 1 233 m off its row = 0.15 px at the rows'
+    switch); G-MEAN BECOMES "THE SWAP TO THE COARSER LEVEL UNDER A PIXEL AT ITS SWITCH" at every level; NEXT the 16 m fix.
+    ★ B85 (2026-10-11, the owner: "Agree with your proposal if we don't sacrifice quality"): THE SHARD SHIPS THE FINISHED
+    TILE (joined to its neighbours, with its coarser copies; amends the design §4.4: no cut paths, the client only reads);
+    THE CORNER RULE (each edge's cut in two halves from each corner point to the edge's midpoint; a corner point from its
+    four tiles, a midpoint from its two) — every finished tile depends on its eight neighbours only; judged against the
+    bench's stitch at a four-tile corner before the build takes it — MET (the same slope breaks to the third decimal, no
+    line at the corner; the finished tile 303 KB against the raw 463 KB).
+    ★★ B86 (2026-10-12, the owner on B2's flats: "Yes please, add those … no teleport … put player at the starting
+    position immediately … show the loading screen over the gameplay"): THE FINAL GROUND FROM THE FIRST FRAME (no
+    temporary ground in the normal case; the client's own solve refused for the speed) — THE ADVANCE CALCULATION (the
+    planet's shard solves every fine tile once per world version: its occupants', its arrival places', then the rest;
+    how an unvisited planet completes it OPEN at the build), FAR COPIES FIRST (a tile's levels ship apart), SENT AHEAD
+    WITH THE SPEED, THE PLAYER'S DISK CACHE (keyed by the input word; B81 Q3's acknowledgement names tiles from disk
+    too), THE LOADING SCREEN OVER THE RUNNING GAME AT LOGIN ONLY (no teleport, no special login path: the player at the
+    start at once, every machine as in play, the client judges "complete" from what it holds), THE SAFETY NET = cure B
+    (the 8 km ground fills only empty places; amends the 2026-09-30 own-height stand-in for the fine level); bandwidth
+    ESTIMATES (login ~10–15 MB; ~10 Mbit/s least, 25 comfortable). ORDER: the face-edge cut → the safety net → the
+    owner's look → far copies → send-ahead → loading screen → advance calculation → disk cache.
+    ★★ B87 (2026-10-12, the owner: "based on the distance from the rung, not in which realm I'm. And it's true for ANY
+    realm"): THE FINE GROUND REACHES EVERY VIEWER BY DISTANCE — one rule (each level to its rung's ask edge, bounded by
+    the ground seen), any realm, any viewer (on foot, aboard a hull, in orbit); ONE CALL (`fine_needs_of_head`): every
+    viewer outside the realm through the gateway's realm cache (its VIEW on the one tile path, `ArtifactWant { view }`;
+    the shard names, solves, answers one level a record), the realm's own occupants by its shard at their poses (the
+    gateway cannot see a pose inside a realm); coarse first; no new data class, no wire arm.
+    ★★ B88 (2026-10-12, the owner: "one way only - through gateway!"; "exactly the same machinery, despite of which
+    realm I currently belong"; AMENDS B87 item 3): ONE PATH — every tile (artifact and fine) comes from the gateway's
+    realm cache by the one call; ONE EYE from the picture's own inputs (the eye in the player's realm carried by each
+    drawn realm's row; in the player's own realm the avatar's position, read by the gateway off that realm's snapshot,
+    once a beat; elsewhere the realm's centre, the SL7 proxy); no shard ships a tile to a session; the interest width
+    and the gateway's relayed-tile record gone; no new data class, no wire arm.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

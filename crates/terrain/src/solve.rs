@@ -75,9 +75,12 @@ pub const MIXED_T_MAX_YR: u64 = 12_500_000;
 /// ★ THE MIXED AXIS's ratio between neighbouring recent passes: each pass is this many times the next, until a pass
 /// reaches [`MIXED_T_MAX_YR`].
 pub const MIXED_RATIO: f64 = 1.25;
-/// The climate is recomputed over the relief as it then stands every this many passes (C3); twenty on the 414-pass
-/// axis (B56), so its spacing in years is the one ten passes held on the axis before.
-pub const CLIMATE_EVERY: u32 = 20;
+// ★ THE CLIMATE AND THE RUNNING SEA EVERY PASS (ruling B69 item 1; B68, plate 5's cause): re-solved every twentieth pass,
+// the sea stood still from 242 to 17 million years ago on the 414-pass axis while the young belts rose, and ONE late
+// re-solve raised it 53–60 m — 17 million years ago on one axis, 8.6 on the other — so plate 5's old plains read 303 m
+// at 414 passes and 263 m at 828 (−14.3 %). Re-solved every pass, the sea follows the ranges as they rise: 269 → 257 m
+// (−9.1 %), and the gate passes on every reading. No spacing is left to state: the climate and the sea are part of
+// every pass, like the flood below. Its price: the climate is about a fifth of a first solve.
 // ★ THE FLOOD, THE FLATS AND THE RECEIVERS EVERY PASS (2026-09-22, the lake census): at ten, a hollow the uplift, the
 // rebound or the talus made between two floods was cut by nobody, and the spill of a lake was re-found four times in five
 // billion years — so the pits GREW from 98 k after the first ten passes to 146 k at the end. A river breaches a hollow; a
@@ -279,7 +282,6 @@ pub struct Schedule {
     /// The mixed axis's last pass and its longest pass, years ([`mixed_times`]).
     pub t_min_yr: u64,
     pub t_max_yr: u64,
-    pub climate_every: u32,
     pub talus_passes: u32,
     pub sub_sweeps: u32,
     /// The routings a pass ([`ROUTINGS`]), at most one a sweep.
@@ -294,7 +296,6 @@ impl Schedule {
             age_yr,
             t_min_yr: MIXED_T_MIN_YR,
             t_max_yr: MIXED_T_MAX_YR,
-            climate_every: CLIMATE_EVERY,
             talus_passes: TALUS_PASSES,
             sub_sweeps: SUB_SWEEPS,
             routings: ROUTINGS,
@@ -463,6 +464,8 @@ pub struct BasinGroups {
     lists: Vec<Vec<u32>>,
     skip: Vec<usize>,
     local: Vec<u32>,
+    /// The list that sweeps each node ([`NO_NODE`] for a node no list sweeps: a read-only root, or a lone outlet).
+    group: Vec<u32>,
 }
 
 /// What the deposit with the budget's closed hollows did ([`MacroSolve::deposit_basins`]): the nodes it raised and the
@@ -481,6 +484,15 @@ pub struct DepositReport {
     /// The ways refused because the water's way from their gate ends where the rest may not go: in a body the rest has
     /// already passed (the full body itself among them), at an inland end no body holds, or on a ring of receivers.
     pub refused: usize,
+}
+
+/// One core's share of the deposit's walk down the trees ([`MacroSolve::deposit_basins_grouped`]): the nodes it raised and
+/// by how much, the rock it booked to each closed body, and its sums.
+#[derive(Default)]
+struct WalkPart {
+    raised: Vec<(u32, i32)>,
+    held: Vec<(u32, u128)>,
+    out: DepositReport,
 }
 
 /// The deposit's work over the closed bodies ([`MacroSolve::deposit_basins`]): each body's representative after the
@@ -618,11 +630,17 @@ pub fn settle_lakes_sea(
         let left = water_km3.saturating_sub(km3);
         let lattice = state.lattice;
         // A lake that held the whole inventory would leave no sea to solve: the level stands.
-        let (level, reseeded, settled) =
-            match crate::land::sea_level_connected(&lattice, &state.z, &state.area, left, false) {
-                Some(sea) => (sea.level, sea.reseeded, sea.settled),
-                None => (state.sea_z, false, true),
-            };
+        let (level, reseeded, settled) = match crate::land::sea_level_connected_on(
+            &lattice,
+            &state.z,
+            &state.area,
+            left,
+            false,
+            state.cores,
+        ) {
+            Some(sea) => (sea.level, sea.reseeded, sea.settled),
+            None => (state.sea_z, false, true),
+        };
         fix.reseeded |= reseeded;
         fix.unsettled |= !settled;
         fix.converged = level == state.sea_z;
@@ -984,6 +1002,22 @@ pub fn initial_surface(body: &BodyDefinition, lattice: &MacroLattice) -> Vec<i32
         .collect()
 }
 
+/// ★ THE OUTLETS OF A BODY WITH NO SEA ([`OUTLETS_WITHOUT_SEA`]): its lowest nodes by `(height, index)`, the ones the
+/// routing seeds its flood from and the lakes' budget takes as its root, so both agree where the water leaves.
+///
+/// **Example.** The dry moon has no ocean: its six lowest crater floors are where every flood starts.
+#[must_use]
+pub(crate) fn outlets_without_sea(z: &[i32]) -> Vec<u32> {
+    let mut lowest: BinaryHeap<(i32, u32)> = BinaryHeap::new();
+    for (i, &h) in z.iter().enumerate() {
+        lowest.push((h, i as u32));
+        if lowest.len() > OUTLETS_WITHOUT_SEA {
+            lowest.pop();
+        }
+    }
+    lowest.into_iter().map(|(_, node)| node).collect()
+}
+
 /// ★ THE TOPOLOGICAL ORDER of a receiver tree, LEAVES FIRST: a node is emitted once every donor
 /// is; the receiver whose last donor was emitted is pushed. A stack, so the order is a stated one. A
 /// node on a ring of receivers is never emitted, so `n − order.len()` counts the ring.
@@ -1102,7 +1136,8 @@ impl MacroSolve {
     /// ★ THE OCEAN LABELLED AGAIN at the sea's level over the field as it stands (2026-09-24, ruling
     /// B7 item 1), and the pockets under the level it leaves out.
     pub fn label_ocean(&mut self) -> (usize, usize) {
-        let mask = crate::land::ocean_mask(&self.lattice, &self.z, &self.area, self.sea_z);
+        let mask =
+            crate::land::ocean_mask_on(&self.lattice, &self.z, &self.area, self.sea_z, self.cores);
         self.ocean = mask.ocean;
         (mask.pockets, mask.pocket_nodes)
     }
@@ -1310,62 +1345,38 @@ impl MacroSolve {
         let n = self.node_count();
         let mut report = RouteReport::default();
         (report.pockets, report.pocket_nodes) = self.label_ocean();
-        // 1. THE PRIORITY FLOOD. The outlets seed a heap keyed by `(height, index)`; popping the
-        //    lowest first, every unvisited neighbour is raised to at least the popped level.
-        let mut visited = vec![false; n];
-        let mut heap: BinaryHeap<Reverse<(i32, u32)>> = BinaryHeap::new();
-        let mut dist = vec![u64::MAX; n];
-        for i in 0..n {
-            self.receiver[i] = NO_NODE;
-            self.chord[i] = 0;
-            if self.ocean[i] {
-                visited[i] = true;
-                self.z_flood[i] = self.z[i];
-                dist[i] = 0;
-                heap.push(Reverse((self.z[i], i as u32)));
+        // 1. THE PRIORITY FLOOD: the outlets are the seeds, and every node is raised to the least, over the paths from
+        //    an outlet, of the highest node on the path — ★ ON THE SOLVE'S CORES, the same bytes (ruling B72 item 1,
+        //    [`crate::flood::fill`]).
+        let threads = self.cores.threads();
+        let mut seed = self.ocean.clone();
+        report.sea_seeded = seed.contains(&true);
+        if !report.sea_seeded {
+            for node in outlets_without_sea(&self.z) {
+                seed[node as usize] = true;
             }
         }
-        report.sea_seeded = !heap.is_empty();
-        if heap.is_empty() {
-            let mut lowest: BinaryHeap<(i32, u32)> = BinaryHeap::new();
-            for i in 0..n {
-                lowest.push((self.z[i], i as u32));
-                if lowest.len() > OUTLETS_WITHOUT_SEA {
-                    lowest.pop();
-                }
-            }
-            for (z, node) in lowest {
-                let i = node as usize;
-                visited[i] = true;
-                self.z_flood[i] = z;
-                dist[i] = 0;
-                heap.push(Reverse((z, node)));
-            }
-        }
-        report.outlets = heap.len();
-        while let Some(Reverse((level, node))) = heap.pop() {
-            for m in self.lattice.neighbours(node) {
-                if m == NO_NODE || visited[m as usize] {
-                    continue;
-                }
-                visited[m as usize] = true;
-                let raised = self.z[m as usize].max(level);
-                self.z_flood[m as usize] = raised;
-                heap.push(Reverse((raised, m)));
-            }
-        }
-        drop(heap);
-        drop(visited);
-        for i in 0..n {
-            self.pit[i] = (self.z_flood[i] - self.z[i]).max(0) as u32;
-        }
-        report.raised = self.pit.iter().filter(|&&p| p > 0).count();
-        report.pit_steps = self.pit.iter().map(|&p| u64::from(p)).sum();
+        // ★ Every whole-field count, pit and pick below ON THE SOLVE'S CORES (ruling B72 item 1): each node reads only
+        //   the flood and its own neighbours, and the counts are integer sums.
+        report.outlets = crate::par::per_range(n, threads, |r| r.filter(|&i| seed[i]).count())
+            .into_iter()
+            .sum();
+        self.z_flood = crate::flood::fill(&self.lattice, &self.z, &seed, self.cores);
+        self.pit = crate::par::map(n, threads, |i| (self.z_flood[i] - self.z[i]).max(0) as u32);
+        (report.raised, report.pit_steps) = crate::par::per_range(n, threads, |r| {
+            let pits = &self.pit[r];
+            (
+                pits.iter().filter(|&&p| p > 0).count(),
+                pits.iter().map(|&p| u64::from(p)).sum::<u64>(),
+            )
+        })
+        .into_iter()
+        .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
         // 2. THE RECEIVERS: the steepest lower neighbour on the flooded surface — ★ ON THE SOLVE'S CORES (ruling B64):
         //    each node reads only the flooded surface, so the nodes are cut into ranges and their picks laid in order.
-        let picks = crate::par::map(n, self.cores.threads(), |i| {
+        let picks = crate::par::map(n, threads, |i| {
             let node = i as u32;
-            if dist[i] == 0 {
+            if seed[i] {
                 return (NO_NODE, 0);
             }
             let mut best = NO_NODE;
@@ -1384,13 +1395,18 @@ impl MacroSolve {
             }
             (best, l_best)
         });
-        for (i, (best, l_best)) in picks.into_iter().enumerate() {
-            if best != NO_NODE {
-                self.receiver[i] = best;
-                self.chord[i] = l_best;
-                dist[i] = 0;
+        // An outlet or a node with a lower neighbour is routed (its distance zero); every other node waits for the flats.
+        self.receiver = crate::par::map(n, threads, |i| picks[i].0);
+        self.chord = crate::par::map(n, threads, |i| picks[i].1);
+        let mut dist: Vec<u64> = crate::par::map(n, threads, |i| {
+            if seed[i] | (picks[i].0 != NO_NODE) {
+                0
+            } else {
+                u64::MAX
             }
-        }
+        });
+        drop(picks);
+        drop(seed);
         // 3. ★ THE FLATS, BY THE DISTANCE IN METRES AND NEVER BY THE HOP COUNT (ruling B2 step 3,
         //    2026-09-22; Cordonnier, Bovy & Braun 2019 §2.3.2). A filled hollow is a FLAT, and a
         //    hop count charges the stencil's diagonal — which is √2 of a side — the same one step
@@ -1407,20 +1423,23 @@ impl MacroSolve {
         //    ONLY THE SHORE SEEDS THE WALK. A routed node with no unreached neighbour of its own
         //    flooded height touches no flat, so seeding every routed node would put eight million
         //    rows in a heap to no purpose (SL9: a cost that grows with the count is a defect).
-        let mut walk: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
-        for node in 0..n as u32 {
-            if dist[node as usize] != 0 {
-                continue;
-            }
-            let shore = self.lattice.neighbours(node).iter().any(|&m| {
-                m != NO_NODE
-                    && dist[m as usize] == u64::MAX
-                    && self.z_flood[m as usize] == self.z_flood[node as usize]
-            });
-            if shore {
-                walk.push(Reverse((0, node)));
-            }
-        }
+        //    ★ The shore is found ON THE SOLVE'S CORES (ruling B72 item 1): each node reads only the finished receivers
+        //    and the flooded surface, and the ranges' shores join in index order.
+        let shores: Vec<u32> =
+            crate::par::join(crate::par::per_range(n, self.cores.threads(), |r| {
+                r.filter(|&i| {
+                    (dist[i] == 0)
+                        && self.lattice.neighbours(i as u32).iter().any(|&m| {
+                            m != NO_NODE
+                                && dist[m as usize] == u64::MAX
+                                && self.z_flood[m as usize] == self.z_flood[i]
+                        })
+                })
+                .map(|i| i as u32)
+                .collect::<Vec<u32>>()
+            }));
+        let mut walk: BinaryHeap<Reverse<(u64, u32)>> =
+            shores.into_iter().map(|node| Reverse((0, node))).collect();
         while let Some(Reverse((d, node))) = walk.pop() {
             if d > dist[node as usize] {
                 continue;
@@ -1447,6 +1466,31 @@ impl MacroSolve {
         report
     }
 
+    /// ★ THE ROUTING A WET PASS READS (ruling B73 item 1, "for now"): the ocean labelled at the sea's level, and every
+    /// ocean node's flood level its own ground (an outlet holds no room for rock). In a body with water the budget's own
+    /// tree ([`MacroSolve::follow_the_budget`]) then lays the receivers, their chords, the order, the discharge and every
+    /// land node's level, so the full routing's flood, flat walk and order were replaced before anything read them
+    /// (MEASURED 2026-10-09: a quarter of a pass's time on 14 cores). Returns the routing's report with the ocean's
+    /// words alone — the pockets, the seeding and the outlets.
+    ///
+    /// **Example.** A pass of the home planet's solve routes its water four times; each time it now labels the ocean
+    /// under the sea that stands and hands the land to the budget, which finds the lakes and the rivers itself.
+    pub fn label_for_budget(&mut self) -> RouteReport {
+        let (n, threads) = (self.node_count(), self.cores.threads());
+        let mut report = RouteReport::default();
+        (report.pockets, report.pocket_nodes) = self.label_ocean();
+        report.outlets =
+            crate::par::per_range(n, threads, |r| r.filter(|&i| self.ocean[i]).count())
+                .into_iter()
+                .sum();
+        report.sea_seeded = report.outlets > 0;
+        self.z_flood = crate::par::map(n, threads, |i| {
+            [self.z_flood[i], self.z[i]][usize::from(self.ocean[i])]
+        });
+        self.pit = crate::par::map(n, threads, |i| [self.pit[i], 0][usize::from(self.ocean[i])]);
+        report
+    }
+
     /// ★ THE FLAT'S RECEIVERS from the distance field (ruling B2 step 3, 2026-09-22): a node the
     /// field reached (a distance over zero) takes the neighbour of equal flooded height that stands
     /// NEAREST THE SHORE THROUGH ITSELF — the smallest `distance + chord`, in whole metres — and on
@@ -1463,9 +1507,9 @@ impl MacroSolve {
     /// eight and eight row hops counted eight. Now the eight diagonal steps cost 92 700 m and the
     /// eight row steps cost 65 500 m, so the water leaves by the nearest shore, as water does.
     fn assign_flat_receivers(&mut self, dist: &[u64]) -> (usize, usize) {
-        let (mut flat, mut undrained) = (0usize, 0usize);
+        let (n, threads) = (self.node_count(), self.cores.threads());
         // ★ ON THE SOLVE'S CORES (ruling B64): each flat node reads only the finished distances and the flooded surface.
-        let picks = crate::par::map(self.node_count(), self.cores.threads(), |i| {
+        let picks = crate::par::map(n, threads, |i| {
             if (dist[i] == 0) | (dist[i] == u64::MAX) {
                 return (NO_NODE, 0);
             }
@@ -1490,18 +1534,27 @@ impl MacroSolve {
             }
             (best, best_chord)
         });
-        for (i, (best, best_chord)) in picks.into_iter().enumerate() {
-            if dist[i] == 0 {
-                continue;
-            }
-            if dist[i] == u64::MAX {
-                undrained += 1;
-                continue;
-            }
-            flat += 1;
-            self.receiver[i] = best;
-            self.chord[i] = best_chord;
-        }
+        // ★ The picks laid and counted ON THE SOLVE'S CORES too (ruling B72 item 1): a node reached by the field takes
+        //   its pick, a routed node keeps its receiver, a node never reached is counted.
+        let on_flat = |i: usize| (dist[i] != 0) & (dist[i] != u64::MAX);
+        let (flat, undrained) = crate::par::per_range(n, threads, |r| {
+            r.fold((0usize, 0usize), |(f, u), i| {
+                (
+                    f + usize::from(on_flat(i)),
+                    u + usize::from(dist[i] == u64::MAX),
+                )
+            })
+        })
+        .into_iter()
+        .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
+        let receiver = crate::par::map(n, threads, |i| {
+            [self.receiver[i], picks[i].0][usize::from(on_flat(i))]
+        });
+        let chord = crate::par::map(n, threads, |i| {
+            [self.chord[i], picks[i].1][usize::from(on_flat(i))]
+        });
+        self.receiver = receiver;
+        self.chord = chord;
         (flat, undrained)
     }
 
@@ -1543,14 +1596,15 @@ impl MacroSolve {
         let n = self.node_count();
         let mut report = tree.report;
         self.receiver = tree.receiver;
-        for i in 0..n {
+        // ★ Each node's chord to its receiver ON THE SOLVE'S CORES (ruling B72 item 1): a node reads only its own way.
+        self.chord = crate::par::map(n, self.cores.threads(), |i| {
             let r = self.receiver[i];
-            self.chord[i] = if r == NO_NODE {
+            if r == NO_NODE {
                 0
             } else {
                 self.chord_m(i as u32, r)
-            };
-        }
+            }
+        });
         self.order = order_of(&self.receiver);
         report.cyclic = n - self.order.len();
         let mut sink = vec![0u64; n];
@@ -1635,12 +1689,21 @@ impl MacroSolve {
             }
         }
         let mut local = vec![NO_NODE; n];
-        for list in &lists {
+        let mut group = vec![NO_NODE; n];
+        for (g, list) in lists.iter().enumerate() {
             for (k, &v) in list.iter().enumerate() {
                 local[v as usize] = k as u32;
             }
+            for &v in list.iter().skip(skip[g]) {
+                group[v as usize] = g as u32;
+            }
         }
-        BasinGroups { lists, skip, local }
+        BasinGroups {
+            lists,
+            skip,
+            local,
+            group,
+        }
     }
 
     /// One core's share of a sweep ([`MacroSolve::sweep`]): its trees' nodes copied into cells, swept in the list's order
@@ -1789,23 +1852,38 @@ impl MacroSolve {
             })
             .collect::<Vec<_>>()
         });
-        for (g, (cells, part)) in swept.into_iter().flatten().enumerate() {
+        let swept: Vec<(Vec<SweepCell>, SweepReport)> = swept.into_iter().flatten().collect();
+        for (_, part) in &swept {
             report.lowered += part.lowered;
             report.skipped_lake += part.skipped_lake;
             report.max_cut = report.max_cut.max(part.max_cut);
             report.total_cut += part.total_cut;
-            for (&v, cell) in groups.lists[g].iter().zip(&cells).skip(groups.skip[g]) {
-                let i = v as usize;
-                self.z[i] = cell.z;
-                self.z_flood[i] = cell.z_flood;
-                self.pit[i] = cell.pit;
-                self.removed[i] = cell.removed;
-                self.pending[i] = cell.pending;
-                self.cut_now[i] = cell.cut;
-            }
         }
+        // ★ The swept cells gathered back ON THE SOLVE'S CORES (ruling B72 item 1): each node reads the cell its list
+        //   swept, or keeps its own values where no list swept it.
+        let (n, threads) = (self.node_count(), self.cores.threads());
+        let cell = |i: usize| -> Option<&SweepCell> {
+            let g = groups.group[i];
+            if g == NO_NODE {
+                return None;
+            }
+            Some(&swept[g as usize].0[groups.local[i] as usize])
+        };
+        self.z = crate::par::map(n, threads, |i| cell(i).map_or(self.z[i], |c| c.z));
+        self.z_flood = crate::par::map(n, threads, |i| {
+            cell(i).map_or(self.z_flood[i], |c| c.z_flood)
+        });
+        self.pit = crate::par::map(n, threads, |i| cell(i).map_or(self.pit[i], |c| c.pit));
+        self.removed = crate::par::map(n, threads, |i| {
+            cell(i).map_or(self.removed[i], |c| c.removed)
+        });
+        self.pending = crate::par::map(n, threads, |i| {
+            cell(i).map_or(self.pending[i], |c| c.pending)
+        });
+        self.cut_now = crate::par::map(n, threads, |i| cell(i).map_or(self.cut_now[i], |c| c.cut));
+        drop(swept);
         let deposit = match basins {
-            Some(b) => self.deposit_basins(b),
+            Some(b) => self.deposit_basins_grouped(b, groups),
             None => {
                 let (filled, total_fill) = self.deposit();
                 DepositReport {
@@ -1907,16 +1985,16 @@ impl MacroSolve {
     /// them — and its spill level.
     fn lakes_from_budget(&mut self, lakes: &crate::lakes::Lakes) -> Basins {
         use crate::lakes::{NO_DEP, OCEAN};
-        let n = self.node_count();
-        for i in 0..n {
-            if self.ocean[i] {
-                continue;
-            }
-            let w = lakes.water[i];
-            let level = if w > self.z[i] { w } else { self.z[i] };
-            self.z_flood[i] = level;
-            self.pit[i] = (level - self.z[i]) as u32;
-        }
+        let (n, threads) = (self.node_count(), self.cores.threads());
+        // ★ Each land node's level ON THE SOLVE'S CORES (ruling B72 item 1): the budget's water over it, or its own
+        //   ground; an ocean node keeps the routing's.
+        let level = |i: usize| -> i32 { lakes.water[i].max(self.z[i]) };
+        self.z_flood = crate::par::map(n, threads, |i| {
+            [level(i), self.z_flood[i]][usize::from(self.ocean[i])]
+        });
+        self.pit = crate::par::map(n, threads, |i| {
+            [(level(i) - self.z[i]) as u32, self.pit[i]][usize::from(self.ocean[i])]
+        });
         let mut slot_of_dep = vec![u32::MAX; lakes.deps.len()];
         let mut bodies: Vec<(Vec<u32>, i32)> = Vec::new();
         let mut dep_of_body: Vec<usize> = Vec::new();
@@ -2027,9 +2105,24 @@ impl MacroSolve {
     /// the pan fills to its sill, and the other 3 km³ run over the sill into the next pan down the water's way, which
     /// keeps what it has room for and passes the rest on to the sea.
     pub fn deposit_basins(&mut self, basins: &Basins) -> DepositReport {
-        let n = self.node_count();
+        let groups = self.basin_groups();
+        self.deposit_basins_grouped(basins, &groups)
+    }
+
+    /// [`MacroSolve::deposit_basins`] over river basins already dealt ([`MacroSolve::basin_groups`]: the sweep's own
+    /// deal, which the deposit after it shares). ★ THE WALK DOWN THE TREES ON THE SOLVE'S CORES (ruling B72 item 1): a
+    /// node's rock reaches only its own receiver, and both lie in one drainage tree, so each core walks its own trees,
+    /// leaves first in the solve's own order, and lists what it laid and where its rock left the trees; an outlet that
+    /// no tree holds (no donor) carries only its own cut. The lists are applied after the walk — each node is raised
+    /// once, by the one core that walked it, and every sum is an integer sum — so the state is the one a single core
+    /// leaves. The bodies' fill after the walk passes rock between bodies, and stays one body after another.
+    pub fn deposit_basins_grouped(
+        &mut self,
+        basins: &Basins,
+        groups: &BasinGroups,
+    ) -> DepositReport {
         let nb = basins.bodies.len();
-        let mut flux = vec![0u128; n];
+        let threads = self.cores.threads();
         let mut w = RockWork {
             owner: (0..nb as u32).collect(),
             nodes: basins.bodies.iter().map(|(m, _)| m.clone()).collect(),
@@ -2038,24 +2131,39 @@ impl MacroSolve {
             due: Vec::new(),
         };
         let mut out = DepositReport::default();
-        for k in 0..self.order.len() {
-            let i = self.order[k] as usize;
-            flux[i] += u128::from(self.cut_now[i]) * u128::from(self.area[i].max(1));
-            let mut f = flux[i];
-            self.fill_room(i, &mut f, &mut out);
-            flux[i] = f;
-            let r = self.receiver[i];
-            if r != NO_NODE {
-                flux[r as usize] += f;
-            } else if basins.slot[i] != u32::MAX {
-                w.held[basins.slot[i] as usize] += f;
-            } else if self.ocean[i] {
-                out.to_sea += f;
-            } else {
-                out.dropped += f;
+        let trees = crate::par::per_range(groups.lists.len(), threads, |r| {
+            r.map(|g| self.deposit_group(&groups.lists[g], groups.skip[g], &groups.local, basins))
+                .collect::<Vec<_>>()
+        });
+        let lone = crate::par::per_range(self.node_count(), threads, |r| {
+            let mut part = WalkPart::default();
+            for i in r {
+                if (self.cut_now[i] == 0)
+                    | (groups.local[i] != NO_NODE)
+                    | (self.receiver[i] != NO_NODE)
+                {
+                    continue;
+                }
+                let cut = u128::from(self.cut_now[i]) * u128::from(self.area[i].max(1));
+                self.walk_step(i, cut, basins, &mut part);
             }
+            part
+        });
+        for part in trees.into_iter().flatten().chain(lone) {
+            for (v, dz) in part.raised {
+                let i = v as usize;
+                self.z[i] += dz;
+                self.pit[i] -= dz as u32;
+                self.pending[i] = self.pending[i].saturating_sub(dz);
+            }
+            for (slot, f) in part.held {
+                w.held[slot as usize] += f;
+            }
+            out.filled += part.out.filled;
+            out.total_fill += part.out.total_fill;
+            out.to_sea += part.out.to_sea;
+            out.dropped += part.out.dropped;
         }
-        drop(flux);
         // THE BODIES, as a work list: a body due to fill takes its rock, and the rest of a body that then stands at its
         // spill (full of rock) passes on ([`MacroSolve::pass_on`]).
         w.due = (0..nb as u32)
@@ -2167,12 +2275,62 @@ impl MacroSolve {
         }
     }
 
+    /// One core's walk down its trees ([`MacroSolve::deposit_basins_grouped`]): the group's nodes leaves first (its list
+    /// read backwards, its read-only roots last and never walked), each node's rock gathered from its donors, its room
+    /// filled, the rest handed to its receiver — or, at the tree's end, booked to the closed body, the sea, or as
+    /// dropped. A receiver that is a read-only root (on a ring of receivers) takes the rock and never passes it on.
+    fn deposit_group(&self, list: &[u32], skip: usize, local: &[u32], basins: &Basins) -> WalkPart {
+        let mut flux = vec![0u128; list.len()];
+        let mut part = WalkPart::default();
+        for k in (skip..list.len()).rev() {
+            let i = list[k] as usize;
+            let cut = u128::from(self.cut_now[i]) * u128::from(self.area[i].max(1));
+            let f = self.walk_step(i, flux[k] + cut, basins, &mut part);
+            let r = self.receiver[i];
+            if r != NO_NODE {
+                flux[local[r as usize] as usize] += f;
+            }
+        }
+        part
+    }
+
+    /// One node of the deposit's walk: the room it holds filled from the rock `volume` reaching it (listed in `part`,
+    /// applied after the walk), and at a tree's end (no receiver) the rest booked — to the node's closed body, to the
+    /// sea, or as dropped. Returns the rest.
+    fn walk_step(&self, i: usize, mut volume: u128, basins: &Basins, part: &mut WalkPart) -> u128 {
+        let area = u128::from(self.area[i].max(1));
+        let dz = self.room_dz(i, volume);
+        if dz > 0 {
+            volume -= u128::from(dz as u32) * area;
+            part.raised.push((i as u32, dz));
+            part.out.filled += 1;
+            part.out.total_fill += dz as u64;
+        }
+        if self.receiver[i] == NO_NODE {
+            if basins.slot[i] != u32::MAX {
+                part.held.push((basins.slot[i], volume));
+            } else if self.ocean[i] {
+                part.out.to_sea += volume;
+            } else {
+                part.out.dropped += volume;
+            }
+        }
+        volume
+    }
+
+    /// The steps a node's lake room takes from the rock `volume` reaching it: what the volume pays for over the node's
+    /// area, never over its water.
+    fn room_dz(&self, i: usize, volume: u128) -> i32 {
+        let area = u128::from(self.area[i].max(1));
+        let room = u128::from(self.pit[i]) * area;
+        (volume.min(room) / area) as i32
+    }
+
     /// One node's lake room filled from the volume passing it (the deposit's own step): the node rises by what the
     /// volume pays for over its area, never over its water.
     fn fill_room(&mut self, i: usize, volume: &mut u128, out: &mut DepositReport) {
         let area = u128::from(self.area[i].max(1));
-        let room = u128::from(self.pit[i]) * area;
-        let dz = ((*volume).min(room) / area) as i32;
+        let dz = self.room_dz(i, *volume);
         if dz > 0 {
             self.z[i] += dz;
             self.pit[i] -= dz as u32;
@@ -2900,10 +3058,22 @@ pub fn solve(body: &BodyDefinition, schedule: Schedule) -> Option<(MacroSolve, S
     Some((state, report))
 }
 
+/// One routing of a pass of the full solve: a body with water labels its ocean for the budget, whose own tree routes
+/// the rest ([`MacroSolve::label_for_budget`]; ruling B73 item 1); a dry body floods and routes its ground, which its
+/// sweeps and deposit read, and accumulates its discharge.
+fn route_for_pass(state: &mut MacroSolve, has_water: bool) -> RouteReport {
+    if has_water {
+        return state.label_for_budget();
+    }
+    let report = state.route();
+    state.accumulate();
+    report
+}
+
 /// ★ THE FULL SOLVE (stage C3; the design's §4.11; ★ PHASE 2 OF THE GROUND STEP, rulings B39–B51): the land; the belts
 /// by their influx as critical wedges ([`crate::belts`]); the landscape's time; then the MIXED AXIS — each pass stamps
-/// the craters whose impact falls in it, recomputes the climate over the relief as it stands every `climate_every`
-/// passes, routes and follows the budget's own water ([`MacroSolve::follow_the_budget`]), sheds the talus, steps the
+/// the craters whose impact falls in it, re-solves the running sea and the climate over the relief as it stands (every
+/// pass, ruling B69 item 1), routes and follows the budget's own water ([`MacroSolve::follow_the_budget`]), sheds the talus, steps the
 /// ice through the glacial epoch's share it holds, raises the belts and the even uplift by the pass's share of time,
 /// and runs `sub_sweeps` sweeps of the joint law with a rebound after each, then the peak law — and at the end the
 /// talus's remainder, the sea re-solved, the final routing, the ice's mask, the lakes and the sea's fixed point, and
@@ -2984,7 +3154,6 @@ pub fn solve_full_on(
     } else {
         vec![i32::MAX; n]
     };
-    let mut since_climate = schedule.climate_every;
     let mut climate: Option<crate::climate::Climate> = None;
     let mut talus_done = 0u32;
     for pass in 0..passes {
@@ -3002,38 +3171,31 @@ pub fn solve_full_on(
             .collect();
         crate::craters::apply_craters(&mut state.z, &lattice, &due, gravity);
         report.crater_record.extend_from_slice(&due);
-        if since_climate >= schedule.climate_every {
-            // ★ THE RUNNING SEA (W7 step 2) over the CONNECTED ocean only (ruling B7 item 1).
-            if let Some(sea) = crate::land::sea_level_connected(
-                &lattice,
-                &state.z,
-                &state.area,
-                words.water_km3,
-                false,
-            ) {
-                state.sea_z = sea.level;
-                state.ocean = sea.mask.ocean;
-                report.sea_reseeded |= sea.reseeded;
-                report.sea_unsettled |= !sea.settled;
-            }
-            let c = crate::climate::climate_on(
-                body,
-                &lattice,
-                words,
-                &state.z,
-                has_water.then_some(state.sea_view()),
-                cores,
-            );
-            state.rain.clone_from(&c.rain_mm_yr);
-            climate = Some(c);
-            since_climate = 0;
+        // ★ THE RUNNING SEA (W7 step 2) over the CONNECTED ocean only (ruling B7 item 1), and the climate over the relief
+        // as it stands — both every pass (ruling B69 item 1).
+        if let Some(sea) = crate::land::sea_level_connected_on(
+            &lattice,
+            &state.z,
+            &state.area,
+            words.water_km3,
+            false,
+            cores,
+        ) {
+            state.sea_z = sea.level;
+            state.ocean = sea.mask.ocean;
+            report.sea_reseeded |= sea.reseeded;
+            report.sea_unsettled |= !sea.settled;
         }
-        since_climate += 1;
-        let c = climate
-            .as_ref()
-            .expect("the climate stands from the first pass");
-        report.routes.push(state.route());
-        state.accumulate();
+        let c: &crate::climate::Climate = climate.insert(crate::climate::climate_on(
+            body,
+            &lattice,
+            words,
+            &state.z,
+            has_water.then_some(state.sea_view()),
+            cores,
+        ));
+        state.rain.clone_from(&c.rain_mm_yr);
+        report.routes.push(route_for_pass(&mut state, has_water));
         let mut basins = state.follow_the_budget(c, has_water);
         // ★ THE SCREE AND THE ICE, INSIDE THE PASS (ruling B2 step 2): the talus keeps its own total, spread over the
         // passes; the ice cuts the glacial epoch's share this pass holds, stepped (ruling B44 item 1).
@@ -3057,26 +3219,24 @@ pub fn solve_full_on(
         // ★ THE SWEEPS on the pass's routings, each a share of the pass's time, a rebound after each (ruling B45: the
         // rebound without its floors, at 12.5 Myr or finer); ★ THE WATER ROUTED AGAIN before each later share of them
         // (ruling B65 item 1, [`Schedule::routes_before`]).
-        let active: Vec<u32> = erosion_start
-            .iter()
-            .map(|&st| active_share(st, t0, t1))
-            .collect();
+        let active: Vec<u32> = crate::par::map(n, cores.threads(), |i| {
+            active_share(erosion_start[i], t0, t1)
+        });
         let dt = Gf::from_i64((t1 - t0) as i64) / Gf::from_i64(i64::from(sub_sweeps));
         let mut cut_sum = vec![0u32; n];
         let mut groups = state.basin_groups();
         for s in 0..sub_sweeps {
             if schedule.routes_before(s) {
-                report.routes.push(state.route());
-                state.accumulate();
+                report.routes.push(route_for_pass(&mut state, has_water));
                 basins = state.follow_the_budget(c, has_water);
                 groups = state.basin_groups();
             }
             report
                 .sweeps
                 .push(state.sweep_grouped(dt, Some(&active), basins.as_ref(), &groups));
-            for (sum, &cut) in cut_sum.iter_mut().zip(&state.cut_now) {
-                *sum = sum.saturating_add(cut);
-            }
+            cut_sum = crate::par::map(n, cores.threads(), |i| {
+                cut_sum[i].saturating_add(state.cut_now[i])
+            });
             report.rebounds.push(state.rebound(alpha_m));
         }
         state.cut_now = cut_sum;
@@ -3110,9 +3270,14 @@ pub fn solve_full_on(
     }
     drop(tan);
     // ★ THE SEA, RE-SOLVED over the eroded field (stage C5) over the CONNECTED ocean (ruling B7 item 1).
-    if let Some(sea) =
-        crate::land::sea_level_connected(&lattice, &state.z, &state.area, words.water_km3, false)
-    {
+    if let Some(sea) = crate::land::sea_level_connected_on(
+        &lattice,
+        &state.z,
+        &state.area,
+        words.water_km3,
+        false,
+        cores,
+    ) {
         state.sea_z = sea.level;
         report.sea_reseeded |= sea.reseeded;
         report.sea_unsettled |= !sea.settled;
@@ -3359,6 +3524,63 @@ mod tests {
     /// and a sea over part of it, the first sixty million years of the axis — on one core and on three gives the same
     /// state, facies and report: the first land, every climate, routing, descent, sweep by river basin and rebound on
     /// the cores, every sum in one order.
+    /// ★ A WET PASS READS ONLY THE ROUTING'S OCEAN LABEL (ruling B73 item 1): from one wet state whose ground moved
+    /// since its last routing, the full routing and its discharge followed by the budget's own tree, and the ocean's
+    /// label followed by the same tree, leave the same state, word for word, and the same closed hollows.
+    #[test]
+    fn a_wet_pass_reads_only_the_routings_ocean_label() {
+        let moon = home_moon();
+        let words = SolveWords {
+            water_km3: 3_000_000,
+            ..crate::home::home_solve_words()
+        };
+        let schedule = Schedule {
+            age_yr: 60_000_000,
+            ..Schedule::standard(HOME_SYSTEM_AGE_YR)
+        };
+        let (mut state, _, _) = crate::test_solves::solved(&moon, &words, schedule);
+        // The ground moves after the last routing (a block of nodes lifted, another cut), as a pass's sweeps move it.
+        for (i, z) in state.z.iter_mut().enumerate().step_by(7) {
+            *z += [-40, 25][i & 1];
+        }
+        let lattice = state.lattice;
+        let climate = crate::climate::climate_on(
+            &moon,
+            &lattice,
+            &words,
+            &state.z,
+            Some(state.sea_view()),
+            crate::par::Cores(1),
+        );
+        let mut full = state.clone();
+        let routed = full.route();
+        full.accumulate();
+        let by_routing = full.follow_the_budget(&climate, true);
+        let mut label = state;
+        let labelled = label.label_for_budget();
+        let by_label = label.follow_the_budget(&climate, true);
+        assert!(
+            routed.raised > 0,
+            "the moved ground holds hollows the routing fills"
+        );
+        assert_eq!(
+            (
+                labelled.pockets,
+                labelled.pocket_nodes,
+                labelled.outlets,
+                labelled.sea_seeded
+            ),
+            (
+                routed.pockets,
+                routed.pocket_nodes,
+                routed.outlets,
+                routed.sea_seeded
+            )
+        );
+        assert_eq!(by_label, by_routing);
+        assert_eq!(label, full);
+    }
+
     #[test]
     fn the_cores_give_the_same_bytes() {
         let moon = home_moon();
@@ -4082,7 +4304,7 @@ mod tests {
         let moon = home_moon();
         let words = crate::home::home_moon_solve_words();
         let (state, facies, report) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         assert!(report.craters > 0);
         assert_eq!(report.craters, report.crater_record.len());
         assert!(
@@ -4123,7 +4345,7 @@ mod tests {
     fn a_schedule_of_no_passes_still_reads_a_climate() {
         let moon = home_moon();
         let words = crate::home::home_moon_solve_words();
-        let (_, _, report) = solve_full(&moon, &words, Schedule::standard(0)).expect("a solve");
+        let (_, _, report) = crate::test_solves::solved(&moon, &words, Schedule::standard(0));
         assert_eq!(report.sweeps.len(), 0);
         assert_eq!(report.routes.len(), 1);
         assert_eq!(report.talus.len(), 8);
@@ -4143,7 +4365,7 @@ mod tests {
             ..crate::home::home_solve_words()
         };
         let (state, facies, report) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         assert!(report.sweeps.iter().any(|s| s.lowered > 0), "the rain cuts");
         assert!(report.deposits > 0);
         assert!(report.rebounds.iter().any(|&(_, lifted, _)| lifted > 0));
@@ -4425,7 +4647,7 @@ mod tests {
             ..crate::home::home_moon_solve_words()
         };
         let (state, _, report) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         assert_eq!(report.lakes.volume_m3, 0);
         assert_eq!(report.lake_sea_solves, 0);
         assert!(report.lake_sea_converged);
@@ -4699,7 +4921,7 @@ mod tests {
             ..crate::home::home_solve_words()
         };
         let (mut state, _, report) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let lattice = moon.macro_lattice().expect("a lattice");
         let climate =
             crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
@@ -4749,7 +4971,7 @@ mod tests {
             ..crate::home::home_solve_words()
         };
         let (state, _, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let lattice = moon.macro_lattice().expect("a lattice");
         let climate =
             crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
@@ -4780,7 +5002,7 @@ mod tests {
         let moon = home_moon();
         let words = crate::home::home_moon_solve_words();
         let (state, _, report) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         assert_eq!(state.receiver, crate::lakes::descent(&state).down);
         assert!(state.spill_sinks.is_empty());
         assert_eq!(report.tree.cyclic, 0);
@@ -5087,7 +5309,7 @@ mod tests {
             ..crate::home::home_solve_words()
         };
         let (state, _, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         (state, words, moon)
     }
 
@@ -5115,6 +5337,33 @@ mod tests {
     /// The cone with the closed hollow of the deposit's first test dug in it and a second closed hollow beside it
     /// (each with a dry floor that ends its water), routed; returns the state, the first hollow's nodes, the second's
     /// floor, the node whose cut drains into the first, and a gate on the cone's flank whose way runs to the sea.
+    /// ★ AN OUTLET NO RIVER TREE HOLDS CARRIES ITS OWN CUT (ruling B72 item 1): a node with no receiver and no donor
+    /// lies in no tree the cores walk; its own cut still fills its own room, and the rest leaves by the tree's-end rule —
+    /// into the sea from an ocean node, dropped and counted at an inland end no closed body holds.
+    #[test]
+    fn an_outlet_no_tree_holds_books_its_own_cut() {
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        state.order = order_of(&state.receiver);
+        let n = state.node_count();
+        let (sea, inland) = (3usize, 4usize);
+        state.ocean[sea] = true;
+        state.pit[inland] = 2;
+        state.cut_now[sea] = 10;
+        state.cut_now[inland] = 10;
+        let (area_sea, area_inland) = (u128::from(state.area[sea]), u128::from(state.area[inland]));
+        let z = state.z[inland];
+        let d = state.deposit_basins(&Basins {
+            slot: vec![u32::MAX; n],
+            ..Basins::default()
+        });
+        assert_eq!(d.to_sea, 10 * area_sea);
+        assert_eq!(d.dropped, 8 * area_inland);
+        assert_eq!((d.filled, d.total_fill), (1, 2));
+        assert_eq!((state.z[inland], state.pit[inland]), (z + 2, 0));
+        assert_eq!(state.pending[inland], -2);
+    }
+
     fn two_dug_hollows() -> (MacroSolve, [u32; 3], u32, u32, u32) {
         let (mut state, _) = cone();
         let floor = state.lattice.index(Face::PosX, 30, 30);
@@ -5328,6 +5577,8 @@ mod tests {
         // A ring of receivers past the spill: the way is refused, and the rest dropped and counted, never a hang.
         let (g1, g2) = (gate, state.receiver[gate as usize]);
         state.receiver[g2 as usize] = g1;
+        // The order is the receivers' own (a routing makes both): the ring's two nodes leave it.
+        state.order = order_of(&state.receiver);
         let ring = Basins {
             slot,
             bodies: vec![(first.to_vec(), spill)],

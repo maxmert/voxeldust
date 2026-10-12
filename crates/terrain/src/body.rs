@@ -1424,8 +1424,39 @@ impl BodyDefinition {
     /// bound and the room the band's top moves from 9.3 km to about 13.6 km, every summit is built
     /// whole, and the floor — one top-rung cell, 262 km under the surface — does not move.
     #[must_use]
-    pub fn with_band_m(mut self, low_m: i32, high_m: i32) -> Option<BodyDefinition> {
+    pub fn with_band_m(self, low_m: i32, high_m: i32) -> Option<BodyDefinition> {
         let fine = self.fine_relief_bound();
+        self.band_with(low_m, high_m, fine)
+    }
+
+    /// ★ THE BAND WHERE THE 128 m LEVEL APPLIES (the fine ground's way in, B2; ruling B83 item 3): as
+    /// [`BodyDefinition::with_band_m`], the head's sea `sea_m` deciding whether the level applies (its artifact states a
+    /// sea, `crate::fine::read::applies`). Where it does, the fine relief's bound is the GREATER of the noise octaves'
+    /// and the level's own law: a fine point stands at most `tan 35°` (the level's threshold, B82) times the node's
+    /// half-diagonal off its node's row — 4 055 m on the home planet (MEASURED on the benched belt tiles: +3.2 / −2.5 km).
+    /// Every host reads the same three words off the same head, so every host builds the same ladder.
+    ///
+    /// **Example.** The home planet's head states its sea: the band's top stands 4 055 m over its tallest row (12 019 m)
+    /// plus the room, so a 128 m summit over the belt's row is built whole; the dry moon's band is the octaves' as before.
+    #[must_use]
+    pub fn with_fine_band_m(self, low_m: i32, high_m: i32, sea_m: i16) -> Option<BodyDefinition> {
+        let octaves = self.fine_relief_bound();
+        let law = match self.macro_lattice().filter(|_| crate::fine::read::applies(sea_m)) {
+            Some(lattice) => {
+                let m = Gf::from_f64(TAN_REPOSE)
+                    * Gf::from_f64(lattice.node_m())
+                    * Gf::from_f64(std::f64::consts::FRAC_1_SQRT_2)
+                    * Gf::from_i64(STEPS_PER_M);
+                // Whole gap steps, rounded up.
+                Gi::new(-(-m).floor().to_i64_floor()) << LENGTH_BITS
+            }
+            None => Gi::ZERO,
+        };
+        self.band_with(low_m, high_m, crate::units::greater(octaves, law))
+    }
+
+    /// The band sized from the drawn ground's two words and the most a surface can stand off them (`fine`).
+    fn band_with(mut self, low_m: i32, high_m: i32, fine: Gi) -> Option<BodyDefinition> {
         // Whole metres, rounded up: a length is metres × STEPS_PER_M at LENGTH_BITS, a power of two.
         let shift = STEPS_PER_M.trailing_zeros() + LENGTH_BITS;
         let fine_m = (fine.raw() + (1 << shift) - 1) >> shift;
@@ -1732,6 +1763,13 @@ mod tests {
         assert_eq!(deep.ladder().floor_m, body.ladder().floor_m - cell);
         // A range the ladder cannot hold is refused.
         assert_eq!(body.with_band_m(-1_000_000_000, 0), None);
+        // ★ THE FINE GROUND'S BAND (B2): with a sea stated the bound is the 128 m law's (tan 35° × the node's
+        // half-diagonal, 4 055 m at the home planet's 8 192 m node) where it passes the octaves'; a dry head keeps the
+        // octaves' band exactly.
+        assert_eq!(body.with_fine_band_m(-9_862, 12_019, crate::artifact::DRY_M), body.with_band_m(-9_862, 12_019));
+        let fine = body.with_fine_band_m(-9_862, 12_019, 0).expect("a band");
+        let (low, high) = fine.ground_range_m();
+        assert_eq!(((low + 9_862.0 + 4_055.0).abs() < 1.0, (high - 12_019.0 - 4_055.0).abs() < 1.0), (true, true), "{low} {high}");
     }
 
     /// The frequency of one octave, reassembled from the charter's pair, at the noise's bits.

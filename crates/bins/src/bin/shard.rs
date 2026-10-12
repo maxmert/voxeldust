@@ -547,6 +547,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vd_sim::stub::artifact_ship::ArtifactSource(Some(source));
         tracing::info!("the artifact ship is armed from the store");
     }
+    // ★ THE FINE TILES (the fine ground's way in, B2): armed beside the artifact ship where the 128 m level applies to the
+    // body (its artifact states a sea), its workers on the solve's share of the cores.
+    if let Some((boot, body)) = artifact_boot.as_ref().zip(own_body.as_ref())
+        && let Some(artifact) = boot.artifact()
+        && let Some(work) =
+            vd_bins::fine_source::FineWork::new(own_realm, *body, std::sync::Arc::clone(artifact), solve_cores.0)
+    {
+        *world.resource_mut::<vd_sim::stub::fine_ship::FineSource>() =
+            vd_sim::stub::fine_ship::FineSource(Some(Box::new(work)));
+        tracing::info!(threads = solve_cores.0, "the fine tiles are armed from the store");
+    }
     if let Some(body) = stored_body {
         *world.resource_mut::<vd_sim::stub::drive::OwnBody>() =
             vd_sim::stub::drive::OwnBody(Some(body));
@@ -775,6 +786,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         sea_m = ?artifact.sea(),
                         "the artifact ship is armed from the solve"
                     );
+                }
+                // ★ THE FINE TILES (B2) are armed the same tick, where the level applies.
+                if let Some((artifact, body)) = boot.artifact().zip(own_body.as_ref())
+                    && let Some(work) = vd_bins::fine_source::FineWork::new(
+                        own_realm,
+                        *body,
+                        std::sync::Arc::clone(artifact),
+                        solve_cores.0,
+                    )
+                {
+                    *node.world_mut().resource_mut::<vd_sim::stub::fine_ship::FineSource>() =
+                        vd_sim::stub::fine_ship::FineSource(Some(Box::new(work)));
+                    tracing::info!(threads = solve_cores.0, "the fine tiles are armed from the solve");
                 }
             }
         }

@@ -52,7 +52,7 @@ use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
 use vd_terrain::solve::{DRY, MacroSolve, Schedule};
 
 /// The artifact the pin records (`crates/bins/tests/home_artifact_pin.rs`).
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x81c0_d090_3ce0_129b, 0xb29e_978b_3db0_1040];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6f92_ab73_2b8f_e622, 0xab3a_2d52_064b_b265];
 
 /// The cone's slope (grid_bias's own).
 const CONE_SLOPE: f64 = 0.05;

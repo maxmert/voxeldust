@@ -21,6 +21,7 @@ pub mod artifact_file;
 pub mod artifact_source;
 pub mod artifact_store;
 pub mod artifact_worker;
+pub mod fine_source;
 // ★ THE DRAINAGE GATES, ONE COPY (plan step 1, ruling B6): G-HACK, G-BREACH, the spill census and
 // the three stands, read by the R1 bench, the drain census and the shipped-ground instrument alike.
 pub mod drainage_gates;
@@ -1155,28 +1156,14 @@ pub fn home_system_world(
     home_system_boot(universe_seed)
 }
 
-/// ★ THE SOLVE WORDS OF A CHARTER (slice 8c stage C3): the ONE mapping from the census's charter to
-/// the generator's words, with the census's system age — shared by the shard's boot, the cross-pin
-/// and the bench, so a field can never be read into the wrong word.
+/// ★ THE SOLVE WORDS OF A CHARTER (slice 8c stage C3): the charter's ONE mapping (`vd_client::surface::charter_words`,
+/// which the client's surface laws read too since ruling B75) with the census's system age — shared by the shard's boot,
+/// the cross-pin and the bench, so a field can never be read into the wrong word.
 #[must_use]
 pub fn solve_words_of(c: &vd_core::look::BodyCharter) -> vd_terrain::solve::SolveWords {
     vd_terrain::solve::SolveWords {
-        water_km3: c.water_km3.unwrap_or(0),
-        elastic_thickness_m: c.elastic_thickness_m.unwrap_or(0),
-        insolation_q12: c.insolation_q12,
-        t_eq_mk: c.t_eq_mk,
-        t_surface_mk: c.t_surface_mk,
-        bond_albedo_q12: c.bond_albedo_q12,
-        mu_q8: c.mu_q8,
-        scale_height_m: c.scale_height_m,
-        p_surf_pa: c.p_surf_pa,
-        tau_ir_q12: c.tau_ir_q12,
-        day_s: c.day_s,
-        obliquity_cos_q1024: c.obliquity_cos_q1024,
-        ecc_q16: c.ecc_q16,
-        year_s: c.year_s,
-        flags: c.flags,
         age_yr: (vd_physics::taxonomy::SYSTEM_AGE_GYR * 1.0e9) as u64,
+        ..vd_client::surface::charter_words(c)
     }
 }
 

@@ -12020,7 +12020,7 @@ generation alone), so a body solves once per generation on a machine, not once p
       read on the pictures.
     - 🟨 THE ANDEAN MARGINS' LAW (B52 item 4): the research (the belts' design §18) found no complete published law from
       the world's facts; the choice of the first chain to bench is the owner's.
-    - 🟨 THE FIRST SOLVE ON MORE CORES (ruling B64; built 2026-10-07, NOT committed; `vd_terrain::par`,
+    - 🟨 THE FIRST SOLVE ON MORE CORES (ruling B64; built 2026-10-07, committed 2026-10-09 in `10cf407`; `vd_terrain::par`,
       `solve::solve_full_on`, `artifact_worker::run_solve_on`): the first land, the climate, the routing's receivers,
       the descent, the sweep by river basin and the rebound run on the solve's cores with the same bytes on any number
       (a test solves the wet moon on one core and on three). MEASURED 2026-10-08 ON THE HOME PLANET: the bench copy's
@@ -12044,7 +12044,7 @@ generation alone), so a body solves once per generation on a machine, not once p
       against the law's own solve on bodies it never trained on (B39's tolerances); and every change of a law retrains
       it, so it fits after the laws settle (G-LOOK, the freeze). **Example.** The home planet's shard solves on seven threads of the owner's fourteen
       cores; its artifact is the one a single thread stores, and the far planets solving beside it share the rest.
-    - 🟨 GENERATOR 26's INTERIMS (rulings B59–B62; built 2026-10-07, NOT committed; `vd_terrain::land`, `belts`, `solve`;
+    - 🟨 GENERATOR 26's INTERIMS (rulings B59–B62; built 2026-10-07, committed 2026-10-09 in `10cf407`; `vd_terrain::land`, `belts`, `solve`;
       the research `docs/investigation/2026-10-06/platform_margin_research.md`): (1) A TRANSFORM MARGIN'S WIDTH is
       Earth's measured necking, 50 km (Mercier de Lépinay et al. 2016) — a named calibration until a law exists (the
       research's §4.3); (2) A RIFTED MARGIN'S STRONG LAYER is identified with the model's decoupling level (the belts'
@@ -12060,6 +12060,91 @@ generation alone), so a body solves once per generation on a machine, not once p
       speed item for the owner, never a change of the law's numbers). **Example.** A transform margin on the desert
       world thins its continent over 50 km because Earth's do; when the world states a law for a transform's necking,
       that law replaces the number and the desert world's margins move once.
+    - 🟩 GENERATOR 26 CLOSES BY A FIXED LIST (ruling B69 item 3; with B72 item 1; CLOSED by ruling B75, 2026-10-10). Only a defect a gate finds, or the
+      owner's look, reopens it; anything else is registered here and does not stop the move to Bevy 0.20 (B70) and R2's
+      bake. THE LIST, in the order the owner accepted on 2026-10-09 (one coverage run over both code changes):
+      (1) 🟩 THE CURE (built 2026-10-09, not committed; `vd_terrain::solve`): the climate and the running sea re-solved at
+      every pass — the schedule states no climate spacing any more, so no branch of the solve waits for one; the bench
+      copy keeps its own spacing as a resolution (`vd_bins::solve_copy::Laws::climate_every`, the bench's `^C`, default
+      every pass); (2) 🟩 THE PINS from the game's own solve (`just golden-z-record`, one core, recorded 2026-10-09; not
+      committed): the golden field, the identity word 0xac9e_c6e9_825d_d71a, the sea 3 660 m and the ocean 76.04 %
+      (generator 25: 3 487 m, 75.88 %), the artifact's digest [0x6f92_ab73_2b8f_e622, 0xab3a_2d52_064b_b265] in
+      `home_artifact_pin` and the three bench copies; the solve 11 383 s on one core with the machine paging (not a clean
+      timing); its profile beside it — on one core the climate is the largest step (31–100 % of a 20 s window), then
+      the lakes' budget, the routing's flood and the running sea; (3) 🟨 THE FASTER SOLVE (B72 item 1; the B64 entry's OWED item 2; built 2026-10-09,
+      not committed): on all cores, the same bytes — the routing's flood and the sea's reach as ONE tiled priority flood
+      (Barnes 2017, `flood::fill`), the sea's bisection sums, the ocean's mask (each range's bodies, joined), the lakes'
+      budget's order (`par::sort_keys` on unique keys), its flats' search and its sweep's neighbour lists (the sweep keeps
+      each node's hollow by its place in the order), the deposit's walk down the river trees (the sweep's own deal), the
+      climate's node directions bent once a call (213 MB for the call; about eleven bends a node before), the water
+      tree's steps, and the whole-field loops of the routing, the sweep's write-back, the climate's rows and the lakes'
+      levels; the cores' parts joined by block copies (`par::join`). STILL ON ONE CORE, MEASURED on 14 cores (about half
+      the wall time): the budget's merge sweep (~15 %; it can be split by landmass — the ocean is shared — with one
+      renumbering pass), the receiver order `order_of` (~6 %), the routing's flat walk (~5 %), the river-tree deal (~4 %),
+      the water tree's spill walk (~3 %), the joins (~3 %), the follow step's discharge (~2 %). FOUND: in a WET body the
+      routing's flood, flat walk, order and discharge are replaced by the budget's own tree before anything reads them —
+      only its ocean label and its report are used — a quarter of the wall time; ★ RULED B73 item 1 ("Skip it for now")
+      and BUILT: a wet pass's routing is `MacroSolve::label_for_budget` (the ocean labelled, an ocean node's flood level its
+      own ground), a dry body keeps the full routing; the test `a_wet_pass_reads_only_the_routings_ocean_label` proves the
+      two ways leave one state; the per-pass routing reports of a wet body hold the ocean's words alone; THE RELEASE PIN GATE GREEN on it (14 cores,
+      the same digest, sea and share) in 1 734 s against 2 179 s without the skip (not a clean timing). ★ RULED B73 item
+      2: THE FASTER SOLVE STOPS HERE — the steps still on one core above stay REGISTERED for a later round; (4) 🟩 THE
+      RELEASE PIN GATE ON THE FASTER SOLVE (2026-10-09; `cargo test --release -p vd-bins --test home_artifact_pin`, all
+      14 cores): GREEN — the one-core pins' digest, sea, ocean share, key generation (26, its own pin corrected) and golden
+      rows; the solve 2 179 s on 14 cores (11 383 s on one core under paging; NOT a clean timing); (5) 🟩 THE COVERAGE GATE (HR5), once,
+      over the cure and the faster solve — RUN 2026-10-09 22:53 → 2026-10-10 ~14:50 (15.9 h at opt-level 0; the client crate
+      5.2 h and the terrain crate ~10 h, nearly all of it whole moon solves inside the tests): EVERY TEST PASSED (18 sets),
+      the gate FAILED on 4 real misses in one place — the deposit's pass for a lone outlet carrying its own cut
+      (`deposit_basins_grouped`, the solve's lines 2141–2148), a path no solve reaches; the test
+      `an_outlet_no_tree_holds_books_its_own_cut` written for it (not yet run, B74). RULING B74: THE FASTER COVERAGE BUILD —
+      ITS PROOF STOPPED 2026-10-10 on the owner's word ("Stop everything") after 3 h 50 min: at opt-level 1 (the test binary
+      2.5 times smaller, so the level took) the ordinary tests ran about 6 times faster, but the whole moon solves gained
+      NOTHING (the first wall of nine solves lasted longer than at level 0); MEASURED by the innermost functions' own time:
+      about 85 % of a solve under the coverage build is the fenced number helpers (`Gf` exp 20 %, from_i64 19 %, mul 18 %,
+      div 12 %, ln 11 %), mostly the joint law's root (a power per node, per sweep, per Newton step) — a release build merges
+      them into their callers, the coverage build keeps each a counted call and level 1 does not merge them; the recipe is
+      back at level 0; a full-optimisation trial (level 3) is the open next step, on the owner's word; ★ CLOSED BY WAY A (the owner, 2026-10-10:
+      "A: close gen 26 today"): the full run stands for every file but the 4 misses, and coverage of the new test alone
+      reaches them (lines 2146–2148 hit, the check at 2141 both ways: 27 742 on, 2 into the pass); since the full run only test
+      code changed; and THE SHARED TEST SOLVES (`test_solves::solved` in the terrain and client
+      crates' tests: one moon solve per body, words and schedule per test binary, on all cores; 26 test solves now read
+      it) built — MEASURED: the terrain suite in release 58 s against 157–180 s, the client crate's 393 tests 24 s, all
+      passing; (6) ⬜ THE CLEAN TIMING — SKIPPED by the owner ("Skip the timing", 2026-10-10); REGISTERED, not done: a
+      first solve's clean timing before and after the faster solve (one job on the machine); MEASURED instead in the
+      window session of 2026-10-10 (not clean: three other bodies solved beside it): the home planet's first solve in its
+      shard 2 245 s on 14 cores, the digest the pin's; (7) 🟩 CLOSED ON THE OWNER'S WINDOW LOOK (ruling B75, 2026-10-10:
+      "it looked good, but it still VERY far from believable terrain"): THE CENSUS AND THE PICTURES on the home planet,
+      the desert world and the moon beside their frozen pictures are REGISTERED, NOT DONE — owed at the next census of
+      the ground step (R2's first slice or later). GENERATOR 26 IS CLOSED; the move to Bevy 0.20 WAITS (B75 item 2).
+      **Example.** A pilot over plate 5's old plains
+      sees them at about 265 m whether the world was solved in 414 passes or in 828, because the sea follows the young
+      range as it rises, pass by pass.
+    - 🟨 THE FIRST SURFACE LOOK (ruling B75 item 4, built 2026-10-10, not committed; `vd_terrain::surface`,
+      `vd_client::surface`, the fade shader's paint): bare rock by the soil law's critical slope (K2, Roering et al. 1999,
+      `S_c` 1.25), the soil the rest, snow over the summer's freezing line (Egholm et al. 2009) as the almanac's PAINT (K12,
+      F17); the rock rides each vertex (its own slope and its morph target's), the snow line rides the realm's band table
+      (three numbers of the climate law, from the moment the artifact is whole); nothing new crosses a realm boundary.
+      INTERIMS, each owed: (1) the DRAWN slope — a coarser rung shows less rock than the average of the finer one; K12's
+      expected shares under the dropped variance (rule 1, the average) are owed; (2) the soil law's second half (bare rock
+      where the local lowering rate passes soil production, Heimsath et al. 1997) waits for R3; (3) snow's own holding
+      angle (Bernhardt & Schulz 2010) is stood in for by the soil's; (4) the line is the summer's, never the day's season
+      (the almanac); no glacier ice, no wind-blown snow, no aspect (A4); (5) the sea's share for the season's heat store
+      is read from the finest pyramid level, not the solve's ocean mask (UNMEASURED against the solve's 76.04 %); a body
+      with no sea draws no snow; (6) the paint table (three albedos) is a first table, the art's own step owed (Q14);
+      (7) one source (K12): the shard computes no surface yet, and the client's slope is its own float normal; (8) the
+      airless body's regolith is painted as soil. **Example.** A pilot on the belt sees grey rock on a 50° flank, brown
+      soil in the valley under it, and white shoulders over the summer's freezing line, with the dark face above them.
+    - 🟥 THE RAIN LAW'S DEFECTS (registered by ruling B78, 2026-10-11; the study `docs/investigation/2026-10-11/
+      macro_rain_rise_study.md`): (1) the rain belt's factor (`climate.rs:122-123`, `:374-377`) is a share never
+      renormalised (area mean 0.575), so the law cannot give back its own calibration body (Earth's ~990 mm; Earth's
+      charter would read ~710 mm, INFERENCE); (2) the 55° tilt's SEASONAL CIRCULATION is missing (B36 Q3 allowed it; the
+      one fixed cell dries all land poleward of ~40°); (3) the rain follows the local vapour pressure, so it falls ~35 % a
+      kilometre of height where windward slopes get more rain (Roe 2005); (4) the lift clamp [0.1, 4] and the rain clamp
+      [1, 10 000] mm break B23 (they do not bind today). THE CURE (recommended, not ruled): a moisture budget along the wind
+      (Smith & Barstad 2004) on the seasonal cell (Lindzen & Hou 1988), Earth's charter as a test — a world change
+      (generator 27, a new first solve). WAITS for the landforms' first pictures (B78). **Example.** The belt's windward
+      ramp reads 96 mm of rain a year; after the cure the summer winds carry water up it and the valley under the pass gets
+      a river.
 - 🟥 **THE REST OF M0-4:** finer Earth data for the scales under a node (the hills, the valleys, the pits), the Moon and
   Mars, the spectra, the slopes by class and the ice line on Earth's real climate.
 - 🟥 **STEPS 2, 3 AND 5 OWED:** the "before" record on every pinned stand (numbers and pictures, no window); the corrected

@@ -145,6 +145,13 @@ pub struct ChunkGeometry {
     /// the neighbouring triangle at a crease (up to 19 of 255 levels) — a change of the picture,
     /// which ruling V16 refuses; the owner holds that option with its numbers.
     pub radials: Vec<[f32; 3]>,
+    /// ★ THE SURFACE OF EACH VERTEX (ruling B75 item 4; [`crate::surface::vertex_rock`]): the bare rock's share in 1/255
+    /// at the vertex's own slope, then at its morph target's (the parent's shade there), then two spare bytes. The shader
+    /// blends the two across the fade-out band as it blends the shade, so the rock hands over with the shape.
+    pub surface: Vec<[u8; 4]>,
+    /// ★ THE HEIGHT OF EACH VERTEX over the ladder radius, metres (ruling B75 item 4): what the drawing holds against the
+    /// realm's snow line; its morph target stands `morph_m` higher along the same radial.
+    pub heights: Vec<f32>,
     /// The extractor's triangles, unchanged.
     pub triangles: Vec<[u32; 3]>,
     /// Where the skirt vertices begin: every vertex before this index stands on the surface (one
@@ -159,6 +166,10 @@ pub struct ChunkGeometry {
     /// head's digest, or `None` for the recipe's own relief. The lane refuses a chunk built on
     /// another artifact than the one it holds for the realm when the chunk lands.
     pub built_on: Option<[u64; 2]>,
+    /// ★ BUILT ON THE ROUGH GROUND (ruling B86 item 7, the safety net): the chunk, or a parent its morph read, stood on
+    /// the field under the fine ground because a fine tile had not landed. The lane builds it again once every tile
+    /// it and its parents read is here ([`ChunkLane::upgradable`]).
+    pub rough: bool,
     /// THE BOX that holds every vertex, its morph target and its sunk position — wherever the
     /// vertex stage can put a vertex, so the engine culls by it. Built by the worker (refutation
     /// P-8: on the main thread it cost two square roots a vertex in the harvest loop). Zero for an
@@ -171,9 +182,9 @@ pub struct ChunkGeometry {
 pub const RADIAL_STEP_RAD: f64 = 2.0e-7;
 
 /// The bytes a ground vertex costs the engine at the packed rungs (position 12, packed normal
-/// 4, morph normal 4, morph 4, radial 12 — ruling V18's form with item 20); the exact rungs cost
-/// eight more.
-pub const UPLOAD_VERTEX_BYTES: u64 = 36;
+/// 4, morph normal 4, morph 4, radial 12 — ruling V18's form with item 20 — and the surface 4 and
+/// the height 4, ruling B75 item 4); the exact rungs cost eight more.
+pub const UPLOAD_VERTEX_BYTES: u64 = 44;
 
 impl ChunkGeometry {
     /// THE BYTES THIS CHUNK UPLOADS (ruling V15 item 2, the harvest's byte budget): its vertices
@@ -393,6 +404,8 @@ impl ChunkWorkers for InlineWorkers {
 #[derive(Debug)]
 pub struct ParentMesh {
     key: ChunkKey,
+    /// ★ Built on the rough ground (B86 item 7): a fine reader builds it again once the parent's fine tiles land.
+    rough: bool,
     /// The mesh's origin in the body's frame, in metres: the centre of the parent's middle cell.
     /// Positions are `f32` from it (step 5, D-TERRAIN-5 item 10): a chunk of 248 m at rung 2
     /// rounds to 15 µm, the coarsest of 127 km to 8 mm — under a hundredth of a pixel at any
@@ -483,6 +496,7 @@ impl ParentMesh {
         key: ChunkKey,
     ) -> Option<ParentMesh> {
         let field = field_of(body, artifact, key)?;
+        let rough = artifact.zip(body.macro_lattice()).is_some_and(|(a, lattice)| a.is_rough(&lattice, key));
         let samples = sample_box(body, field.as_deref().map(|f| f as &dyn ZField), key)?;
         // The parent's surface with its sealed hollows as rock, as the drawn chunk reads its own.
         let samples = sealed_hollows(body, &samples).unwrap_or(samples);
@@ -566,6 +580,7 @@ impl ParentMesh {
             .collect();
         Some(ParentMesh {
             key,
+            rough,
             origin,
             positions,
             normals,
@@ -856,7 +871,12 @@ impl ParentCache {
         artifact: Option<&ArtifactCache>,
         key: ChunkKey,
     ) -> Option<Arc<ParentMesh>> {
-        match self.claim(realm, key) {
+        // ★ A ROUGH MESH IS NOT A FINE READER'S (B86 item 7): where the parent's fine tiles are all here now, a mesh
+        // built on the rough ground before is built again.
+        let fine = artifact
+            .zip(body.macro_lattice())
+            .is_some_and(|(a, lattice)| !a.is_rough(&lattice, key));
+        match self.claim_for(realm, key, fine) {
             Claim::Hit(found) => Some(found),
             Claim::Build(guard) => {
                 let built = ParentMesh::build(body, artifact, key).map(Arc::new);
@@ -869,10 +889,17 @@ impl ParentCache {
     /// Claim `key`: a hit returns at once (and refreshes its use); a miss another reader builds
     /// WAITS, then reads a hit; a miss nobody builds is claimed, and the guard must `finish`.
     pub fn claim(&self, realm: RealmId, key: ChunkKey) -> Claim<'_> {
+        self.claim_for(realm, key, false)
+    }
+
+    /// [`ParentCache::claim`] for a reader that wants the parent on the fine ground when `fine`: a held mesh built on
+    /// the rough ground is then a miss, built again in its place.
+    pub fn claim_for(&self, realm: RealmId, key: ChunkKey, fine: bool) -> Claim<'_> {
         let mut store = self.lock();
         let mut waited = false;
         loop {
-            if store.map.contains_key(&(realm, key)) {
+            let usable = store.map.get(&(realm, key)).is_some_and(|e| !(fine & e.mesh.rough));
+            if usable {
                 let found = touch(&mut store, realm, key);
                 store.stats.hits += 1;
                 store.stats.waits += u64::from(waited);
@@ -1171,7 +1198,7 @@ pub fn field_of(
         return Some(None);
     };
     match artifact.field_for(&lattice, key) {
-        FieldPick::Ready(field) => Some(Some(field)),
+        FieldPick::Ready(field) | FieldPick::Rough(field) => Some(Some(field)),
         FieldPick::Waiting => None,
     }
 }
@@ -1298,6 +1325,7 @@ pub fn geometry_with(
     let mut geometry = geometry_from(body, artifact, realm, key, &samples, parents)?;
     geometry.field_level = field.as_deref().map_or(NO_FIELD, |f| f.level());
     geometry.built_on = artifact.map(|a| a.head.digest);
+    geometry.rough |= artifact.zip(body.macro_lattice()).is_some_and(|(a, lattice)| a.is_rough(&lattice, key));
     Some(geometry)
 }
 
@@ -1323,6 +1351,8 @@ pub fn geometry_from(
     let mut vertices: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
     let mut morph: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
     let mut radials: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
+    let mut heights: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
+    let ladder_radius_m = body.ladder().radius_m();
     // The parent's shade at each vertex's target, where a parent triangle was hit (item 20).
     let mut shades: Vec<Option<DVec3>> = Vec::with_capacity(mesh.vertices.len());
     let sink_len = sink_m(body, key.rung);
@@ -1338,6 +1368,8 @@ pub fn geometry_from(
         .into_iter()
         .filter_map(|p| parents.get(realm, body, artifact, p))
         .collect();
+    // ★ ROUGH (B86 item 7): built on a rough view, or a parent's mesh stood on the rough ground.
+    let rough = artifact.is_some_and(ArtifactCache::is_rough_view) | parent_meshes.iter().any(|p| p.rough);
     // How far the coarser surface can stand from this vertex: the sink of the coarser rung.
     let reach_m = sink_m(body, coarser);
     let mut fallbacks = 0u32;
@@ -1416,8 +1448,23 @@ pub fn geometry_from(
         // The target as one metre along the radial from the vertex, and the radial itself (step 5).
         morph.push((target_m - len) as f32);
         radials.push([dir.x as f32, dir.y as f32, dir.z as f32]);
+        heights.push((len - ladder_radius_m) as f32);
     }
     let normals = smooth_normals(&vertices, &mesh.triangles);
+    // ★ THE ROCK AT EACH VERTEX AND AT ITS TARGET (ruling B75 item 4): the own slope, and the slope of the parent's shade
+    // where the vertex morphs onto a parent triangle — the top rung's vertex is its own target.
+    let surface: Vec<[u8; 4]> = normals
+        .iter()
+        .zip(&radials)
+        .enumerate()
+        .map(|(i, (normal, radial))| {
+            let own = crate::surface::vertex_rock(*normal, *radial);
+            let target = shades.get(i).copied().flatten().map_or(own, |s| {
+                crate::surface::vertex_rock([s.x as f32, s.y as f32, s.z as f32], *radial)
+            });
+            [own, target, 0, 0]
+        })
+        .collect();
     let packed_normals: Vec<[i16; 2]> = normals.iter().map(|n| oct_encode(*n)).collect();
     // The top rung morphs to itself and pushes no shade; every other rung one per vertex.
     let morph_normals: Vec<[i16; 2]> = if shades.is_empty() {
@@ -1445,12 +1492,15 @@ pub fn geometry_from(
         normals,
         packed_normals,
         morph_normals,
+        surface,
+        heights,
         triangles: mesh.triangles,
         radials,
         bounds: ([0.0; 3], [0.0; 3]),
         skirt_start: 0,
         field_level: NO_FIELD,
         built_on: None,
+        rough,
     };
     let drop_m = skirt_drop_m(body, key.rung);
     let ceiling_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
@@ -1560,6 +1610,10 @@ fn add_skirts(g: &mut ChunkGeometry, drop_m: f64, ceiling_m: f64) {
         g.packed_normals.push(g.packed_normals[b as usize]);
         g.morph_normals.push(g.morph_normals[a as usize]);
         g.morph_normals.push(g.morph_normals[b as usize]);
+        g.surface.push(g.surface[a as usize]);
+        g.surface.push(g.surface[b as usize]);
+        g.heights.push(g.heights[a as usize]);
+        g.heights.push(g.heights[b as usize]);
         // The strip faces away from the triangle's third corner: the winding whose normal points
         // from the edge's middle away from that corner.
         // The two windings are picked by index (a bool is 0 or 1), so both are one expression. The
@@ -1741,6 +1795,11 @@ pub struct ChunkCounters {
     /// of the 717 hole columns at rest were such chunks. The lane drops it and the next request
     /// builds it on the field.
     pub stale_builds: u64,
+    /// ★ CHUNKS HARVESTED ON THE ROUGH GROUND (ruling B86 item 7, the safety net): a fine tile they read had not
+    /// landed; each is built again once the tiles are here.
+    pub rough_builds: u64,
+    /// ★ ROUGH CHUNKS ASKED AGAIN ON THE FINE GROUND, their tiles landed (the rough one stands until the fine lands).
+    pub rough_upgrades: u64,
 }
 
 /// How many refused requests and empty chunks a frame NAMES on the stamp (the counters count them
@@ -1773,6 +1832,9 @@ pub struct ChunkLane {
     /// ★ THE ARTIFACTS the realms shipped (slice 8c stage C4c), by pointer, refreshed when the
     /// book's epoch for a realm changes.
     artifacts: BTreeMap<RealmId, Arc<ArtifactCache>>,
+    /// ★ THE SNOW LINE of each realm whose artifact is whole and whose body has snow (ruling B75 item 4;
+    /// [`crate::surface::snow_line_of`]): the drawing paints snow over it.
+    snow_lines: BTreeMap<RealmId, vd_terrain::surface::SnowLine>,
     /// ★ THE ARTIFACT EACH REALM STATES it serves (the far-view ship): a realm that states a
     /// digest is built on that artifact and on nothing else — a request while the head at that
     /// digest is not here WAITS (counted), and the recipe's own relief is never drawn for it.
@@ -1797,6 +1859,9 @@ pub struct ChunkLane {
     /// [`ChunkLane::hole_columns`] reads to find a column none of whose resident slices holds
     /// ground.
     empty_resident: BTreeMap<(RealmId, ChunkKey), u32>,
+    /// ★ THE RESIDENT CHUNKS BUILT ON THE ROUGH GROUND (B86 item 7), and those of them building again on the fine ground.
+    rough: BTreeSet<(RealmId, ChunkKey)>,
+    upgrading: BTreeSet<(RealmId, ChunkKey)>,
     /// The parent meshes the workers share.
     parents: Arc<ParentCache>,
 }
@@ -1810,6 +1875,7 @@ impl ChunkLane {
             declared,
             bodies: BTreeMap::new(),
             charters: BTreeMap::new(),
+            snow_lines: BTreeMap::new(),
             refused: BTreeSet::new(),
             artifacts: BTreeMap::new(),
             expected: BTreeMap::new(),
@@ -1820,6 +1886,8 @@ impl ChunkLane {
             awaiting_frame: Vec::new(),
             missing_hist: BTreeMap::new(),
             empty_frame: Vec::new(),
+            rough: BTreeSet::new(),
+            upgrading: BTreeSet::new(),
             empty_resident: BTreeMap::new(),
             parents: Arc::new(ParentCache::default()),
         }
@@ -1987,6 +2055,7 @@ impl ChunkLane {
     pub fn forget(&mut self, realm: RealmId) {
         self.bodies.remove(&realm);
         self.charters.remove(&realm);
+        self.snow_lines.remove(&realm);
         self.refused.remove(&realm);
         self.artifacts.remove(&realm);
         self.expected.remove(&realm);
@@ -2064,8 +2133,9 @@ impl ChunkLane {
             let mut moved = false;
             if let Some(body) = self.bodies.get(&realm) {
                 let wet = body.with_sea_m(cache.head.sea());
+                // ★ AND THE FINE GROUND'S BAND (B2; ruling B83 item 3) where the 128 m level applies.
                 let banded = wet
-                    .with_band_m(cache.head.low_m, cache.head.high_m)
+                    .with_fine_band_m(cache.head.low_m, cache.head.high_m, cache.head.sea_m)
                     .unwrap_or(wet);
                 moved = banded.ladder() != body.ladder();
                 self.bodies.insert(realm, Arc::new(banded));
@@ -2074,7 +2144,33 @@ impl ChunkLane {
                 self.drop_chunks(realm);
             }
         }
+        // ★ THE SNOW LINE (ruling B75 item 4): read again with every change of the cache, so it stands from the moment
+        // the artifact is whole; the chunks keep their bytes, the drawing paints the line.
+        let line = self
+            .bodies
+            .get(&realm)
+            .zip(self.charters.get(&realm))
+            .and_then(|(body, charter)| crate::surface::snow_line_of(body, charter, cache));
+        match line {
+            Some(line) => self.snow_lines.insert(realm, line),
+            None => self.snow_lines.remove(&realm),
+        };
         self.artifacts.insert(realm, Arc::new(cache.clone()));
+    }
+
+    /// ★ THE SNOW LINE of a realm as the drawing reads it (ruling B75 item 4): `[base, per sin², per |sin|, 1]`, metres
+    /// over the ladder radius at a latitude's sine ([`vd_terrain::surface::SnowLine`]); `None` where the realm draws no
+    /// snow (its artifact not whole, or no snow on its body).
+    #[must_use]
+    pub fn snow_line(&self, realm: RealmId) -> Option<[f32; 4]> {
+        self.snow_lines.get(&realm).map(|l| {
+            [
+                l.base_m.to_f64() as f32,
+                l.per_sin2_m.to_f64() as f32,
+                l.per_sin_m.to_f64() as f32,
+                1.0,
+            ]
+        })
     }
 
     /// The artifact the lane holds for a realm.
@@ -2183,6 +2279,12 @@ impl ChunkLane {
             }
             return;
         }
+        // ★ A CHUNK WHOSE FINE TILES HAVE NOT LANDED IS BUILT ON THE ROUGH VIEW (ruling B86 item 7): its field, its
+        // parents' and its morph's are the one ground under the fine ground; it is built again when they land.
+        let artifact = match (artifact, body.macro_lattice()) {
+            (Some(a), Some(lattice)) if a.is_rough(&lattice, key) => Some(Arc::new(a.rough_view())),
+            (artifact, _) => artifact,
+        };
         self.pending.insert((realm, key), priority);
         *self.held.entry(realm).or_insert(0) += 1;
         self.counters.submitted += 1;
@@ -2194,6 +2296,51 @@ impl ChunkLane {
             priority,
             artifact,
         });
+    }
+
+    /// ★ WHETHER A ROUGH CHUNK MAY BE BUILT AGAIN ON THE FINE GROUND (ruling B86 item 7): resident on the rough ground,
+    /// not building again already, and every fine tile it and its parents read is here now.
+    #[must_use]
+    pub fn upgradable(&self, realm: RealmId, key: ChunkKey) -> bool {
+        if !self.rough.contains(&(realm, key)) | self.upgrading.contains(&(realm, key)) {
+            return false;
+        }
+        let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm)) else {
+            return false;
+        };
+        body.macro_lattice().is_some_and(|lattice| {
+            std::iter::once(key)
+                .chain(parent_keys(body, key))
+                .all(|k| !artifact.is_rough(&lattice, k))
+        })
+    }
+
+    /// Build a rough chunk again on the fine ground, at `priority`: the rough one stays resident and drawn until the
+    /// fine one lands in its place. Nothing for a chunk [`ChunkLane::upgradable`] refuses.
+    pub fn upgrade(&mut self, realm: RealmId, key: ChunkKey, priority: u32) {
+        if !self.upgradable(realm, key) {
+            return;
+        }
+        let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm)) else {
+            return;
+        };
+        self.upgrading.insert((realm, key));
+        self.pending.insert((realm, key), priority);
+        self.counters.rough_upgrades += 1;
+        self.workers.submit(ChunkJob {
+            realm,
+            body: Arc::clone(body),
+            key,
+            parents: Arc::clone(&self.parents),
+            priority,
+            artifact: Some(Arc::clone(artifact)),
+        });
+    }
+
+    /// How many resident chunks of a realm stand on the rough ground.
+    #[must_use]
+    pub fn rough_resident(&self, realm: RealmId) -> usize {
+        self.rough.iter().filter(|(r, _)| *r == realm).count()
     }
 
     /// Harvest up to `max` finished chunks. A chunk released while it was building is dropped
@@ -2233,10 +2380,14 @@ impl ChunkLane {
         };
         let mut kept = Vec::with_capacity(out.len());
         for ready in out {
+            // An upgrade's chunk is resident already: it is counted held once, before and after.
+            let upgrade = self.upgrading.remove(&(ready.realm, ready.geometry.key));
             if stale(self, &ready) {
                 self.counters.stale_builds += 1;
-                let left = self.held.entry(ready.realm).or_insert(1);
-                *left -= 1;
+                if !upgrade {
+                    let left = self.held.entry(ready.realm).or_insert(1);
+                    *left -= 1;
+                }
                 continue;
             }
             kept.push(ready);
@@ -2244,6 +2395,12 @@ impl ChunkLane {
         let out = kept;
         for ready in &out {
             self.resident.insert((ready.realm, ready.geometry.key));
+            if ready.geometry.rough {
+                self.counters.rough_builds += 1;
+                self.rough.insert((ready.realm, ready.geometry.key));
+            } else {
+                self.rough.remove(&(ready.realm, ready.geometry.key));
+            }
             if ready.geometry.triangles.is_empty() {
                 self.counters.empty_chunks += 1;
                 self.empty_resident.insert(
@@ -2268,6 +2425,8 @@ impl ChunkLane {
     pub fn release(&mut self, realm: RealmId, key: ChunkKey) {
         let was_resident = self.resident.remove(&(realm, key));
         self.empty_resident.remove(&(realm, key));
+        self.rough.remove(&(realm, key));
+        self.upgrading.remove(&(realm, key));
         let was_pending = self.pending.remove(&(realm, key)).is_some();
         if was_pending {
             self.workers.cancel(realm, key);
@@ -2590,6 +2749,34 @@ mod tests {
         ChunkLane::new(Box::new(InlineWorkers::default()), 77)
     }
 
+    /// ★ THE LANE HOLDS A REALM'S SNOW LINE (ruling B75 item 4) from the moment its artifact is whole, drops it when a
+    /// head that is not whole replaces it, and forgets it with the realm; a body with no snow holds none.
+    ///
+    /// **Example.** The pilot logs in over the home planet: the head lands and no snow is painted; a second later the
+    /// pyramid is whole and the line stands; the planet leaves the drawn set and the line goes with it.
+    #[test]
+    fn the_lane_holds_a_realms_snow_line_once_its_artifact_is_whole() {
+        use crate::surface::tests::{six_blocks, tiny_cache, wet_charter};
+        let realm = RealmId::Planet(HOME_PLANET_SEED);
+        let mut lane = lane();
+        lane.state_surface(realm, &surface(77), Some(&wet_charter()), &look());
+        lane.state_artifact(realm, &tiny_cache(realm, 0, None));
+        assert_eq!(lane.snow_line(realm), None, "the head alone");
+        lane.state_artifact(realm, &tiny_cache(realm, 0, Some(six_blocks())));
+        assert_eq!(lane.snow_line(realm).map(|l| l[3]), Some(1.0), "the whole artifact");
+        lane.state_artifact(realm, &tiny_cache(realm, 1, None));
+        assert_eq!(lane.snow_line(realm), None, "a new head, not whole");
+        lane.state_artifact(realm, &tiny_cache(realm, 1, Some(six_blocks())));
+        assert_eq!(lane.snow_line(realm).map(|l| l[3]), Some(1.0));
+        lane.forget(realm);
+        assert_eq!(lane.snow_line(realm), None, "forgotten with the realm");
+        // The home planet's own charter states no water: no snow.
+        let mut dry = self::lane();
+        dry.state_surface(realm, &surface(77), Some(&charter()), &look());
+        dry.state_artifact(realm, &tiny_cache(realm, 0, Some(six_blocks())));
+        assert_eq!(dry.snow_line(realm), None);
+    }
+
     /// ★ THE SEA FLOOR IS DRAWN (2026-09-28, ruling B22): no water is drawn until the water fill,
     /// so a chunk under 20 km of sea keeps its ground triangles. THE CONTROL: the floor cut that
     /// this rule replaces dropped every triangle of this same chunk.
@@ -2621,7 +2808,7 @@ mod tests {
             HOME_MOON_BULK_DENSITY_KGM3, HOME_MOON_GRAVITY_MM_S2, HOME_MOON_RADIUS_BITS,
             HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
         };
-        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_terrain::solve::Schedule;
         use vd_wire::channels::BulkMsg;
         /// Inline workers whose cancel does nothing: a job already on a thread.
         struct LateWorkers(InlineWorkers);
@@ -2644,7 +2831,7 @@ mod tests {
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
@@ -2752,13 +2939,13 @@ mod tests {
             HOME_MOON_BULK_DENSITY_KGM3, HOME_MOON_GRAVITY_MM_S2, HOME_MOON_RADIUS_BITS,
             HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
         };
-        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_terrain::solve::Schedule;
         use vd_wire::channels::BulkMsg;
         let moon = home_moon();
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
@@ -2893,13 +3080,13 @@ mod tests {
             HOME_MOON_BULK_DENSITY_KGM3, HOME_MOON_GRAVITY_MM_S2, HOME_MOON_RADIUS_BITS,
             HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
         };
-        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_terrain::solve::Schedule;
         use vd_wire::channels::BulkMsg;
         let moon = home_moon();
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
@@ -3876,6 +4063,7 @@ mod tests {
         };
         let (bucket_start, bucket_tris) = one_bucket(0, 0, vec![0, 1]);
         let pm = ParentMesh {
+            rough: false,
             key: ChunkKey {
                 face: Face::PosX,
                 rung: 1,
@@ -3896,6 +4084,7 @@ mod tests {
         assert_eq!(pm.radial_hit_m(0, 0, DVec3::X, 115.0), Some(100.0));
         // The same triangles the other way round meet the same tie the same way.
         let swapped = ParentMesh {
+            rough: false,
             key: pm.key,
             origin: DVec3::ZERO,
             positions: vec![far[0], far[1], far[2], near[0], near[1], near[2]],
@@ -4558,12 +4747,15 @@ mod tests {
             normals: Vec::new(),
             packed_normals: Vec::new(),
             morph_normals: Vec::new(),
+            surface: Vec::new(),
+            heights: Vec::new(),
             radials: Vec::new(),
             triangles: vec![[0, 1, 2]],
             bounds: ([0.0; 3], [0.0; 3]),
             skirt_start: 0,
             field_level: NO_FIELD,
             built_on: None,
+            rough: false,
         };
         assert_eq!(wide.upload_bytes(), 70_000 * UPLOAD_VERTEX_BYTES + 12);
         wide.vertices.truncate(3);
@@ -4773,12 +4965,15 @@ mod tests {
             normals: Vec::new(),
             packed_normals: Vec::new(),
             morph_normals: Vec::new(),
+            surface: Vec::new(),
+            heights: Vec::new(),
             radials: Vec::new(),
             triangles: Vec::new(),
             bounds: ([0.0; 3], [0.0; 3]),
             skirt_start: 0,
             field_level: NO_FIELD,
             built_on: None,
+            rough: false,
         };
         assert_eq!(empty.measure_bounds(), ([0.0; 3], [0.0; 3]));
         assert!(empty.morph_targets().is_empty());
@@ -4850,13 +5045,13 @@ mod tests {
         use vd_terrain::home::{
             HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
         };
-        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_terrain::solve::Schedule;
         use vd_wire::channels::BulkMsg;
         let moon = home_moon();
         let lattice = moon.macro_lattice().expect("a lattice");
         let words = home_moon_solve_words();
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
@@ -4955,12 +5150,15 @@ mod tests {
                 normals: vec![[1.0, 0.0, 0.0]; 3],
                 packed_normals: vec![[0, 0]; 3],
                 morph_normals: vec![[0, 0]; 3],
+                surface: vec![[0, 0, 0, 0]; 3],
+                heights: vec![0.0; 3],
                 radials: vec![[1.0, 0.0, 0.0]; 3],
                 triangles: vec![tri],
                 bounds: ([0.0; 3], [0.0; 3]),
                 skirt_start: 0,
                 field_level: NO_FIELD,
                 built_on: None,
+                rough: false,
             };
             add_skirts(&mut g, 5.0, 2.0);
             g

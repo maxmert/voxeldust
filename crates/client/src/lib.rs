@@ -34,6 +34,9 @@ pub mod sky;
 pub mod skyline;
 pub mod stand_in;
 pub mod star_sky;
+pub mod surface;
+#[cfg(test)]
+mod test_solves;
 pub mod tuning;
 pub mod view;
 

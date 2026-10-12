@@ -161,8 +161,11 @@ pub(crate) fn on_shard_control(
                 .expect("session present (we just held it above this tick)");
             let session = sessions
                 .by_session
-                .get(&session_id)
+                .get_mut(&session_id)
                 .expect("session present");
+            // ★ THE AVATAR, for the eye the ground's pieces are chosen from (ruling B88): read off the next frame.
+            session.eye.entity = Some(entity);
+            session.eye.wanted = true;
             announce_own_entity(
                 outbox,
                 session.client,
@@ -217,8 +220,11 @@ pub(crate) fn on_shard_control(
             }
             let session = sessions
                 .by_session
-                .get(&session_id)
+                .get_mut(&session_id)
                 .expect("session present");
+            // ★ THE AVATAR AFTER A CROSSING (ruling B88): the eye is read again off the destination's frames.
+            session.eye.entity = Some(entity);
+            session.eye.wanted = true;
             // The read-plane re-point at the dest promote (FORK 0a). Announce BOTH signals: a node-aware
             // client re-points its render authority to `sub` via `AuthorityChanged`; a pure-renderer
             // client (minor>=2) already renders this entity latest-wins by EntityId and just re-confirms
@@ -268,12 +274,13 @@ pub(crate) fn on_shard_control(
             );
         }
         // ★ THE BULK RELAY (slice 8c stage C4c, the artifact ship): a shard's bytes for the sessions
-        // it NAMES (the tiles under an occupant) are relayed to each one as
-        // `ServerControlMsg::ArtifactPart`, never decoded here; a session that is not Active, not
-        // behind this gateway, or negotiated under minor 32 is skipped and counted. A shard's
-        // answer to an ARTIFACT WANT rides the REALM audience and is CACHED for every session that
-        // draws the realm (`artifact.rs`, the far-view ship). The window-holder audience has no
-        // producer and stays COUNTED.
+        // it NAMES are relayed to each one as `ServerControlMsg::ArtifactPart`, never decoded here;
+        // a session that is not Active, not behind this gateway, or negotiated under minor 32 is
+        // skipped and counted. ★ No tile rides it since ruling B88 (one path: every viewer's tiles
+        // come from the realm's cache); it stays the relay for what a realm owes named sessions
+        // (slice 9's rows). A shard's answer to an ARTIFACT WANT rides the REALM audience and is
+        // CACHED for every session that draws the realm (`artifact.rs`, the far-view ship). The
+        // window-holder audience has no producer and stays COUNTED.
         ShardToGateway::BulkFor {
             realm_fence,
             audience,
@@ -467,17 +474,8 @@ pub(crate) fn relay_bulk(
         stats.bulk_for_unrouted += 1;
         return;
     }
-    // ★ A RELAYED TILE IS RECORDED (2026-09-27): the shard ships each tile to a session once, so a
-    // tile the transport sheds toward the client is sent again from the gateway's own copy by the
-    // session's re-drive (`super::artifact::serve_artifacts`).
-    let tile = super::artifact::tile_key_of(&bytes);
-    let GatewaySessions {
-        by_session,
-        relayed_tiles,
-        ..
-    } = sessions;
     for session_id in named {
-        let Some(session) = by_session.get_mut(session_id) else {
+        let Some(session) = sessions.by_session.get_mut(session_id) else {
             stats.bulk_for_unrouted += 1;
             tracing::warn!(
                 ?session_id,
@@ -503,7 +501,6 @@ pub(crate) fn relay_bulk(
             }
             session.held_bulk.push(bytes.clone());
             stats.bulk_for_held += 1;
-            record_relayed(session, relayed_tiles, tile, &bytes);
             continue;
         }
         let stale = session
@@ -528,7 +525,7 @@ pub(crate) fn relay_bulk(
                 ?session_id,
                 ?from,
                 minor = session.negotiated_minor,
-                "a shard's bulk for a session under minor 32"
+                "a shard's bulk for a session under the minor that reads it"
             );
             continue;
         }
@@ -540,29 +537,6 @@ pub(crate) fn relay_bulk(
             },
         );
         stats.artifact_parts_relayed += 1;
-        record_relayed(session, relayed_tiles, tile, &bytes);
     }
 }
 
-/// ★ ONE RELAYED TILE, RECORDED (2026-09-27): the session's record names it and the gateway keeps
-/// the newest copy of its bytes; anything that is not a tile is not recorded.
-fn record_relayed(
-    session: &mut super::session::Session,
-    copies: &mut std::collections::BTreeMap<
-        (vd_core::pose::RealmId, super::session::TileKey),
-        Vec<u8>,
-    >,
-    tile: Option<(vd_core::pose::RealmId, super::session::TileKey)>,
-    bytes: &[u8],
-) {
-    let Some((realm, key)) = tile else {
-        return;
-    };
-    session
-        .artifact_redrive
-        .relayed
-        .entry(realm)
-        .or_default()
-        .insert(key);
-    copies.insert((realm, key), bytes.to_vec());
-}

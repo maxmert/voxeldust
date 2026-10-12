@@ -61,12 +61,10 @@ use vd_recipe::noise::NOISE_BITS;
 use vd_seed::bend::{Face, direction};
 use vd_seed::rng::{SplitMix64, child_seed};
 
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-
 use crate::body::{BodyDefinition, draw_unit, frequency_of, salt};
 use crate::gf::Gf;
 use crate::macro_lattice::{MacroLattice, NO_NODE};
+use crate::par::Cores;
 use crate::solve::Z_STEPS_PER_M;
 use crate::strata::Province;
 
@@ -864,7 +862,13 @@ pub fn area_quantile(values: &[Gf], area: &[u64], share: f64) -> Gf {
 /// ★ PRIVATE SINCE 2026-09-24 (ruling B7 item 1): this counts EVERY node under the level as sea,
 /// an inland pocket included. The body's sea is [`sea_level_connected`], which starts here and
 /// then counts the connected ocean only.
-fn sea_level_over(z_dry: &[i32], area: &[u64], water_km3: u64, with_load: bool) -> Option<i32> {
+fn sea_level_over(
+    z_dry: &[i32],
+    area: &[u64],
+    water_km3: u64,
+    with_load: bool,
+    cores: Cores,
+) -> Option<i32> {
     if water_km3 == 0 {
         return None;
     }
@@ -872,7 +876,7 @@ fn sea_level_over(z_dry: &[i32], area: &[u64], water_km3: u64, with_load: bool) 
     let (mut lo, mut hi) = sea_bracket(z_dry, area, target);
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
-        if water_under(z_dry, area, mid as i32) < target {
+        if water_under(z_dry, area, mid as i32, cores) < target {
             lo = mid;
         } else {
             hi = mid;
@@ -908,15 +912,21 @@ fn sea_bracket(z: &[i32], area: &[u64], target: u128) -> (i64, i64) {
 }
 
 /// The water under a level over the dry field, in area·sixteenths (the load's factor left out:
-/// it is applied to the target once).
-fn water_under(z_dry: &[i32], area: &[u64], level: i32) -> u128 {
-    let mut sum = 0u128;
-    for (k, &z) in z_dry.iter().enumerate() {
-        if z < level {
-            sum += u128::from(area[k]) * (u128::from((i64::from(level) - i64::from(z)) as u64));
+/// it is applied to the target once). ★ On the solve's cores (ruling B72 item 1): each core sums its
+/// own range and the integer sums add up to the one sum one core makes.
+fn water_under(z_dry: &[i32], area: &[u64], level: i32, cores: Cores) -> u128 {
+    crate::par::per_range(z_dry.len(), cores.threads(), |r| {
+        let mut sum = 0u128;
+        for k in r {
+            let z = z_dry[k];
+            if z < level {
+                sum += u128::from(area[k]) * (u128::from((i64::from(level) - i64::from(z)) as u64));
+            }
         }
-    }
-    sum
+        sum
+    })
+    .into_iter()
+    .sum()
 }
 
 /// No body: a node over the level in [`ocean_mask`]'s labels.
@@ -946,58 +956,161 @@ pub struct OceanMask {
 /// and the lake budget, not the sea, decides whether water stands in it.
 #[must_use]
 pub fn ocean_mask(lattice: &MacroLattice, z: &[i32], area: &[u64], level: i32) -> OceanMask {
+    ocean_mask_on(lattice, z, area, level, Cores::default())
+}
+
+/// [`ocean_mask`] ON THE SOLVE'S CORES (ruling B72 item 1): each core labels the bodies of its own
+/// range of nodes ([`crate::par::ranges`]), the bodies that touch across two ranges are joined, and
+/// the largest joined body by area, on a tie the one whose lowest node index is smaller, is the
+/// ocean — the rule one core applies, so the mask and the counts are one core's, byte for byte.
+///
+/// **Example.** The home planet's sea at its level: on seven threads the ocean is seven pieces, one
+/// in each range, and the pieces that touch across the ranges' lines join into the one ocean; a
+/// crater floor under the level that touches none of them stays a pocket.
+#[must_use]
+pub fn ocean_mask_on(
+    lattice: &MacroLattice,
+    z: &[i32],
+    area: &[u64],
+    level: i32,
+    cores: Cores,
+) -> OceanMask {
     let n = z.len();
-    let mut label = vec![NO_BODY; n];
-    // Each body's area and node count, in the order its lowest index was met.
-    let mut bodies: Vec<(u128, usize)> = Vec::new();
+    let threads = cores.threads();
+    let tiles = crate::par::ranges(n, threads);
+    let parts: Vec<WetTile> = crate::par::per_range(tiles.len(), threads, |r| {
+        r.map(|t| wet_tile(lattice, z, area, level, tiles[t].clone()))
+            .collect::<Vec<_>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    // Every tile's bodies in one numbering, and the bodies that touch across two tiles joined.
+    let mut first = Vec::with_capacity(parts.len() + 1);
+    first.push(0usize);
+    for p in &parts {
+        first.push(first[first.len() - 1] + p.bodies.len());
+    }
+    let mut join: Vec<u32> = (0..first[parts.len()] as u32).collect();
+    for (t, p) in parts.iter().enumerate() {
+        for &(body, m) in &p.across {
+            let u = tiles.partition_point(|r| r.end <= m as usize);
+            let other = parts[u].label[m as usize - tiles[u].start];
+            let (a, b) = (
+                representative(&mut join, (first[t] + body as usize) as u32),
+                representative(&mut join, (first[u] + other as usize) as u32),
+            );
+            join[a.max(b) as usize] = a.min(b);
+        }
+    }
+    // Each joined body's area, nodes and lowest index; the ocean the largest, a tie to the lower index.
+    let mut whole: Vec<(u128, usize, u32)> = vec![(0, 0, u32::MAX); join.len()];
+    for (t, p) in parts.iter().enumerate() {
+        for (k, &(body_area, nodes, lowest)) in p.bodies.iter().enumerate() {
+            let r = representative(&mut join, (first[t] + k) as u32) as usize;
+            whole[r].0 += body_area;
+            whole[r].1 += nodes;
+            whole[r].2 = whole[r].2.min(lowest);
+        }
+    }
+    let joined: Vec<(u128, usize, u32)> = (0..join.len())
+        .filter(|&g| join[g] == g as u32)
+        .map(|g| whole[g])
+        .collect();
+    let ocean = (0..join.len())
+        .filter(|&g| join[g] == g as u32)
+        .max_by_key(|&g| (whole[g].0, std::cmp::Reverse(whole[g].2)))
+        .map_or(NO_BODY, |g| g as u32);
+    let ocean_nodes = if ocean == NO_BODY {
+        0
+    } else {
+        whole[ocean as usize].1
+    };
+    let roots: Vec<u32> = (0..join.len() as u32)
+        .map(|g| representative(&mut join, g))
+        .collect();
+    let (roots, first) = (&roots, &first);
+    OceanMask {
+        ocean: crate::par::join(crate::par::per_range(parts.len(), threads, |r| {
+            r.flat_map(|t| {
+                parts[t]
+                    .label
+                    .iter()
+                    .map(move |&l| (l != NO_BODY) && (roots[first[t] + l as usize] == ocean))
+            })
+            .collect::<Vec<bool>>()
+        })),
+        pockets: joined.len().saturating_sub(1),
+        pocket_nodes: joined.iter().map(|b| b.1).sum::<usize>() - ocean_nodes,
+    }
+}
+
+/// One range's own water bodies ([`ocean_mask_on`]): each node's body in the range (or [`NO_BODY`]
+/// over the level), each body's area, nodes and lowest index in the order its lowest index is met,
+/// and every pair of a body and a node under the level across the range's edge.
+struct WetTile {
+    label: Vec<u32>,
+    bodies: Vec<(u128, usize, u32)>,
+    across: Vec<(u32, u32)>,
+}
+
+/// The water bodies of the nodes in `tile` ([`WetTile`]): a walk through the lattice's own eight
+/// neighbours inside the range, every body started at its lowest index.
+fn wet_tile(
+    lattice: &MacroLattice,
+    z: &[i32],
+    area: &[u64],
+    level: i32,
+    tile: std::ops::Range<usize>,
+) -> WetTile {
+    let start = tile.start;
+    let mut label = vec![NO_BODY; tile.len()];
+    let mut bodies: Vec<(u128, usize, u32)> = Vec::new();
+    let mut across = Vec::new();
     let mut stack: Vec<u32> = Vec::new();
-    for start in 0..n {
-        if (label[start] != NO_BODY) | (z[start] > level) {
+    for v in tile.clone() {
+        if (label[v - start] != NO_BODY) | (z[v] > level) {
             continue;
         }
         let id = bodies.len() as u32;
         let (mut body_area, mut nodes) = (0u128, 0usize);
-        label[start] = id;
-        stack.push(start as u32);
-        while let Some(v) = stack.pop() {
-            body_area += u128::from(area[v as usize]);
+        label[v - start] = id;
+        stack.push(v as u32);
+        while let Some(u) = stack.pop() {
+            body_area += u128::from(area[u as usize]);
             nodes += 1;
-            for m in lattice.neighbours(v) {
+            for m in lattice.neighbours(u) {
                 if m == NO_NODE {
                     continue;
                 }
                 let mi = m as usize;
-                if (label[mi] == NO_BODY) & (z[mi] <= level) {
-                    label[mi] = id;
+                if z[mi] > level {
+                    continue;
+                }
+                if !tile.contains(&mi) {
+                    across.push((id, m));
+                } else if label[mi - start] == NO_BODY {
+                    label[mi - start] = id;
                     stack.push(m);
                 }
             }
         }
-        bodies.push((body_area, nodes));
+        bodies.push((body_area, nodes, v as u32));
     }
-    // The largest by area; a later body replaces it only when STRICTLY larger, so a tie keeps the
-    // body met first — the one whose lowest index is smaller.
-    let mut ocean = NO_BODY;
-    let mut largest = 0u128;
-    for (k, &(body_area, _)) in bodies.iter().enumerate() {
-        if ocean == NO_BODY || body_area > largest {
-            ocean = k as u32;
-            largest = body_area;
-        }
+    WetTile {
+        label,
+        bodies,
+        across,
     }
-    let ocean_nodes = if ocean == NO_BODY {
-        0
-    } else {
-        bodies[ocean as usize].1
-    };
-    OceanMask {
-        ocean: label
-            .iter()
-            .map(|&b| (b != NO_BODY) & (b == ocean))
-            .collect(),
-        pockets: bodies.len().saturating_sub(1),
-        pocket_nodes: bodies.iter().map(|b| b.1).sum::<usize>() - ocean_nodes,
+}
+
+/// A joined body's representative, the chain halved on the way.
+fn representative(join: &mut [u32], mut g: u32) -> u32 {
+    while join[g as usize] != g {
+        join[g as usize] = join[join[g as usize] as usize];
+        g = join[g as usize];
     }
+    g
 }
 
 /// ★ THE BODY'S SEA OVER THE CONNECTED OCEAN (2026-09-24, ruling B7 item 1; plan step 2 part 3a).
@@ -1049,8 +1162,26 @@ pub fn sea_level_connected(
     water_km3: u64,
     with_load: bool,
 ) -> Option<ConnectedSea> {
-    let first = sea_level_over(z, area, water_km3, with_load)?;
-    let mask = ocean_mask(lattice, z, area, first);
+    sea_level_connected_on(lattice, z, area, water_km3, with_load, Cores::default())
+}
+
+/// [`sea_level_connected`] ON THE SOLVE'S CORES (ruling B72 item 1): the reach from the ocean is the
+/// shared flood ([`crate::flood::fill`]) and each bisection's water is summed on every core, so the
+/// level, the mask and the check are the ones one core finds, byte for byte.
+///
+/// **Example.** Every pass of the home planet's solve re-solves its sea (ruling B69 item 1); on seven
+/// threads the 8.9 million nodes' water under each trial level is seven sums of a seventh each.
+#[must_use]
+pub fn sea_level_connected_on(
+    lattice: &MacroLattice,
+    z: &[i32],
+    area: &[u64],
+    water_km3: u64,
+    with_load: bool,
+    cores: Cores,
+) -> Option<ConnectedSea> {
+    let first = sea_level_over(z, area, water_km3, with_load, cores)?;
+    let mask = ocean_mask_on(lattice, z, area, first, cores);
     if mask.pockets == 0 {
         // One body under `L0`: it holds the whole inventory, so the answer balances by itself.
         return Some(ConnectedSea {
@@ -1061,8 +1192,8 @@ pub fn sea_level_connected(
         });
     }
     let target = sea_target(water_km3, with_load);
-    let (level, reach) = connected_level(lattice, z, area, target, &mask.ocean, first);
-    let at = ocean_mask(lattice, z, area, level);
+    let (level, reach) = connected_level(lattice, z, area, target, &mask.ocean, first, cores);
+    let at = ocean_mask_on(lattice, z, area, level, cores);
     // A node of the first ocean stands in the seed's body at every level over `L0`, so the seed's
     // body is the largest exactly where the new mask holds it.
     let seed = mask.ocean.iter().position(|&o| o).unwrap_or(0);
@@ -1075,8 +1206,8 @@ pub fn sea_level_connected(
             settled,
         });
     }
-    let (level, reach) = connected_level(lattice, z, area, target, &at.ocean, first);
-    let mask = ocean_mask(lattice, z, area, level);
+    let (level, reach) = connected_level(lattice, z, area, target, &at.ocean, first, cores);
+    let mask = ocean_mask_on(lattice, z, area, level, cores);
     let settled = joined_is_ocean(&reach, &mask.ocean, level);
     Some(ConnectedSea {
         level,
@@ -1103,13 +1234,17 @@ fn connected_level(
     target: u128,
     seed: &[bool],
     first: i32,
+    cores: Cores,
 ) -> (i32, Vec<i32>) {
-    let reach = reach_from(lattice, z, seed);
+    // ★ THE LEVEL AT WHICH EACH NODE JOINS THE SEED: a seed node's own height, and every other node
+    // the least, over the paths to the seed, of the highest node on the path — the routing's own
+    // flood ([`crate::flood::fill`]).
+    let reach = crate::flood::fill(lattice, z, seed, cores);
     let (_, mut hi) = sea_bracket(z, area, target);
     let mut lo = i64::from(first) - 1;
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
-        if water_joined(z, area, &reach, mid as i32) < target {
+        if water_joined(z, area, &reach, mid as i32, cores) < target {
             lo = mid;
         } else {
             hi = mid;
@@ -1118,41 +1253,21 @@ fn connected_level(
     (hi as i32, reach)
 }
 
-/// ★ THE LEVEL AT WHICH EACH NODE JOINS THE SEED (a priority flood, lowest first, ties to the
-/// smaller index): a seed node's own height, and every other node the least, over the paths to the
-/// seed, of the highest node on the path.
-fn reach_from(lattice: &MacroLattice, z: &[i32], seed: &[bool]) -> Vec<i32> {
-    let n = z.len();
-    let mut reach = vec![i32::MAX; n];
-    let mut heap: BinaryHeap<Reverse<(i32, u32)>> = BinaryHeap::new();
-    for i in 0..n {
-        if seed[i] {
-            reach[i] = z[i];
-            heap.push(Reverse((z[i], i as u32)));
-        }
-    }
-    while let Some(Reverse((level, node))) = heap.pop() {
-        for m in lattice.neighbours(node) {
-            if m == NO_NODE || reach[m as usize] != i32::MAX {
-                continue;
+/// The water under a level over the nodes joined to the seed at that level, in area·sixteenths; on
+/// the solve's cores, as [`water_under`].
+fn water_joined(z: &[i32], area: &[u64], reach: &[i32], level: i32, cores: Cores) -> u128 {
+    crate::par::per_range(z.len(), cores.threads(), |r| {
+        let mut sum = 0u128;
+        for k in r {
+            let h = z[k];
+            if (h < level) & (reach[k] <= level) {
+                sum += u128::from(area[k]) * (u128::from((i64::from(level) - i64::from(h)) as u64));
             }
-            let raised = z[m as usize].max(level);
-            reach[m as usize] = raised;
-            heap.push(Reverse((raised, m)));
         }
-    }
-    reach
-}
-
-/// The water under a level over the nodes joined to the seed at that level, in area·sixteenths.
-fn water_joined(z: &[i32], area: &[u64], reach: &[i32], level: i32) -> u128 {
-    let mut sum = 0u128;
-    for (k, &h) in z.iter().enumerate() {
-        if (h < level) & (reach[k] <= level) {
-            sum += u128::from(area[k]) * (u128::from((i64::from(level) - i64::from(h)) as u64));
-        }
-    }
-    sum
+        sum
+    })
+    .into_iter()
+    .sum()
 }
 
 /// ★ THE SEA'S LOAD ON THE OCEAN ALONE (2026-09-24, ruling B7 item 1): every OCEAN node sinks by
@@ -1383,7 +1498,7 @@ pub fn initial_land_from_on(
     //    under it holds the trench's inner wall — the outer wall's own profile, so the trough is one
     //    trough with its axis on the boundary — and its wedge rises from the coast inland (the
     //    belts' law).
-    let mut uplift: Vec<i32> = crate::par::per_range(n, cores.threads(), |r| {
+    let mut uplift: Vec<i32> = crate::par::join(crate::par::per_range(n, cores.threads(), |r| {
         let mut subs = Vec::with_capacity((CELL_SUBCELLS * CELL_SUBCELLS) as usize);
         r.map(|k| {
             sub_boundaries(lattice, &plates, k as u32, inv_sub, &mut subs);
@@ -1441,10 +1556,7 @@ pub fn initial_land_from_on(
             (sum / count * steps).to_i64_floor() as i32
         })
         .collect::<Vec<i32>>()
-    })
-    .into_iter()
-    .flatten()
-    .collect();
+    }));
     // The dry field in sixteenths, the older landscape's relief in sixteenths added to it.
     let z_dry: Vec<i32> = dry
         .iter()
@@ -1454,7 +1566,7 @@ pub fn initial_land_from_on(
     // 5. The sea, with the load — ★ OVER THE CONNECTED OCEAN ONLY (2026-09-24, ruling B7 item 1):
     //    a pocket under the level that no path joins to the ocean carries neither the sea's water
     //    nor its load.
-    let sea = sea_level_connected(lattice, &z_dry, &area, words.water_km3, true);
+    let sea = sea_level_connected_on(lattice, &z_dry, &area, words.water_km3, true, cores);
     let (sea_z, ocean, pockets, pocket_nodes) = match sea {
         Some(s) => (
             Some(s.level),
@@ -1864,13 +1976,13 @@ mod tests {
         // 500 m of water over 10¹² m² = 5 × 10¹⁴ m³ = 500 000 km³; the load lets the column stand
         // 1.454 times taller than the dry gap, so the level stands 500 / 1.454 = 344 m over the
         // dry floor (and 500 m over the loaded one).
-        let level = sea_level_over(&z, &area, 500_000, true).expect("a sea");
+        let level = sea_level_over(&z, &area, 500_000, true, Cores::default()).expect("a sea");
         let level_m = f64::from(level) / f64::from(Z_STEPS_PER_M);
         assert!((level_m - 343.9).abs() < 1.0, "{level_m}");
         let column_m = f64::from(level - loaded_height(low, level)) / f64::from(Z_STEPS_PER_M);
         assert!((column_m - 500.0).abs() < 1.0, "{column_m}");
-        assert_eq!(sea_level_over(&z, &area, 0, true), None);
-        let flooded = sea_level_over(&z, &area, 10_000_000, true).expect("a sea");
+        assert_eq!(sea_level_over(&z, &area, 0, true, Cores::default()), None);
+        let flooded = sea_level_over(&z, &area, 10_000_000, true, Cores::default()).expect("a sea");
         assert!(flooded > high);
         assert!(loaded_height(low, level) < low);
         assert_eq!(loaded_height(high, level), high);
@@ -1911,7 +2023,7 @@ mod tests {
         }
         let water_km3 = 20_000;
         let target = sea_target(water_km3, false);
-        let first = sea_level_over(&z, &area, water_km3, false).expect("a sea");
+        let first = sea_level_over(&z, &area, water_km3, false, Cores::default()).expect("a sea");
         let sea = sea_level_connected(&lattice, &z, &area, water_km3, false).expect("a sea");
         assert!(!sea.reseeded);
         assert!(sea.settled);
@@ -1944,7 +2056,7 @@ mod tests {
         let one = sea_level_connected(&lattice, &lone, &area, water_km3, false).expect("a sea");
         assert_eq!(
             one.level,
-            sea_level_over(&lone, &area, water_km3, false).expect("a sea")
+            sea_level_over(&lone, &area, water_km3, false, Cores::default()).expect("a sea")
         );
         assert!(one.settled);
         assert!(holds_within_a_step(&lone, &area, &one, target));
@@ -1985,6 +2097,43 @@ mod tests {
         assert!(all.ocean.iter().all(|&o| o));
     }
 
+    /// ★ THE OCEAN'S MASK ON ANY NUMBER OF CORES (ruling B72 item 1): over a rugged field at six
+    /// levels — no water, scattered ponds, the level where the ponds join into one sea, and nearly
+    /// all water — every core count gives the one-core mask and counts; and test 14's tie goes to
+    /// the lower index on many cores too.
+    #[test]
+    fn the_ocean_mask_on_any_number_of_cores_is_the_one_core_mask() {
+        let (lattice, area) = moon_areas();
+        let n = lattice.node_count();
+        let hash = |i: u64| {
+            let mut x = i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            x ^= x >> 31;
+            x.wrapping_mul(0xbf58_476d_1ce4_e5b9)
+        };
+        let z: Vec<i32> = (0..n as u64)
+            .map(|i| ((u128::from(hash(i)) * 1_000) >> 64) as i32)
+            .collect();
+        for level in [-1, 100, 400, 450, 520, 990] {
+            let one = ocean_mask_on(&lattice, &z, &area, level, Cores(1));
+            for cores in [2, 3, 5, 8, 13] {
+                assert_eq!(
+                    ocean_mask_on(&lattice, &z, &area, level, Cores(cores)),
+                    one,
+                    "{cores} cores at level {level}"
+                );
+            }
+        }
+        let mut tie = vec![100; n];
+        let a = lattice.index(Face::PosX, 10, 10) as usize;
+        let b = lattice.index(Face::NegX, 10, 10) as usize;
+        tie[a] = 0;
+        tie[b] = 0;
+        let mask = ocean_mask_on(&lattice, &tie, &area, 0, Cores(4));
+        assert!(mask.ocean[a]);
+        assert!(!mask.ocean[b]);
+        assert_eq!((mask.pockets, mask.pocket_nodes), (1, 1));
+    }
+
     /// ★ TEST 15 (plan step 2 part 3a): THE LOAD FALLS ON THE OCEAN ALONE. An ocean node under the
     /// level sinks by `loaded_height`; a pocket node under the same level keeps its dry height; a
     /// node over the level is untouched.
@@ -2023,7 +2172,7 @@ mod tests {
                 *h = 80;
             }
         }
-        let first = sea_level_over(&z, &area, 72, false).expect("a sea");
+        let first = sea_level_over(&z, &area, 72, false, Cores::default()).expect("a sea");
         assert!(
             (0..80).contains(&first),
             "L0 {first} between the shallow floor and the shelf"
@@ -2084,7 +2233,7 @@ mod tests {
         // The target: the hole alone brim full to the level 0.
         let water_m3: u128 = hole.iter().map(|&k| u128::from(area[k]) * 10_000).sum();
         let water_km3 = (water_m3 / 1_000_000_000) as u64;
-        let first = sea_level_over(&z, &area, water_km3, false).expect("a sea");
+        let first = sea_level_over(&z, &area, water_km3, false, Cores::default()).expect("a sea");
         let at_first = ocean_mask(&lattice, &z, &area, first);
         assert!(at_first.ocean[a_nodes[0]], "A is the largest at L0 {first}");
         assert_eq!(at_first.pockets, 1);

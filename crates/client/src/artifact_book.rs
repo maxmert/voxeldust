@@ -29,6 +29,8 @@ use vd_terrain::artifact::{
     CoastCounts, PyramidField, Tile, TileCache, ZField, tile_width, tiles_of_chunk,
 };
 use vd_terrain::chunk::ChunkKey;
+use vd_terrain::fine::l1::TileKey;
+use vd_terrain::fine::read::{FineBook, FineField, L1_TOP_RUNG, applies};
 use vd_terrain::macro_lattice::MacroLattice;
 use vd_wire::channels::BulkMsg;
 
@@ -68,6 +70,11 @@ pub type SharedField = Arc<dyn ZField + Send + Sync>;
 pub enum FieldPick {
     /// The field, whole for this chunk: build.
     Ready(SharedField),
+    /// ★ THE ROUGH GROUND (ruling B86 item 7, the safety net): the fine level serves this chunk but a fine tile it reads
+    /// has not landed. Build now on the field under the fine ground (the macro rows and their octaves), on the cache's
+    /// rough view ([`ArtifactCache::rough_view`]), and again when the tiles land: the rough ground stands only where no
+    /// fine ground has arrived, never over it.
+    Rough(SharedField),
     /// The level is still assembling, or a tile the stencil reads has not arrived: the coarser
     /// rung stands.
     Waiting,
@@ -77,6 +84,7 @@ impl std::fmt::Debug for FieldPick {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FieldPick::Ready(field) => write!(f, "Ready(level {})", field.level()),
+            FieldPick::Rough(field) => write!(f, "Rough(level {})", field.level()),
             FieldPick::Waiting => write!(f, "Waiting"),
         }
     }
@@ -98,11 +106,62 @@ pub struct ArtifactCache {
     /// moment the mask is whole, shared by pointer with every level. They are DERIVED, so no byte
     /// of them crosses the wire: the client folds what the server folds, from one mask.
     counts: Option<Arc<CoastCounts>>,
+    /// ★ THE FINE TILES (the fine ground's way in, B2): the finished 128 m tiles the realm's shard shipped, `None` until
+    /// the first lands (it states the tile's side). Shared by pointer; each tile's heights by pointer inside it.
+    fine: Option<Arc<FineBook>>,
+    /// ★ A ROUGH VIEW (B86 item 7): the fine level is off — every rung reads the field under the fine ground. A chunk
+    /// whose fine tiles have not landed is built on this view and built again on the whole cache when they land.
+    rough: bool,
     /// Bumped on every accepted change, so a reader tells a changed cache from the one it read.
     pub epoch: u64,
 }
 
 impl ArtifactCache {
+    /// The fine tiles held, if any has landed.
+    #[must_use]
+    pub fn fine(&self) -> Option<&Arc<FineBook>> {
+        self.fine.as_ref()
+    }
+
+    /// ★ THE FINE GROUND OVER A PICKED FIELD (B2): on a body where the 128 m level applies, a chunk at rungs 0–12 reads
+    /// its height from the fine tiles once every tile its stencils read is here, and until then is ROUGH (ruling B86
+    /// item 7: built on the field under the fine ground, and again when the tiles land); any other pick, and every pick
+    /// of a rough view, stands as it is.
+    fn with_fine(&self, pick: FieldPick, key: ChunkKey) -> FieldPick {
+        if self.rough || !applies(self.head.sea_m) || key.rung > L1_TOP_RUNG {
+            return pick;
+        }
+        let FieldPick::Ready(inner) = pick else {
+            return pick;
+        };
+        match &self.fine {
+            Some(book) if book.holds_all(&book.tiles_of_chunk(key.face, key.rung, key.x, key.y), key.rung) => {
+                FieldPick::Ready(Arc::new(FineField { inner, book: Arc::clone(book) }) as SharedField)
+            }
+            _ => FieldPick::Rough(inner),
+        }
+    }
+
+    /// ★ THE ROUGH VIEW of this cache (B86 item 7): the same head, levels and tiles with the fine level off — what a
+    /// chunk whose fine tiles have not landed is built on, so its own field, its parents' and the fields its morph reads
+    /// are all the one ground under the fine ground.
+    #[must_use]
+    pub fn rough_view(&self) -> ArtifactCache {
+        ArtifactCache { fine: None, rough: true, ..self.clone() }
+    }
+
+    /// Whether this cache is a rough view.
+    #[must_use]
+    pub fn is_rough_view(&self) -> bool {
+        self.rough
+    }
+
+    /// Whether a chunk built now on this cache would stand on the rough ground: a rough view, or the fine level serving
+    /// the chunk with one of its fine tiles not landed. `lattice` is the body's own macro lattice.
+    #[must_use]
+    pub fn is_rough(&self, lattice: &MacroLattice, key: ChunkKey) -> bool {
+        self.rough || matches!(self.field_for(lattice, key), FieldPick::Rough(_))
+    }
     /// The tiles this cache holds, by id (2026-09-22, the dev state's listing).
     pub fn tile_ids(&self) -> impl Iterator<Item = (u8, u32, u32)> + '_ {
         self.tiles.tile_ids()
@@ -116,6 +175,8 @@ impl ArtifactCache {
             tiles: Arc::new(TileCache::new(head.edge).with_sea(head.sea_m)),
             coast: None,
             counts: None,
+            fine: None,
+            rough: false,
             epoch: 1,
         }
     }
@@ -179,18 +240,20 @@ impl ArtifactCache {
     #[must_use]
     pub fn field_for(&self, lattice: &MacroLattice, key: ChunkKey) -> FieldPick {
         let level = PyramidField::level_for(lattice, self.head.levels, key.rung);
-        if level == 0 {
+        let pick = if level == 0 {
             let needed = tiles_of_chunk(lattice, key);
-            return if self.tiles.holds_all(&needed) {
+            if self.tiles.holds_all(&needed) {
                 FieldPick::Ready(self.tiles.clone() as SharedField)
             } else {
                 FieldPick::Waiting
-            };
-        }
-        match self.masked_level(level) {
-            Some(field) => FieldPick::Ready(field.clone() as SharedField),
-            None => FieldPick::Waiting,
-        }
+            }
+        } else {
+            match self.masked_level(level) {
+                Some(field) => FieldPick::Ready(field.clone() as SharedField),
+                None => FieldPick::Waiting,
+            }
+        };
+        self.with_fine(pick, key)
     }
 
     /// Pyramid level `k` where it is whole AND the coast mask is held: the level a chunk and every
@@ -218,11 +281,32 @@ impl ArtifactCache {
     /// the tiles, which answer nothing for a node they lack.
     #[must_use]
     pub fn field_at_rung(&self, lattice: &MacroLattice, rung: u8) -> Option<SharedField> {
+        let field = self.rough_at_rung(lattice, rung)?;
+        // ★ THE FINE GROUND (B2) under a rung it serves, where it applies: the fine field once a tile has landed (a tile not
+        // held answers nothing for its cells, as the tiles do for a node they lack), and NOTHING before — the rung's ground
+        // is not here yet, so every reader stands on a coarser level as a provisional answer and reads again. MEASURED
+        // before (the first window stand, 2026-10-12): a column's span read on the coarse field before the first fine tile
+        // was kept as final; where the fine ground stood 1.1 km lower, 3 843 of 3 989 chunks were empty and 1 480 columns
+        // were holes.
+        let serves = !self.rough & applies(self.head.sea_m) & (rung <= L1_TOP_RUNG);
+        match (serves, self.fine.as_ref()) {
+            (false, _) => Some(field),
+            (true, Some(book)) => Some(Arc::new(FineField { inner: field, book: Arc::clone(book) }) as SharedField),
+            (true, None) => None,
+        }
+    }
+
+    /// ★ THE ROUGH GROUND A RUNG READS (B86 item 7): the field under the fine ground — the level, whole with its coast
+    /// mask, or the tiles — whatever fine tiles have landed. What a rough chunk is built on, and the span its column is
+    /// read on until the fine tiles land.
+    #[must_use]
+    pub fn rough_at_rung(&self, lattice: &MacroLattice, rung: u8) -> Option<SharedField> {
         let level = PyramidField::level_for(lattice, self.head.levels, rung);
         if level == 0 {
-            return Some(self.tiles.clone() as SharedField);
+            Some(self.tiles.clone() as SharedField)
+        } else {
+            self.masked_level(level).map(|f| f.clone() as SharedField)
         }
-        self.masked_level(level).map(|f| f.clone() as SharedField)
     }
 }
 
@@ -294,6 +378,12 @@ pub enum ArtifactIngest {
     Duplicate,
     /// A bulk message that is not an artifact's: not this receiver's, counted.
     NotArtifact,
+    /// ★ A fine tile's part kept; the tile is not whole yet (B2).
+    FinePart,
+    /// A fine tile made whole and held: the chunks over it may build.
+    FineTile,
+    /// A whole fine tile parked until its realm's head arrives.
+    FineParked,
 }
 
 /// The receiver's counters — every refusal by name.
@@ -314,6 +404,10 @@ pub struct ArtifactCounters {
     pub shape: u64,
     pub duplicates: u64,
     pub not_artifact: u64,
+    /// ★ Fine parts kept, fine tiles held, and fine tiles parked before their head (B2).
+    pub fine_parts: u64,
+    pub fine_tiles: u64,
+    pub fine_parked: u64,
 }
 
 /// The coast mask's parts, assembling: each part's bits, `None` for one not here.
@@ -341,11 +435,21 @@ pub struct ArtifactReceiver {
     /// tile may land first. It is PARKED, bounded per realm, and applied when the head lands —
     /// never dropped (each tile is shipped once) and never applied unchecked.
     parked: BTreeMap<RealmId, Vec<ParkedTile>>,
+    /// ★ THE FINE TILES ASSEMBLING (B2): each tile's parts by realm and key, `None` for a part not here.
+    fine_parts: BTreeMap<(RealmId, TileKey), Vec<Option<Vec<u8>>>>,
+    /// Whole fine tiles that arrived before their head: decoded, parked, bounded as the tiles are.
+    fine_parked: BTreeMap<RealmId, Vec<ParkedFine>>,
+    /// ★ THE FINE TILES HELD, NOT YET STATED (ruling B81 Q3): each tile's finest level once it is held, for the client
+    /// to state to its gateway (`ClientControlMsg::FineHeld`), taken by [`ArtifactReceiver::take_fine_held`].
+    fine_held: Vec<(RealmId, (u8, u32, u32, u8))>,
     pub counters: ArtifactCounters,
 }
 
 /// A parked tile: its face, its column and row in tiles, and its rows' bytes.
 type ParkedTile = (u8, u32, u32, Vec<u8>);
+
+/// A parked fine tile: its key, its side's shift, its first level and its decoded levels from it.
+type ParkedFine = (TileKey, u32, u32, Vec<Vec<i32>>);
 
 /// How many tiles a realm may park before its head arrives: the pace ships four a tick, so this
 /// is over a minute of tiles; past it the oldest is dropped and counted.
@@ -366,6 +470,8 @@ impl ArtifactReceiver {
         self.assembling.retain(|(r, _), _| *r != realm);
         self.coasts.remove(&realm);
         self.parked.remove(&realm);
+        self.fine_parts.retain(|(r, _), _| *r != realm);
+        self.fine_parked.remove(&realm);
     }
 
     /// ★ ONE PART IN. The book is written copy-on-write, so the renderer's pointer stays whole.
@@ -419,6 +525,16 @@ impl ArtifactReceiver {
                 parts,
                 bits,
             } => self.accept_coast(realm, part, parts, bits),
+            BulkMsg::FineTilePart {
+                realm,
+                level,
+                face,
+                tx,
+                ty,
+                part,
+                parts,
+                bytes,
+            } => self.accept_fine(realm, level, (face, tx, ty), (part, parts), bytes),
             _ => ArtifactIngest::NotArtifact,
         };
         self.count(result);
@@ -450,6 +566,15 @@ impl ArtifactReceiver {
             ArtifactIngest::NoHead => c.no_head += 1,
             ArtifactIngest::Shape => c.shape += 1,
             ArtifactIngest::NotArtifact => c.not_artifact += 1,
+            ArtifactIngest::FinePart => c.fine_parts += 1,
+            ArtifactIngest::FineTile => {
+                c.fine_parts += 1;
+                c.fine_tiles += 1;
+            }
+            ArtifactIngest::FineParked => {
+                c.fine_parts += 1;
+                c.fine_parked += 1;
+            }
         }
     }
 
@@ -469,6 +594,13 @@ impl ArtifactReceiver {
         for (face, tx, ty, rows) in self.parked.remove(&realm).unwrap_or_default() {
             let landed = self.accept_tile(realm, face, tx, ty, &rows);
             self.count(landed);
+        }
+        for (key, ts, lo, levels) in self.fine_parked.remove(&realm).unwrap_or_default() {
+            if self.hold_fine(realm, key, ts, lo, levels) {
+                self.counters.fine_tiles += 1;
+            } else {
+                self.counters.shape += 1;
+            }
         }
         ArtifactIngest::Head
     }
@@ -682,7 +814,84 @@ impl ArtifactReceiver {
         cache.epoch += 1;
         ArtifactIngest::Tile
     }
+
+    /// ★ ONE FINE PART IN (B2): kept until the record's parts are all here, then the record decoded and its levels held
+    /// (ruling B86 item 3: a far tile's coarse levels first, its finer ones joining them later) — or parked until its
+    /// realm's head. A level other than the 128 m one, a part past its count or a record that does not decode is refused
+    /// by shape.
+    fn accept_fine(
+        &mut self,
+        realm: RealmId,
+        level: u8,
+        (face, tx, ty): (u8, u32, u32),
+        (part, parts): (u32, u32),
+        bytes: Vec<u8>,
+    ) -> ArtifactIngest {
+        let Some(face) = vd_seed::bend::Face::from_index(face).filter(|_| level == 1) else {
+            return ArtifactIngest::Shape;
+        };
+        if (part >= parts) | (parts > MAX_FINE_PARTS) | (tx > i32::MAX as u32) | (ty > i32::MAX as u32) {
+            return ArtifactIngest::Shape;
+        }
+        let key = TileKey { face, tx: tx as i32, ty: ty as i32 };
+        let slots = self.fine_parts.entry((realm, key)).or_insert_with(|| vec![None; parts as usize]);
+        if slots.len() != parts as usize {
+            // A tile shipped again under another cut starts over.
+            *slots = vec![None; parts as usize];
+        }
+        if slots[part as usize].is_some() {
+            return ArtifactIngest::Duplicate;
+        }
+        slots[part as usize] = Some(bytes);
+        if slots.iter().any(Option::is_none) {
+            return ArtifactIngest::FinePart;
+        }
+        let record: Vec<u8> = self.fine_parts.remove(&(realm, key)).unwrap_or_default().into_iter().flatten().flatten().collect();
+        let Some((ts, lo, levels)) = vd_terrain::fine::tile::decode_range(&record) else {
+            return ArtifactIngest::Shape;
+        };
+        if !self.book.realms.contains_key(&realm) {
+            let parked = self.fine_parked.entry(realm).or_default();
+            if parked.len() >= PARKED_TILES_MAX {
+                parked.remove(0);
+                self.counters.parked_dropped += 1;
+            }
+            parked.push((key, ts, lo, levels));
+            return ArtifactIngest::FineParked;
+        }
+        if self.hold_fine(realm, key, ts, lo, levels) { ArtifactIngest::FineTile } else { ArtifactIngest::Shape }
+    }
+
+    /// One fine tile's levels from `lo` into its realm's book, the book made with the head's own numbers on the first
+    /// tile; `false` where the tile's side is not the book's, its levels are not the side's, or they do not join the
+    /// levels held.
+    fn hold_fine(&mut self, realm: RealmId, key: TileKey, ts: u32, lo: u32, levels: Vec<Vec<i32>>) -> bool {
+        let Some(cache) = Arc::make_mut(&mut self.book).realms.get_mut(&realm) else {
+            return false;
+        };
+        let fresh = || FineBook::with_side(cache.head.edge, ts, cache.head.sea_m);
+        let Some(mut book) = cache.fine.as_deref().cloned().or_else(fresh).filter(|b| b.side_shift() == ts) else {
+            return false;
+        };
+        if !book.insert_from(key, lo, levels) {
+            return false;
+        }
+        let held = book.held_from(key).unwrap_or(lo) as u8;
+        cache.fine = Some(Arc::new(book));
+        cache.epoch += 1;
+        self.fine_held.push((realm, (key.face.index(), key.tx as u32, key.ty as u32, held)));
+        true
+    }
+
+    /// ★ THE FINE TILES HELD SINCE THE LAST CALL (ruling B81 Q3), by realm, for the client to state.
+    pub fn take_fine_held(&mut self) -> Vec<(RealmId, (u8, u32, u32, u8))> {
+        std::mem::take(&mut self.fine_held)
+    }
 }
+
+/// How many parts one fine tile may be cut into: the coder's worst case (four bytes a sample) over a 512 × 512 tile and
+/// its means is under 1.5 MB, 46 parts of 32 KiB; a count far past it is no tile.
+pub const MAX_FINE_PARTS: u32 = 64;
 
 /// A bound on the levels a head may state: an edge halves per level, and no lattice's edge halves
 /// more times than this ([`vd_terrain::macro_lattice::MACRO_EDGE_CEILING`] is 2 048 = 2¹¹).
@@ -703,14 +912,14 @@ mod tests {
     use vd_seed::bend::Face;
     use vd_terrain::artifact::{Artifact, TILE_EDGE};
     use vd_terrain::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
-    use vd_terrain::solve::{Schedule, solve_full};
+    use vd_terrain::solve::Schedule;
 
     fn moon() -> (vd_terrain::BodyDefinition, MacroLattice, Artifact) {
         let moon = home_moon();
         let words = home_moon_solve_words();
         let lattice = MacroLattice::of(&moon).expect("a lattice");
         let (state, facies, _) =
-            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact = Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
@@ -719,6 +928,178 @@ mod tests {
 
     fn realm() -> RealmId {
         RealmId::Planet(41)
+    }
+
+    /// A stated head over the moon's 68-node lattice, levels none, the sea at `sea_m` (no solve needed).
+    fn stated_head(realm: RealmId, sea_m: i16) -> BulkMsg {
+        BulkMsg::ArtifactHead {
+            realm,
+            world_tag: 1,
+            version: vd_terrain::artifact::ARTIFACT_VERSION,
+            edge: 68,
+            digest: [5, 6],
+            tiles_per_edge: 2,
+            levels: 0,
+            sea_m,
+            coast_parts: 0,
+            low_m: -100,
+            high_m: 100,
+        }
+    }
+
+    /// A fine tile's record `2^ts` cells wide, every level one height.
+    fn fine_record(ts: u32) -> Vec<u8> {
+        let levels: Vec<Vec<i32>> = (0..=vd_terrain::fine::read::MEAN_LEVELS)
+            .map(|k| vec![100 + k as i32; (1usize << (ts - k)) * (1usize << (ts - k))])
+            .collect();
+        let whole = vd_terrain::fine::tile::encode_levels(&levels, ts).expect("codes");
+        vd_terrain::fine::tile::range_record(&whole, 0, vd_terrain::fine::read::MEAN_LEVELS + 1).expect("a range")
+    }
+
+    /// The field a pick hands a build on the fine ground, or none while it waits or stands on the rough ground.
+    fn ready(pick: FieldPick) -> Option<SharedField> {
+        match pick {
+            FieldPick::Ready(field) => Some(field),
+            FieldPick::Rough(_) | FieldPick::Waiting => None,
+        }
+    }
+
+    /// The field a pick hands a build on the rough ground.
+    fn rough(pick: FieldPick) -> Option<SharedField> {
+        match pick {
+            FieldPick::Rough(field) => Some(field),
+            FieldPick::Ready(_) | FieldPick::Waiting => None,
+        }
+    }
+
+    /// ★ A FINE TILE IS ASSEMBLED, HELD AND READ (B2): its parts kept until whole, parked before its head and landed with
+    /// it; a level, a count or a record that is not one refused by shape, a side the book does not hold too; a chunk at
+    /// rungs 0–12 of a wet realm reads it through the fine field once every tile of its stencils is here and waits
+    /// before; a dry realm, a rung over 12 and a waiting pick stand as they were; a realm forgotten forgets its parts.
+    #[test]
+    fn a_fine_tile_is_assembled_held_and_read_and_a_chunk_waits_for_it() {
+        let wet = RealmId::Planet(77);
+        let record = fine_record(5);
+        let half = record.len() / 2;
+        let part = |part: u32, parts: u32, bytes: &[u8]| BulkMsg::FineTilePart {
+            realm: wet,
+            level: 1,
+            face: 2,
+            tx: 1,
+            ty: 1,
+            part,
+            parts,
+            bytes: bytes.to_vec(),
+        };
+        let mut rx = ArtifactReceiver::default();
+        assert_eq!(rx.accept(part(0, 2, &record[..half])), ArtifactIngest::FinePart);
+        assert_eq!(rx.accept(part(0, 2, &record[..half])), ArtifactIngest::Duplicate);
+        assert_eq!(rx.accept(part(1, 2, &record[half..])), ArtifactIngest::FineParked);
+        // By shape: another level, a face past six, a part past its count, a count past the bound, a record that is
+        // no record.
+        let shaped = |level: u8, face: u8, part: u32, parts: u32, bytes: Vec<u8>| BulkMsg::FineTilePart {
+            realm: wet,
+            level,
+            face,
+            tx: 0,
+            ty: 0,
+            part,
+            parts,
+            bytes,
+        };
+        for msg in [
+            shaped(2, 2, 0, 1, record.clone()),
+            shaped(1, 6, 0, 1, record.clone()),
+            shaped(1, 2, 1, 1, record.clone()),
+            shaped(1, 2, 0, MAX_FINE_PARTS + 1, record.clone()),
+            shaped(1, 2, 0, 1, vec![9, 9, 9]),
+        ] {
+            assert_eq!(rx.accept(msg), ArtifactIngest::Shape);
+        }
+        // A tile shipped again under another cut starts over.
+        assert_eq!(rx.accept(shaped(1, 2, 0, 3, record[..10].to_vec())), ArtifactIngest::FinePart);
+        assert_eq!(rx.accept(shaped(1, 2, 0, 1, record.clone())), ArtifactIngest::FineParked);
+        // The head lands the two parked tiles.
+        assert_eq!(rx.accept(stated_head(wet, 0)), ArtifactIngest::Head);
+        assert_eq!((rx.counters.fine_tiles, rx.counters.fine_parked), (2, 2));
+        let face = Face::from_index(2).expect("a face");
+        let cache = rx.book().get(wet).cloned().expect("a cache");
+        assert!(cache.fine().is_some_and(|b| b.holds(TileKey { face, tx: 1, ty: 1 })));
+        // A tile of another side is refused; a whole tile after the head is held.
+        let wider = fine_record(6);
+        let other = |tx: u32, bytes: &[u8]| BulkMsg::FineTilePart {
+            realm: wet,
+            level: 1,
+            face: 2,
+            tx,
+            ty: 1,
+            part: 0,
+            parts: 1,
+            bytes: bytes.to_vec(),
+        };
+        assert_eq!(rx.accept(other(2, &wider)), ArtifactIngest::Shape);
+        assert_eq!(rx.accept(other(3, &record)), ArtifactIngest::FineTile);
+        // ★ FAR COPIES FIRST (B86 item 3): a tile's coarse levels alone are held; finer levels join them below; levels that
+        // stop short of the coarsest a fresh tile needs are refused.
+        let levels = |lo: u32, hi: u32| {
+            let whole = vd_terrain::fine::tile::encode_levels(
+                &(0..=vd_terrain::fine::read::MEAN_LEVELS).map(|k| vec![100 + k as i32; (32usize >> k) * (32usize >> k)]).collect::<Vec<_>>(),
+                5,
+            )
+            .expect("codes");
+            vd_terrain::fine::tile::range_record(&whole, lo, hi).expect("a range")
+        };
+        let far = |tx: u32, ty: u32, bytes: &[u8]| BulkMsg::FineTilePart { realm: wet, level: 1, face: 2, tx, ty, part: 0, parts: 1, bytes: bytes.to_vec() };
+        let held_from = |rx: &ArtifactReceiver, tx: i32| rx.book().get(wet).and_then(|c| c.fine().and_then(|b| b.held_from(TileKey { face, tx, ty: 2 })));
+        assert_eq!(rx.accept(far(4, 2, &levels(3, 6))), ArtifactIngest::FineTile);
+        assert_eq!(held_from(&rx, 4), Some(3));
+        assert_eq!(rx.accept(far(4, 2, &levels(1, 3))), ArtifactIngest::FineTile);
+        assert_eq!(held_from(&rx, 4), Some(1));
+        assert_eq!(rx.accept(far(5, 2, &levels(0, 2))), ArtifactIngest::Shape);
+        assert_eq!(held_from(&rx, 5), None);
+        // The chunk at rung 0 over cells 6 199 … 6 262 both ways reads samples 45 … 51: the tile (1, 1) alone.
+        let cache = rx.book().get(wet).cloned().expect("a cache");
+        let inner: SharedField = Arc::new(TileCache::new(68));
+        let at = |rung: u8, x: i32| ChunkKey { face, rung, x, y: 100, z: 0 };
+        let wrapped = ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).expect("ready");
+        assert!(!Arc::ptr_eq(&wrapped, &inner));
+        assert_eq!(wrapped.fine_z(face, 0, 0, 6_230, 6_230), cache.fine().expect("a book").z(face, 0, 0, 6_230, 6_230));
+        // A chunk over a tile not held stands on the rough ground (B86 item 7): the field under the fine ground, and the
+        // cache's rough view reads the same chunk on it too; a rung over 12 and a waiting pick stand as they were.
+        assert!(ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 400))).is_none());
+        let under = rough(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 400))).expect("rough");
+        assert!(Arc::ptr_eq(&under, &inner));
+        let view = cache.rough_view();
+        assert_eq!((view.is_rough_view(), cache.is_rough_view()), (true, false));
+        assert!(Arc::ptr_eq(&ready(view.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).expect("ready"), &inner));
+        assert!(rough(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).is_none());
+        let kept = ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(13, 0))).expect("ready");
+        assert!(Arc::ptr_eq(&kept, &inner));
+        assert!(ready(cache.with_fine(FieldPick::Waiting, at(0, 100))).is_none());
+        // The rung's field reads the fine ground too, at rungs it serves.
+        let lattice = MacroLattice::of(&home_moon()).expect("a lattice");
+        let near = cache.field_at_rung(&lattice, 3).expect("a field");
+        assert_eq!(near.fine_z(face, 3, 3, 778, 778), cache.fine().expect("a book").z(face, 3, 3, 778, 778));
+        // A dry realm's chunk stands on its pick, with or without a book.
+        let dry = RealmId::Planet(78);
+        assert_eq!(rx.accept(stated_head(dry, vd_terrain::artifact::DRY_M)), ArtifactIngest::Head);
+        let dry_cache = rx.book().get(dry).cloned().expect("a cache");
+        let kept = ready(dry_cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).expect("ready");
+        assert!(Arc::ptr_eq(&kept, &inner));
+        // A wet realm with no tile yet waits, and its fine rungs' field is not here yet (a reader stands on a coarser level
+        // and reads again); over rung 12 the plain field answers.
+        let bare = RealmId::Planet(79);
+        assert_eq!(rx.accept(stated_head(bare, 0)), ArtifactIngest::Head);
+        let bare_cache = rx.book().get(bare).cloned().expect("a cache");
+        assert!(ready(bare_cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).is_none());
+        assert!(bare_cache.field_at_rung(&lattice, 3).is_none());
+        assert!(bare_cache.field_at_rung(&lattice, 13).is_some());
+        // A dry realm's fine rung answers its plain field.
+        assert!(dry_cache.field_at_rung(&lattice, 3).is_some());
+        // A realm forgotten forgets its parts.
+        assert_eq!(rx.accept(part(0, 2, &record[..half])), ArtifactIngest::FinePart);
+        rx.forget(wet);
+        assert_eq!(rx.accept(part(1, 2, &record[half..])), ArtifactIngest::FinePart);
     }
 
     fn head_of(artifact: &Artifact) -> BulkMsg {
@@ -1267,6 +1648,10 @@ mod tests {
                 // This statement ships no mask: its head announces none (`head_of`).
                 coast_parts: 0,
                 coasts_whole: 0,
+                // No fine part rides this statement.
+                fine_parts: 0,
+                fine_tiles: 0,
+                fine_parked: 0,
             }
         );
         // A new head with another digest starts the realm over — with a part still assembling,

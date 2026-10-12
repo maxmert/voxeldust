@@ -89,7 +89,8 @@ impl ArtifactTiles {
         // it, and the source's own body and reach read the band it sizes — the very band every client
         // builds from the same head. A range the ladder refuses keeps the recipe's band.
         let drawn = artifact.drawn_range_m(&lattice);
-        let body = body.with_band_m(drawn.0, drawn.1).unwrap_or(body);
+        // ★ AND THE FINE GROUND'S BAND (B2; ruling B83 item 3) where the 128 m level applies — the client's own rule.
+        let body = body.with_fine_band_m(drawn.0, drawn.1, artifact.sea_m).unwrap_or(body);
         ArtifactTiles {
             realm,
             world_tag,
@@ -205,7 +206,7 @@ impl TileSource for ArtifactTiles {
         self.parts.get_or_init(|| self.encode_parts()).clone()
     }
 
-    fn tiles_under(&self, dir: [f64; 3], radial_m: f64, interest_m: f64) -> Vec<(u8, u32, u32)> {
+    fn tiles_under(&self, dir: [f64; 3], radial_m: f64) -> Vec<(u8, u32, u32)> {
         // ★ THE TILES REACH WHERE THE CLIENT ASKS (ruling W17): the finest tile-reading rung's own
         // handover step floors the ring, and that step carries the FIELD's fold as well as the
         // octaves the coarser rung drops; the horizon is read from the eye's height over the ground
@@ -232,7 +233,7 @@ impl TileSource for ArtifactTiles {
                 self.step_m,
             ),
         };
-        self.tiles_within(dir, interest_m.max(reach_m))
+        self.tiles_within(dir, reach_m)
     }
 
     fn tile(&self, face: u8, tx: u32, ty: u32) -> Option<Bytes> {
@@ -396,12 +397,12 @@ mod tests {
             source.step_m,
         );
         assert_eq!(
-            source.tiles_under(pole, r + 20_000.0, 10.0),
+            source.tiles_under(pole, r + 20_000.0),
             source.tiles_within(pole, reach)
         );
         assert_eq!(
             source
-                .tiles_under([0.0, 0.0, 1.0], r + 20_000.0, 10.0)
+                .tiles_under([0.0, 0.0, 1.0], r + 20_000.0)
                 .len(),
             1
         );
@@ -409,16 +410,10 @@ mod tests {
         // four tiles of +Z are all there, and the reach is bounded by the ladder's outer edge, so
         // the count is more than four and less than the whole cube.
         let per_face = usize::try_from(artifact.tiles_per_edge().pow(2)).expect("small");
-        for (name, tiles) in [
-            (
-                "200 km up",
-                source.tiles_under([0.0, 0.0, 1.0], r + 200_000.0, 10.0),
-            ),
-            (
-                "300 km of interest",
-                source.tiles_under([0.0, 0.0, 1.0], r, 300_000.0),
-            ),
-        ] {
+        for (name, tiles) in [(
+            "200 km up",
+            source.tiles_under([0.0, 0.0, 1.0], r + 200_000.0),
+        )] {
             assert!(tiles.len() > 4, "{name}: {tiles:?}");
             assert!(tiles.len() < 6 * per_face, "{name}: {tiles:?}");
             for tile in &under {
@@ -430,7 +425,7 @@ mod tests {
         let far = source.tiles_within([0.0, 0.0, -1.0], 10.0);
         assert_eq!(far[0].0, Face::NegZ.index());
         // No direction at all stands under no tile.
-        assert!(source.tiles_under([0.0, 0.0, 0.0], r, 10.0).is_empty());
+        assert!(source.tiles_under([0.0, 0.0, 0.0], r).is_empty());
         let tile = source.tile(Face::PosZ.index(), 1, 1).expect("a tile");
         assert_eq!(
             postcard::from_bytes::<BulkMsg>(&tile).expect("decodes"),

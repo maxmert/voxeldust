@@ -2,8 +2,8 @@
 //! §5; the investigation's `05_climate_biomes_weather.md` §4–§5.6; `03_erosion_rivers.md` §4.5, §4.9).
 //!
 //! A climate is what the air does on average over a body. The solve needs it because relief and
-//! rain are a loop: mountains lift the air and make rain, rain cuts the mountains. So every
-//! `CLIMATE_EVERY` passes the climate is recomputed over the relief AS IT THEN STANDS, as a closed
+//! rain are a loop: mountains lift the air and make rain, rain cuts the mountains. So at every
+//! pass (ruling B69 item 1) the climate is recomputed over the relief AS IT THEN STANDS, as a closed
 //! form over the macro lattice — no heap, no order, `O(1)` a node (03 §4.5 requires it: an upwind
 //! march would be the solve's dominant cost). Its rows, each from charter words by a published law
 //! with a calibration body (ruling T9):
@@ -680,13 +680,26 @@ pub fn surface_wind(circulation: Circulation, d: [Gf; 3]) -> [Gf; 3] {
 /// against the wind; the first slot on a tie (the zero wind at the pole).
 #[must_use]
 pub fn upwind_slot(lattice: &MacroLattice, node: u32, d: [Gf; 3], wind: [Gf; 3]) -> u8 {
+    let around = lattice.neighbours(node);
+    let dirs = around.map(|m| {
+        if m == NO_NODE {
+            [Gf::ZERO; 3]
+        } else {
+            dir_of(lattice.direction(m))
+        }
+    });
+    upwind_pick(&around, &dirs, d, wind)
+}
+
+/// [`upwind_slot`] over the neighbours `around` (in the stencil's order) and their directions `dirs`.
+fn upwind_pick(around: &[u32; 8], dirs: &[[Gf; 3]; 8], d: [Gf; 3], wind: [Gf; 3]) -> u8 {
     let mut best = 0u8;
     let mut best_dot = Gf::from_f64(f64::MAX);
-    for (slot, m) in lattice.neighbours(node).iter().enumerate() {
+    for (slot, m) in around.iter().enumerate() {
         if *m == NO_NODE {
             continue;
         }
-        let dm = dir_of(lattice.direction(*m));
+        let dm = dirs[slot];
         let against = dot([dm[0] - d[0], dm[1] - d[1], dm[2] - d[2]], wind);
         if against < best_dot {
             best_dot = against;
@@ -768,21 +781,26 @@ pub fn climate_on(
     let n = lattice.node_count();
     let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
     let mut out = Climate {
-        temperature_dk: Vec::with_capacity(n),
-        rain_mm_yr: Vec::with_capacity(n),
-        aridity_q8: Vec::with_capacity(n),
-        pet_mm_yr: Vec::with_capacity(n),
-        runoff_mm_yr: Vec::with_capacity(n),
-        frost_z: Vec::with_capacity(n),
-        ela_z: Vec::with_capacity(n),
-        upwind: Vec::with_capacity(n),
+        temperature_dk: Vec::new(),
+        rain_mm_yr: Vec::new(),
+        aridity_q8: Vec::new(),
+        pet_mm_yr: Vec::new(),
+        runoff_mm_yr: Vec::new(),
+        frost_z: Vec::new(),
+        ela_z: Vec::new(),
+        upwind: Vec::new(),
         lapse_mk_km: (laws.lapse_k_m * Gf::from_i64(1_000_000) + Gf::HALF)
             .to_i64_floor()
             .clamp(0, i64::from(u32::MAX)) as u32,
     };
+    // ★ EVERY NODE'S DIRECTION ONCE, ON THE SOLVE'S CORES (ruling B72 item 1): a node's own, its neighbours' for the
+    // upwind slot and the two ends of its chord were each bent again from the lattice, about eleven bends a node — most
+    // of a climate's work (the profile of 2026-10-09). The bends are the lattice's own, so every value is the one the
+    // bends gave; the table lives for this call (24 bytes a node, 213 MB on the home planet).
+    let dirs: Vec<[Gi; 3]> = crate::par::map(n, cores.threads(), |i| lattice.direction(i as u32));
     let cells = crate::par::map(n, cores.threads(), |i| {
         let node = i as u32;
-        let d = dir_of(lattice.direction(node));
+        let d = dir_of(dirs[i]);
         let sin_lat = d[POLE_AXIS];
         // ★ THE AIR OVER WATER STANDS AT THE WATER'S OWN SURFACE, never at the floor under it: a
         // node four kilometres down on the abyssal plain carries the sea's air, not air four
@@ -793,11 +811,22 @@ pub fn climate_on(
         let t_k = temperature_k(&laws, sin_lat, height_m);
         let (rain, slot) = if laws.rains {
             let wind = surface_wind(laws.circulation, d);
-            let slot = upwind_slot(lattice, node, d, wind);
-            let m = lattice.neighbours(node)[usize::from(slot)];
+            let around = lattice.neighbours(node);
+            let near = around.map(|m| {
+                if m == NO_NODE {
+                    [Gf::ZERO; 3]
+                } else {
+                    dir_of(dirs[m as usize])
+                }
+            });
+            let slot = upwind_pick(&around, &near, d, wind);
+            let m = around[usize::from(slot)];
             let up_z = air_over(z, sea, m as usize);
             let rise_m = Gf::from_i64(i64::from(air_z) - i64::from(up_z)) / steps;
-            let chord = Gf::from_i64(i64::from(lattice.chord_m(node, m).max(1)));
+            let chord = Gf::from_i64(i64::from(
+                crate::macro_lattice::chord_between(lattice.radius_m(), dirs[i], dirs[m as usize])
+                    .max(1),
+            ));
             let (_, from_rising) = cell_position(laws.circulation, sin_lat.abs());
             let mm = supply_mm_yr(t_k) * belt_factor(from_rising) * lift_factor(rise_m, chord);
             let rain = (mm + Gf::HALF)
@@ -827,16 +856,16 @@ pub fn climate_on(
             upwind: slot,
         }
     });
-    for c in cells {
-        out.temperature_dk.push(c.temperature_dk);
-        out.rain_mm_yr.push(c.rain_mm_yr);
-        out.aridity_q8.push(c.aridity_q8);
-        out.pet_mm_yr.push(c.pet_mm_yr);
-        out.runoff_mm_yr.push(c.runoff_mm_yr);
-        out.frost_z.push(c.frost_z);
-        out.ela_z.push(c.ela_z);
-        out.upwind.push(c.upwind);
-    }
+    // ★ Each row gathered from the nodes' climates ON THE SOLVE'S CORES (ruling B72 item 1).
+    let threads = cores.threads();
+    out.temperature_dk = crate::par::map(n, threads, |i| cells[i].temperature_dk);
+    out.rain_mm_yr = crate::par::map(n, threads, |i| cells[i].rain_mm_yr);
+    out.aridity_q8 = crate::par::map(n, threads, |i| cells[i].aridity_q8);
+    out.pet_mm_yr = crate::par::map(n, threads, |i| cells[i].pet_mm_yr);
+    out.runoff_mm_yr = crate::par::map(n, threads, |i| cells[i].runoff_mm_yr);
+    out.frost_z = crate::par::map(n, threads, |i| cells[i].frost_z);
+    out.ela_z = crate::par::map(n, threads, |i| cells[i].ela_z);
+    out.upwind = crate::par::map(n, threads, |i| cells[i].upwind);
     out
 }
 

@@ -50,6 +50,7 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a};
 use vd_seed::seam::{Edge, across, partner_of};
 
 use crate::climate::Climate;
+use crate::fine::read::FineZ;
 use crate::macro_lattice::{MacroLattice, NO_NODE};
 use crate::solve::{MacroSolve, Z_STEPS_PER_M};
 use crate::units::{LENGTH_BITS, STEPS_PER_M};
@@ -562,6 +563,15 @@ pub trait ZField {
     /// **Example.** The headland on the belt's coast is LAND by its own fine word, whether the host
     /// holds the headland's tile or only the far view's level and the mask.
     fn water_side(&self, node: u32) -> Option<Side>;
+    /// ★ THE FINE GROUND (B1 (g), [`crate::fine::read`]): the height a chunk at `draw_rung` draws at the centre of the
+    /// cell `(i, j)` of `cell_rung` on `face`, from the finished 128 m tiles the field holds. A field with no fine book
+    /// answers [`FineZ::Outside`], so today's read stands.
+    ///
+    /// **Example.** The client's field over the belt holds the belt's finished tiles: a rung-9 column there reads their
+    /// 512 m means; the home moon's field holds none and reads its macro rows as before.
+    fn fine_z(&self, _face: Face, _draw_rung: u8, _cell_rung: u8, _i: i32, _j: i32) -> FineZ {
+        FineZ::Outside
+    }
 }
 
 impl ZField for Artifact {
@@ -1061,6 +1071,119 @@ pub fn tile_reach_m(
     ring_m + 2.0 * lattice.node_m()
 }
 
+/// ★ HOW FAR THE FINE TILES MUST REACH (the fine ground's way in, B2) under an eye standing `radial_m` from the body's
+/// centre over ground at `ground_m`: the coarsest rung that reads them (`top_rung`; rung 12 for the 128 m level, B83 item
+/// 2) out to its own ask ring — the tier rule's switch distance at the ask's outer edge and slack, as [`tile_reach_m`]
+/// reads the artifact's — bounded by how far the ground can be seen ([`reach_m`]); then ONE CHUNK OF THAT RUNG past it
+/// (`chunk_m`: a chunk at the ring's edge builds only once its coarser parents can, and a parent stands up to one chunk
+/// past its child) and one fine tile (`tile_m`) for the stencil. The shard names the fine tiles within this of the
+/// occupant's direction, nearest first.
+///
+/// MEASURED before the chunk's span was added (the first window stand, 2026-10-12): the reach was the seen ring and one
+/// tile (508 km); the rung-11 chunks at the ring's edge waited on rung-12 parents reading tiles 640–770 km out, never
+/// named, so the coarse stand-ins over them never sank and the 8 km field stood over the solved valleys as flat sheets.
+///
+/// ★ THE ASK IS A DISTANCE FROM THE EYE (2026-10-12, ruling B87's first headless check): the ladder asks a rung's chunk
+/// only within the rung's ask distance of the EYE, so over the ground the ring reaches only as far across as that distance
+/// leaves past the eye's height over the tallest ground, `√(asked² − height²)`, and not at all when the eye stands higher
+/// than the ask distance (`None`). MEASURED before (the rule read the ask distance along the ground alone): a pilot
+/// aboard a hull on the home planet was also named thousands of a far planet's tiles, millions of kilometres off, which
+/// its shard solved and the gateway served in the beat's budget while the pilot's own planet's tiles waited. `ground_m`
+/// is the lowest ground's distance from the centre (the horizon), `top_m` the highest's (the eye's least height); a host
+/// that reads no tile passes the band's ends, and its ring holds the client's.
+///
+/// **Example.** A pilot stands on the home planet's belt: the ground is seen to about 450 km (the horizon and the
+/// tallest summit's own), so the shard names the 128 m tiles within about 770 km, nearest first; from 5 000 km up it
+/// names none.
+#[must_use]
+pub fn fine_reach_m(
+    top_rung: u8,
+    (ground_m, top_m): (f64, f64),
+    relief_m: f64,
+    radial_m: f64,
+    pixel_rad: f64,
+    (chunk_m, tile_m): (f64, f64),
+) -> Option<f64> {
+    let asked = switch_m(top_rung, pixel_rad) * ASK_HYSTERESIS_OUT * (1.0 + ASK_SLACK);
+    let seen = reach_m(ground_m, floored_altitude_m(radial_m - ground_m), relief_m);
+    let height = radial_m - top_m;
+    let height = if height > 0.0 { height } else { 0.0 };
+    if height >= asked {
+        return None;
+    }
+    let across = (asked * asked - height * height).sqrt();
+    // The comparison is written out: `f64::min` is disallowed here (SL10 clause 4).
+    Some((if seen < across { seen } else { across }) + chunk_m + tile_m)
+}
+
+/// ★ THE FINE TILES A VIEW READS, EACH WITH THE FINEST LEVEL IT READS THEM AT (rulings B86 item 3 and B87: by the
+/// distance alone, whatever realm the viewer stands in) — ONE HOME for the realm's shard, which names, solves and answers
+/// them, and the gateway, which serves each session from its cache. Level `k` is read by rung `7 + k` out to that rung's
+/// own reach ([`fine_reach_m`]: its ask edge bounded by the ground the eye sees, one chunk of the rung and one tile past
+/// it); each tile is named once, with the finest level whose reach names it, the nearest first. `ground_m` is the ground's
+/// distance from the centre under the eye (the shard reads its artifact; the gateway, which reads no tile, passes the
+/// lowest ground, so its reach holds the shard's), `relief_m` the tallest ground over the radius.
+///
+/// **Example.** A pilot 10 m over the home belt reads the tiles within ~217 km whole (level 0), out to ~368 km from level
+/// 1, and the rest of the ring to ~770 km as their coarse copies only.
+#[must_use]
+pub fn fine_needs(
+    lattice: &MacroLattice,
+    dir: [f64; 3],
+    radial_m: f64,
+    (ground_m, top_m): (f64, f64),
+    relief_m: f64,
+    pixel_rad: f64,
+) -> Vec<((u8, u32, u32), u8)> {
+    use crate::fine::l1::{L1_RUNG, TILE_NODES};
+    use crate::fine::read::L1_TOP_RUNG;
+    let tile_m = lattice.node_m() * f64::from(TILE_NODES);
+    let reach = |k: u8| {
+        let rung = L1_RUNG + k;
+        let chunk_m = crate::chunk::CHUNK_EDGE as f64 * f64::from(vd_seed::ladder::cell_m(rung));
+        fine_reach_m(rung, (ground_m, top_m), relief_m, radial_m, pixel_rad, (chunk_m, tile_m))
+    };
+    let top = L1_TOP_RUNG - L1_RUNG;
+    // A coarser level reaches at least as far as a finer one: no reach at the coarsest names nothing.
+    let Some(widest) = reach(top) else {
+        return Vec::new();
+    };
+    let names = tiles_within_of(lattice, dir, widest, TILE_NODES as u32);
+    let mut need: BTreeMap<(u8, u32, u32), u8> = names.iter().map(|&n| (n, top)).collect();
+    for k in (0..top).rev() {
+        let Some(r) = reach(k) else {
+            break;
+        };
+        for n in tiles_within_of(lattice, dir, r, TILE_NODES as u32) {
+            if let Some(level) = need.get_mut(&n) {
+                *level = k;
+            }
+        }
+    }
+    names.into_iter().map(|n| (n, need.get(&n).copied().unwrap_or(top))).collect()
+}
+
+/// ★ THE FINE TILES A VIEW OF `body` READS, from the three numbers its artifact's head states — the drawn ground's lowest
+/// and highest metres and the sea (ruling B87): the ONE call the realm's shard and the gateway both make, so both name
+/// the same tiles at the same levels for the same view, and no session ever waits on a level the shard never answers.
+/// The eye's ground is the band's lowest ground (the gateway reads no tile), so the reach holds the client's own, which
+/// reads the ground under the eye. Empty for a body with no lattice or where the level does not apply.
+#[must_use]
+pub fn fine_needs_of_head(
+    body: &crate::BodyDefinition,
+    (low_m, high_m, sea_m): (i32, i32, i16),
+    dir: [f64; 3],
+    radial_m: f64,
+    pixel_rad: f64,
+) -> Vec<((u8, u32, u32), u8)> {
+    let Some(lattice) = body.macro_lattice().filter(|_| crate::fine::read::applies(sea_m)) else {
+        return Vec::new();
+    };
+    let (low, high) = body.with_fine_band_m(low_m, high_m, sea_m).unwrap_or(*body).ground_range_m();
+    let r = body.radius_m();
+    fine_needs(&lattice, dir, radial_m, (r + low, r + high), high, pixel_rad)
+}
+
 /// ★ THE TILES WITHIN `radius_m` OF THE UNIT DIRECTION `dir`, the nearest first (2026-09-20, the
 /// one tile path): the face the direction falls on, the node under it, and every tile a node
 /// within the reach along that face's axes lies in — ACROSS A CUBE EDGE TOO (2026-09-21): the
@@ -1077,6 +1200,13 @@ pub fn tile_reach_m(
 /// under the seam builds at the fine rungs instead of standing at the coarser one.
 #[must_use]
 pub fn tiles_within(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64) -> Vec<(u8, u32, u32)> {
+    tiles_within_of(lattice, dir, radius_m, TILE_EDGE)
+}
+
+/// [`tiles_within`] for tiles of `tile_nodes` nodes a side (B2: the 128 m tiles are eight nodes, the artifact's 64) —
+/// the one walk and the one order for every tile size, so a fine tile is named by the very rule an artifact tile is.
+#[must_use]
+pub fn tiles_within_of(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64, tile_nodes: u32) -> Vec<(u8, u32, u32)> {
     use vd_seed::bend::{BASIS, face_of, unbend};
     use vd_seed::ladder::index_of;
     let face = face_of(dir);
@@ -1108,7 +1238,7 @@ pub fn tiles_within(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64) -> Vec
         // The range always holds the node under the direction, which is inside the face, so the
         // inside part is never empty.
         let (in_lo, in_hi) = (lo.max(0), hi.min(n - 1));
-        out.extend((in_lo..=in_hi).step_by(TILE_EDGE as usize));
+        out.extend((in_lo..=in_hi).step_by(tile_nodes as usize));
         out.push(in_hi);
         out.extend(n.max(lo)..=hi);
         out
@@ -1116,7 +1246,7 @@ pub fn tiles_within(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64) -> Vec
     let mut set = BTreeSet::new();
     for jj in walk(j_lo, j_hi) {
         for ii in walk(i_lo, i_hi) {
-            set.insert(tile_of_node(edge, node_at(lattice, face, ii, jj)));
+            set.insert(tile_of_node_of(edge, node_at(lattice, face, ii, jj), tile_nodes));
         }
     }
     let mut out: Vec<(u8, u32, u32)> = set.into_iter().collect();
@@ -1124,10 +1254,8 @@ pub fn tiles_within(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64) -> Vec
     // measure that serves a partner face's tile as well as this face's.
     let unit = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
     let away = |&(f, tx, ty): &(u8, u32, u32)| -> f64 {
-        let (cx, cy) = (
-            (tx * TILE_EDGE + tile_width(edge, tx) / 2) as i32,
-            (ty * TILE_EDGE + tile_width(edge, ty) / 2) as i32,
-        );
+        let width = |t: u32| (edge - t * tile_nodes).min(tile_nodes);
+        let (cx, cy) = ((tx * tile_nodes + width(tx) / 2) as i32, (ty * tile_nodes + width(ty) / 2) as i32);
         let face = Face::from_index(f).unwrap_or(face);
         let d = lattice.direction(lattice.index(face, cx, cy));
         let len = (0..3)
@@ -1240,11 +1368,17 @@ pub fn sample_province(
 /// The tile a global node index lies in: `(face, tx, ty)`.
 #[must_use]
 pub fn tile_of_node(edge: u32, node: u32) -> (u8, u32, u32) {
+    tile_of_node_of(edge, node, TILE_EDGE)
+}
+
+/// [`tile_of_node`] for tiles of `tile_nodes` nodes a side.
+#[must_use]
+pub fn tile_of_node_of(edge: u32, node: u32, tile_nodes: u32) -> (u8, u32, u32) {
     let per_face = edge * edge;
     let face = (node / per_face) as u8;
     let rest = node % per_face;
     let (i, j) = (rest % edge, rest / edge);
-    (face, i / TILE_EDGE, j / TILE_EDGE)
+    (face, i / tile_nodes, j / tile_nodes)
 }
 
 /// ★ THE NODES A CHUNK READS: every node of the sixteen-node stencil of any column of the chunk or
@@ -1892,13 +2026,13 @@ pub fn slope_share(
 mod tests {
     use super::*;
     use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words, home_solve_words};
-    use crate::solve::{FACIES_SEA, Schedule, SolveWords, solve_full};
+    use crate::solve::{FACIES_SEA, Schedule, SolveWords};
 
     fn moon_artifact(words: &SolveWords) -> (MacroSolve, Artifact) {
         let moon = home_moon();
         let lattice = MacroLattice::of(&moon).expect("a lattice");
         let (state, facies, _) =
-            solve_full(&moon, words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let climate =
             crate::climate::climate(&moon, &lattice, words, &state.z, Some(state.sea_view()));
         let artifact = Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
@@ -2451,7 +2585,7 @@ mod tests {
         // over the same field with two hollows dug into it (`crate::solve::dug`).
         let moon = home_moon();
         let (mut wet_state, _, _) =
-            solve_full(&moon, &wet_words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+            crate::test_solves::solved(&moon, &wet_words, Schedule::standard(HOME_SYSTEM_AGE_YR));
         let (wet_climate, _) = crate::solve::dug::two_hollows(&moon, &wet_words, &mut wet_state);
         let wet_facies = wet_state.facies(&vec![false; wet_state.node_count()], 0, true);
         let wet = Artifact::of(&wet_state, &wet_facies, &wet_climate, true);

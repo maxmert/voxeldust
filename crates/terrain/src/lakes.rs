@@ -81,7 +81,7 @@ use vd_seed::rng::child_seed;
 
 use crate::climate::Climate;
 use crate::macro_lattice::NO_NODE;
-use crate::solve::{DRY, MacroSolve, OUTLETS_WITHOUT_SEA, Z_STEPS_PER_M, steeper};
+use crate::solve::{DRY, MacroSolve, Z_STEPS_PER_M, steeper};
 
 /// No depression.
 pub const NO_DEP: u32 = u32::MAX;
@@ -306,7 +306,7 @@ fn leaf(v: u32, z_v: i32) -> Depression {
 
 /// ★ THE ROOT: every node of the CONNECTED OCEAN ([`MacroSolve::ocean`]; 2026-09-24, ruling B7 item
 /// 1), or — on a body whose water settled no ocean — the same six lowest nodes the routing takes
-/// ([`OUTLETS_WITHOUT_SEA`]), so the hierarchy and the receivers agree about where the water
+/// ([`crate::solve::OUTLETS_WITHOUT_SEA`]), so the hierarchy and the receivers agree about where the water
 /// leaves. Returns the root mask, THE FLATS of the ground ([`flats`]), and every other node in the
 /// SWEEP'S ORDER: lowest first by `(height, potential on its flat, index)`.
 ///
@@ -317,18 +317,30 @@ fn leaf(v: u32, z_v: i32) -> Depression {
 fn root_and_order(state: &MacroSolve) -> (Vec<bool>, Flats, Vec<u32>) {
     let n = state.node_count();
     let z = &state.z;
+    let threads = state.cores.threads();
     let mut root = state.ocean.clone();
-    let mut order: Vec<u32> = (0..n as u32).filter(|&i| !root[i as usize]).collect();
-    order.sort_unstable_by_key(|&v| (z[v as usize], v));
-    if order.len() == n {
-        let seeds = OUTLETS_WITHOUT_SEA.min(order.len());
-        for &v in order.iter().take(seeds) {
+    if !root.contains(&true) {
+        for v in crate::solve::outlets_without_sea(z) {
             root[v as usize] = true;
         }
-        order.drain(0..seeds);
     }
     let flats = flats(state, &root);
-    order.sort_unstable_by_key(|&v| (z[v as usize], flats.phi[v as usize], v));
+    // ★ THE SWEEP'S ORDER ON THE SOLVE'S CORES (ruling B72 item 1): every node's key is its height (its sign bit
+    // flipped, so the words order as the heights do), its potential and its index in one word — unique, so the cores'
+    // sort is the one order one core's sort gives ([`crate::par::sort_keys`]).
+    let keys: Vec<u128> = crate::par::join(crate::par::per_range(n, threads, |r| {
+        r.filter(|&v| !root[v])
+            .map(|v| {
+                (u128::from((z[v] as u32) ^ 0x8000_0000) << 96)
+                    | (u128::from(flats.phi[v]) << 32)
+                    | v as u128
+            })
+            .collect::<Vec<u128>>()
+    }));
+    let order = crate::par::sort_keys(keys, threads)
+        .into_iter()
+        .map(|k| k as u32)
+        .collect();
     (root, flats, order)
 }
 
@@ -389,14 +401,27 @@ fn flats(state: &MacroSolve, root: &[bool]) -> Flats {
     let mut members: Vec<u32> = Vec::new();
     let mut stack: Vec<u32> = Vec::new();
     let on_flat = |m: u32, z0: i32| (m != NO_NODE) && !root[m as usize] && z[m as usize] == z0;
-    for start in 0..n as u32 {
+    // ★ THE NODES THAT START A FLAT, found ON THE SOLVE'S CORES (ruling B72 item 1): a node off the root with a
+    // neighbour of its own height; each range's finds join in index order, so the flats are met in the order one core
+    // meets them.
+    let starts: Vec<u32> = crate::par::per_range(n, state.cores.threads(), |r| {
+        r.filter(|&v| {
+            !root[v]
+                && state
+                    .lattice
+                    .neighbours(v as u32)
+                    .iter()
+                    .any(|&m| on_flat(m, z[v]))
+        })
+        .map(|v| v as u32)
+        .collect::<Vec<u32>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    for start in starts {
         let z0 = z[start as usize];
-        let flat_here = state
-            .lattice
-            .neighbours(start)
-            .iter()
-            .any(|&m| on_flat(m, z0));
-        if seen[start as usize] | root[start as usize] | !flat_here {
+        if seen[start as usize] {
             continue;
         }
         members.clear();
@@ -663,17 +688,18 @@ fn descent_over(state: &MacroSolve, order: &[u32], flats: &Flats) -> Descent {
     let n = state.node_count();
     // ★ EACH NODE'S WAY DOWN ON THE SOLVE'S CORES (ruling B64): it reads only the ground and the flats, never another
     // node's way, so the nodes of `order` are cut into ranges, each computed by its own thread, and joined in order.
-    let picks: Vec<u32> = crate::par::per_range(order.len(), state.cores.threads(), |r| {
-        let mut cands: Vec<(u32, u64)> = Vec::with_capacity(8);
-        let mut ring: Vec<(u32, i64)> = Vec::with_capacity(8);
-        order[r]
-            .iter()
-            .map(|&v| way_down(state, flats, v, &mut cands, &mut ring))
-            .collect::<Vec<u32>>()
-    })
-    .into_iter()
-    .flatten()
-    .collect();
+    let picks: Vec<u32> = crate::par::join(crate::par::per_range(
+        order.len(),
+        state.cores.threads(),
+        |r| {
+            let mut cands: Vec<(u32, u64)> = Vec::with_capacity(8);
+            let mut ring: Vec<(u32, i64)> = Vec::with_capacity(8);
+            order[r]
+                .iter()
+                .map(|&v| way_down(state, flats, v, &mut cands, &mut ring))
+                .collect::<Vec<u32>>()
+        },
+    ));
     // Where each descent ends, in the sweep's order (a node's way down comes before it).
     let mut down = vec![NO_NODE; n];
     let mut end: Vec<u32> = (0..n as u32).collect();
@@ -755,6 +781,99 @@ fn way_down(
     best
 }
 
+/// ★ WHAT THE SWEEP MEETS AT EACH NODE (ruling B72 item 1): for every node of the sweep's order, the
+/// neighbours done before it — a root, or a node earlier in the order — in the stencil's order, each
+/// with the node's drop to it and the chord between them, and the node's two rates ([`rates`]). None
+/// of it reads what the sweep makes, so the solve's cores compute it first, each a range of the
+/// order, and the sweep, which must go one node after another, reads it in order.
+///
+/// **Example.** A node on the belt's flank has five neighbours lower than itself and three higher:
+/// the cores list the five with their drops and chords before the sweep starts, and the sweep only
+/// asks which hollow each of the five belongs to now.
+struct Before {
+    /// Every node's place in the order — a root's the order's length, where the sweep keeps the
+    /// root's water.
+    slot: Vec<u32>,
+    /// Where each node's neighbours start in `met`, and one more: the end.
+    at: Vec<usize>,
+    /// The neighbours met: the node, its place, the drop to it (sixteenths) and the chord (whole
+    /// metres).
+    met: Vec<(u32, u32, i32, u32)>,
+    /// The place of each node's own way down ([`Descent::down`]; `u32::MAX` at a pit).
+    down: Vec<u32>,
+    /// Each node's supply and deficit.
+    rate: Vec<(u128, u128)>,
+}
+
+impl Before {
+    /// The lists for `order` over the `root` and the `descent` (see [`Before`]).
+    fn of(
+        state: &MacroSolve,
+        climate: &Climate,
+        root: &[bool],
+        order: &[u32],
+        descent: &Descent,
+    ) -> Before {
+        let z = &state.z;
+        let threads = state.cores.threads();
+        let mut slot = vec![order.len() as u32; state.node_count()];
+        for (k, &v) in order.iter().enumerate() {
+            slot[v as usize] = k as u32;
+        }
+        let parts = crate::par::per_range(order.len(), threads, |r| {
+            let mut count = Vec::with_capacity(r.len());
+            let mut met = Vec::new();
+            let mut down = Vec::with_capacity(r.len());
+            let mut rate = Vec::with_capacity(r.len());
+            for k in r {
+                let v = order[k];
+                let iv = v as usize;
+                let first = met.len();
+                for m in state.lattice.neighbours(v) {
+                    if (m != NO_NODE) && (root[m as usize] | (slot[m as usize] < k as u32)) {
+                        let mi = m as usize;
+                        met.push((m, slot[mi], z[iv] - z[mi], state.chord_m(v, m)));
+                    }
+                }
+                count.push(met.len() - first);
+                let way = descent.down[iv];
+                down.push(if way == NO_NODE {
+                    u32::MAX
+                } else {
+                    slot[way as usize]
+                });
+                rate.push(rates(state, climate, iv));
+            }
+            (count, met, down, rate)
+        });
+        let mut at = Vec::with_capacity(order.len() + 1);
+        at.push(0);
+        for (count, _, _, _) in &parts {
+            for &c in count {
+                at.push(at[at.len() - 1] + c);
+            }
+        }
+        let (mut met, mut down, mut rate) = (Vec::new(), Vec::new(), Vec::new());
+        for (_, mut m, mut d, mut r) in parts {
+            met.append(&mut m);
+            down.append(&mut d);
+            rate.append(&mut r);
+        }
+        Before {
+            slot,
+            at,
+            met,
+            down,
+            rate,
+        }
+    }
+
+    /// The neighbours met at the `k`-th node of the order.
+    fn met(&self, k: usize) -> &[(u32, u32, i32, u32)] {
+        &self.met[self.at[k]..self.at[k + 1]]
+    }
+}
+
 /// One root met at a node of the sweep, and its steepest lower neighbour there: the gate the
 /// water from the other side enters it by.
 #[derive(Clone, Copy)]
@@ -778,35 +897,29 @@ pub fn budget(state: &MacroSolve, climate: &Climate) -> Lakes {
     let n = state.node_count();
     let z = &state.z;
     let (root, flats, order) = root_and_order(state);
-    let mut home = vec![NO_DEP; n];
-    let mut done = vec![false; n];
     let mut deps = vec![leaf(NO_NODE, i32::MAX)];
     deps[0].spill_z = i32::MAX;
     let mut link = vec![OCEAN];
     let mut saddles: Vec<Saddle> = Vec::new();
-    for i in 0..n {
-        if root[i] {
-            home[i] = OCEAN;
-            done[i] = true;
-        }
-    }
     // 0. THE WATER'S WAY DOWN THE GROUND, first: it reads the sweep's order and the flats and
     //    nothing the sweep makes, and the sweep's saddles read it.
     let descent = descent_over(state, &order, &flats);
     drop(flats);
-    // 1. THE SWEEP, lowest first: the hierarchy, and at every merge the gate of each side.
+    let before = Before::of(state, climate, &root, &order, &descent);
+    // 1. THE SWEEP, lowest first: the hierarchy, and at every merge the gate of each side. ★ Each
+    //    node's depression is kept BY ITS PLACE IN THE ORDER (ruling B72 item 1): the sweep writes
+    //    them one after another and reads its neighbours' from one compact list — the root's water
+    //    at the list's end — and every node's own is gathered from it once the sweep ends.
+    let mut held = vec![NO_DEP; order.len() + 1];
+    held[order.len()] = OCEAN;
     let mut met: Vec<Met> = Vec::with_capacity(8);
-    for &v in &order {
+    for (k, &v) in order.iter().enumerate() {
         let iv = v as usize;
         let z_v = z[iv];
         met.clear();
-        for m in state.lattice.neighbours(v) {
-            if m == NO_NODE || !done[m as usize] {
-                continue;
-            }
-            let r = find(&mut link, home[m as usize]);
-            let dz = i64::from(z_v) - i64::from(z[m as usize]);
-            let chord = state.chord_m(v, m);
+        for &(m, slot, dz, chord) in before.met(k) {
+            let r = find(&mut link, held[slot as usize]);
+            let dz = i64::from(dz);
             match met.iter_mut().find(|k| k.root == r) {
                 Some(k) => {
                     if steeper(dz, chord, m, k.dz, k.chord, k.gate) {
@@ -836,7 +949,7 @@ pub fn budget(state: &MacroSolve, climate: &Climate) -> Lakes {
                 //   the rest steepest first. Off a flat the descent IS the steepest way; on a flat
                 //   every side ties at no drop, and the node's water takes the flat step.
                 let way = descent.down[iv];
-                let r = find(&mut link, home[way as usize]);
+                let r = find(&mut link, held[before.down[k] as usize]);
                 for k in met.iter_mut().filter(|k| k.root == r) {
                     (k.gate, k.dz, k.chord) = (
                         way,
@@ -868,16 +981,13 @@ pub fn budget(state: &MacroSolve, climate: &Climate) -> Lakes {
                 acc.root
             }
         };
-        add_cell(
-            &mut deps,
-            holder,
-            z_v,
-            state.area[iv],
-            rates(state, climate, iv),
-        );
-        home[iv] = holder;
-        done[iv] = true;
+        add_cell(&mut deps, holder, z_v, state.area[iv], before.rate[k]);
+        held[k] = holder;
     }
+    let home: Vec<u32> =
+        crate::par::map(n, state.cores.threads(), |v| held[before.slot[v] as usize]);
+    drop(held);
+    drop(before);
     // ★ THE BRIM (plan step 2b): a node that stands at EXACTLY its depression's spill height is at
     //   the water's edge when the depression is full, never under it (the level word covers
     //   `z < level` only), so it costs the depression nothing: its deficit is the ring above's,
@@ -1478,23 +1588,22 @@ pub fn water_tree(state: &MacroSolve, lakes: &Lakes) -> WaterTree {
     let n = state.node_count();
     let deps = &lakes.deps;
     let mut report = TreeReport::default();
+    let threads = state.cores.threads();
     let mut receiver = lakes.descent.down.clone();
-    // The spilling body each node lies in, or NO_DEP.
-    let region: Vec<u32> = (0..n)
-        .map(|i| {
-            let h = lakes.home[i];
-            let b = if (h == NO_DEP) | (h == OCEAN) {
-                NO_DEP
-            } else {
-                lakes.body_of[h as usize]
-            };
-            if (b != NO_DEP) && deps[b as usize].full {
-                b
-            } else {
-                NO_DEP
-            }
-        })
-        .collect();
+    // The spilling body each node lies in, or NO_DEP — ★ on the solve's cores (ruling B72 item 1).
+    let region: Vec<u32> = crate::par::map(n, threads, |i| {
+        let h = lakes.home[i];
+        let b = if (h == NO_DEP) | (h == OCEAN) {
+            NO_DEP
+        } else {
+            lakes.body_of[h as usize]
+        };
+        if (b != NO_DEP) && deps[b as usize].full {
+            b
+        } else {
+            NO_DEP
+        }
+    });
     // 4. A closed lake's water ends every river that meets it.
     for i in 0..n {
         if (region[i] == NO_DEP) & (lakes.water[i] != DRY) {
@@ -1553,26 +1662,35 @@ pub fn water_tree(state: &MacroSolve, lakes: &Lakes) -> WaterTree {
         }
     }
     drop(heap);
-    let mut cands: Vec<(u32, u64)> = Vec::with_capacity(8);
-    for i in 0..n as u32 {
-        let b = region[i as usize];
-        if b == NO_DEP {
-            continue;
-        }
-        report.region_nodes += 1;
-        let spill = deps[b as usize].spill_node;
-        cands.clear();
-        for m in state.lattice.neighbours(i) {
-            if m == NO_NODE {
+    // Each spilling hollow's node steps toward its spill — ★ on the solve's cores (ruling B72 item 1): a node reads only
+    // the finished distances; the ranges' steps join in index order.
+    let steps: Vec<(u32, u32, u8)> = crate::par::join(crate::par::per_range(n, threads, |r| {
+        let mut cands: Vec<(u32, u64)> = Vec::with_capacity(8);
+        let mut out = Vec::new();
+        for i in r {
+            let b = region[i];
+            if b == NO_DEP {
                 continue;
             }
-            let mi = m as usize;
-            if ((region[mi] == b) | (m == spill)) & (dist[mi] < dist[i as usize]) {
-                cands.push((m, dist[mi] + u64::from(state.chord_m(i, m))));
+            let spill = deps[b as usize].spill_node;
+            cands.clear();
+            for m in state.lattice.neighbours(i as u32) {
+                if m == NO_NODE {
+                    continue;
+                }
+                let mi = m as usize;
+                if ((region[mi] == b) | (m == spill)) & (dist[mi] < dist[i]) {
+                    cands.push((m, dist[mi] + u64::from(state.chord_m(i as u32, m))));
+                }
             }
+            let (step, how) = flat_step(state, i as u32, spill, &cands);
+            out.push((i as u32, step, how));
         }
-        let (step, how) = flat_step(state, i, spill, &cands);
+        out
+    }));
+    for (i, step, how) in steps {
         receiver[i as usize] = step;
+        report.region_nodes += 1;
         report.fallback_steps += usize::from(how == 0);
         report.straight_steps += usize::from(how == 1);
         report.split_steps += usize::from(how == 2);
@@ -1610,7 +1728,7 @@ mod tests {
     use super::*;
     use crate::climate::{Climate, NO_WIND};
     use crate::home::{home_moon, home_moon_solve_words, home_solve_words};
-    use crate::solve::{FACIES_LAKE, Schedule, solve_full, steeper};
+    use crate::solve::{FACIES_LAKE, Schedule, steeper};
     use vd_seed::bend::Face;
 
     /// ★ THE STATED FIELD: the home moon's own lattice, a plateau one hundred sixteenths high with
@@ -2212,7 +2330,7 @@ mod tests {
             ..home_solve_words()
         };
         let (state, _, report) =
-            solve_full(&moon, &words, Schedule::standard(words.age_yr)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(words.age_yr));
         let l = &report.lakes;
         assert!(l.runoff_total > 0);
         assert_eq!(l.runoff_total, l.evaporated_total + l.to_ocean + l.stranded);
@@ -2351,7 +2469,7 @@ mod tests {
             ..home_solve_words()
         };
         let (mut state, _, _) =
-            solve_full(&moon, &words, Schedule::standard(words.age_yr)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(words.age_yr));
         let (_, lakes) = crate::solve::dug::two_hollows(&moon, &words, &mut state);
         let report = &lakes;
         let facies = state.facies(&vec![false; state.node_count()], 0, true);
@@ -2390,7 +2508,7 @@ mod tests {
         let moon = home_moon();
         let words = home_moon_solve_words();
         let (state, facies, report) =
-            solve_full(&moon, &words, Schedule::standard(words.age_yr)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(words.age_yr));
         assert_eq!(report.lakes, LakeReport::default());
         assert!(state.water_z.iter().all(|&w| w == DRY));
         assert!(facies.iter().all(|&f| f & FACIES_LAKE == 0));
@@ -2765,7 +2883,7 @@ mod tests {
             ..home_solve_words()
         };
         let (state, _, _) =
-            solve_full(&moon, &words, Schedule::standard(words.age_yr)).expect("a solve");
+            crate::test_solves::solved(&moon, &words, Schedule::standard(words.age_yr));
         let lattice = moon.macro_lattice().expect("a lattice");
         let climate =
             crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));

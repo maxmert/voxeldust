@@ -553,6 +553,18 @@ const SPLAT_SHADER_DEF: &str = "SPLAT";
 pub(crate) const ATTRIBUTE_MORPH_NORMAL: MeshVertexAttribute =
     MeshVertexAttribute::new("LadderMorphNormal", 0x5741_0018, VertexFormat::Snorm16x2);
 const MORPH_NORMAL_SHADER_LOCATION: u32 = 11;
+/// ★ THE SURFACE OF A GROUND VERTEX (ruling B75 item 4; `vd_client::chunks::ChunkGeometry::surface`): the bare rock's
+/// share at the vertex and at its morph target, then two spare bytes — shader location 12, and the `GROUND_SURFACE`
+/// define with it.
+pub(crate) const ATTRIBUTE_SURFACE: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderSurface", 0x5741_0019, VertexFormat::Unorm8x4);
+const SURFACE_SHADER_LOCATION: u32 = 12;
+/// ★ THE HEIGHT OF A GROUND VERTEX over the ladder radius, metres (ruling B75 item 4): what the fade shader holds
+/// against the realm's snow line — shader location 13, beside the surface.
+pub(crate) const ATTRIBUTE_HEIGHT: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderHeight", 0x5741_001A, VertexFormat::Float32);
+const HEIGHT_SHADER_LOCATION: u32 = 13;
+const SURFACE_SHADER_DEF: &str = "GROUND_SURFACE";
 const LIGHT_CASTER_SHADER_DEF: &str = "LIGHT_CASTER";
 const LIGHT_CASTER_ENV: &str = "VD_TERRAIN_LIGHT_CASTER";
 /// ★ THE MOTION'S CONTROL (the temporal path's T1, the design's control 1): `VD_MOTION_CONTROL=engine`
@@ -763,11 +775,14 @@ fn msaa_of(word: &str) -> Option<Msaa> {
 /// THE GROUND'S VERTEX LAYOUT, for the fade material and the probe alike: the position, the
 /// normal in whichever form the mesh carries (the packed one when the mesh has it, else the
 /// engine's — the renderer packs by rung, `terrain::EXACT_NORMAL_RUNG`), the morph metre and
-/// the radial. The shader learns the form by a define.
+/// the radial. The shader learns the form by a define. ★ `paint` (the fade material's): a mesh that
+/// carries its surface (ruling B75 item 4) hands the vertex stage its rock and height and the
+/// fragment stage the painted colour (the engine's vertex colour).
 fn ground_vertex_layout(
     descriptor: &mut RenderPipelineDescriptor,
     layout: &MeshVertexBufferLayoutRef,
     light_caster: bool,
+    paint: bool,
 ) -> Result<(), SpecializedMeshPipelineError> {
     let packed = layout.0.contains(ATTRIBUTE_OCT_NORMAL);
     let normal = if packed {
@@ -789,6 +804,16 @@ fn ground_vertex_layout(
     if layout.0.contains(ATTRIBUTE_SPLAT_CORNER) {
         descriptor.vertex.shader_defs.push(SPLAT_SHADER_DEF.into());
         attributes.push(ATTRIBUTE_SPLAT_CORNER.at_shader_location(SPLAT_SHADER_LOCATION));
+    }
+    if paint && layout.0.contains(ATTRIBUTE_SURFACE) {
+        attributes.push(ATTRIBUTE_SURFACE.at_shader_location(SURFACE_SHADER_LOCATION));
+        attributes.push(ATTRIBUTE_HEIGHT.at_shader_location(HEIGHT_SHADER_LOCATION));
+        descriptor.vertex.shader_defs.push(SURFACE_SHADER_DEF.into());
+        descriptor.vertex.shader_defs.push("VERTEX_COLORS".into());
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs.push(SURFACE_SHADER_DEF.into());
+            fragment.shader_defs.push("VERTEX_COLORS".into());
+        }
     }
     // THE LIGHT CASTER: the prepass shader — the shadow passes' vertex stage, since no camera
     // prepass runs — skips the morph and the sink under this define and sinks the vertex by the
@@ -1211,7 +1236,7 @@ impl bevy::pbr::MaterialExtension for LadderFade {
         layout: &MeshVertexBufferLayoutRef,
         key: bevy::pbr::MaterialExtensionKey<LadderFade>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        ground_vertex_layout(descriptor, layout, key.bind_group_data.light_caster)
+        ground_vertex_layout(descriptor, layout, key.bind_group_data.light_caster, true)
     }
 }
 
@@ -1251,7 +1276,7 @@ impl Material for ProbeMaterial {
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<ProbeMaterial>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        ground_vertex_layout(descriptor, layout, false)
+        ground_vertex_layout(descriptor, layout, false, false)
     }
 }
 
@@ -2891,8 +2916,10 @@ fn hud_primary(
     net: Res<Net>,
     camera: Res<CameraState>,
     keys: Res<ButtonInput<KeyCode>>,
+    terrain: Option<Res<terrain::Terrain>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
+    draw_loading(ctx, terrain.as_deref());
     draw_hud(ctx, &net);
     draw_pilot_panel(ctx, &net, &camera, &keys);
     Ok(())
@@ -3476,8 +3503,53 @@ fn setup_capture(
 }
 
 /// The offscreen HUD: draw into the (non-primary) egui context bound to the Image camera.
-fn hud_offscreen(mut ctx: Single<&mut EguiContext, Without<PrimaryEguiContext>>, net: Res<Net>) {
+fn hud_offscreen(
+    mut ctx: Single<&mut EguiContext, Without<PrimaryEguiContext>>,
+    net: Res<Net>,
+    terrain: Option<Res<terrain::Terrain>>,
+) {
+    draw_loading(ctx.get_mut(), terrain.as_deref());
     draw_hud(ctx.get_mut(), &net);
+}
+
+/// ★ THE LOADING SCREEN (ruling B86 item 6; the owner: "put player at the starting position immediately, so whole
+/// loading machinery can kick in, but show the loading screen over the gameplay in the meanwhile"): from the login until
+/// the ground in view is complete (`Terrain::ground_ready`: every body the eye descends landed, no coarse stand-in and
+/// nothing on the rough ground), a dark layer over the running game with the ground's progress. Under the dev text and
+/// the pilot's panel, which stay readable; in the window and the capture alike. No teleport and no login path of its
+/// own: the game runs under it exactly as in play.
+///
+/// **Example.** A player logs in aboard a hull over the home belt: the screen reads "Loading the ground" while the
+/// planet's shard ships the tiles and the client builds its chunks, and goes the frame the last coarse stand-in has sunk.
+fn draw_loading(ctx: &egui::Context, terrain: Option<&terrain::Terrain>) {
+    if terrain.is_some_and(|t| t.ground_ready) {
+        return;
+    }
+    let (resident, wanted) = terrain.map_or((0, 0), |t| t.ground_progress);
+    let share = if wanted > 0 { resident as f32 / wanted as f32 } else { 0.0 };
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("vd_loading")));
+    let screen = ctx.viewport_rect();
+    painter.rect_filled(screen, 0.0, egui::Color32::from_rgb(14, 15, 19));
+    let centre = screen.center();
+    painter.text(
+        centre - egui::vec2(0.0, 28.0),
+        egui::Align2::CENTER_CENTER,
+        "Loading the ground",
+        egui::FontId::proportional(28.0),
+        egui::Color32::from_gray(225),
+    );
+    let bar = egui::Rect::from_center_size(centre + egui::vec2(0.0, 16.0), egui::vec2(screen.width() * 0.4, 6.0));
+    painter.rect_filled(bar, 3.0, egui::Color32::from_gray(50));
+    let mut done = bar;
+    done.set_width(bar.width() * share.clamp(0.0, 1.0));
+    painter.rect_filled(done, 3.0, egui::Color32::from_rgb(200, 150, 90));
+    painter.text(
+        centre + egui::vec2(0.0, 40.0),
+        egui::Align2::CENTER_CENTER,
+        format!("{resident} of {wanted} pieces of ground"),
+        egui::FontId::proportional(14.0),
+        egui::Color32::from_gray(150),
+    );
 }
 
 /// ★ WHETHER FRAME `frame` SERVES A CONVERGED STILL asked at frame `asked_at` (the design §12.2): drawn at

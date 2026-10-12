@@ -346,7 +346,14 @@ pub(crate) fn on_gateway_msg(
             view,
         } => {
             crate::stub::artifact_ship::on_artifact_want(
-                from, realm, digest, view, ctx.config, wants, stats,
+                from,
+                realm,
+                digest,
+                view,
+                ctx.clock.local_tick,
+                ctx.config,
+                wants,
+                stats,
             );
         }
     }

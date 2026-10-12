@@ -225,6 +225,73 @@ impl Gf {
     pub fn powf(self, y: Gf) -> Gf {
         (y * self.ln()).exp()
     }
+
+    /// ★ THE FINE EXPONENTIAL (the fine levels' power, the way-in design rev 4 §5): [`Gf::exp`]'s own reduction and
+    /// Taylor polynomial, with each division by a whole number replaced by a multiplication by its reciprocal written
+    /// ONCE as a constant (`1/n!`, Horner from the inside) — add, multiply, a floor and a bit pattern, so one answer on
+    /// every target and about four times faster than [`Gf::exp`]'s dependent divisions. Not the same last bit as
+    /// [`Gf::exp`]: the macro solve keeps that one (its bytes are pinned); the fine levels read this one.
+    ///
+    /// **Example.** A 128 m tile's point reads its rise from the nodes' logarithms by a Gaussian; the rise is
+    /// `exp_fine` of that sum, the same word on the planet's shard on any chip.
+    #[must_use]
+    pub fn exp_fine(self) -> Gf {
+        const INV_FACT: [f64; 14] = [
+            1.0,
+            1.0,
+            0.5,
+            1.0 / 6.0,
+            1.0 / 24.0,
+            1.0 / 120.0,
+            1.0 / 720.0,
+            1.0 / 5_040.0,
+            1.0 / 40_320.0,
+            1.0 / 362_880.0,
+            1.0 / 3_628_800.0,
+            1.0 / 39_916_800.0,
+            1.0 / 479_001_600.0,
+            1.0 / 6_227_020_800.0,
+        ];
+        let k = (self * Gf(std::f64::consts::LOG2_E) + Gf::HALF).floor();
+        let f = self - k * Gf(std::f64::consts::LN_2);
+        let mut p = Gf(INV_FACT[13]);
+        for c in INV_FACT[..13].iter().rev() {
+            p = Gf(*c) + f * p;
+        }
+        let ki = k.to_i64_floor().clamp(-1_022, 1_022);
+        p * Gf(f64::from_bits(((ki + 1_023) as u64) << 52))
+    }
+
+    /// ★ THE FINE LOGARITHM: [`Gf::ln`]'s own reduction and odd series, the reciprocals `1/(2k + 1)` written once as
+    /// constants (one division remains: `t = (m − 1)/(m + 1)`). A non-positive `x` answers negative infinity.
+    #[must_use]
+    pub fn ln_fine(self) -> Gf {
+        const ODD: [f64; 8] = [1.0, 1.0 / 3.0, 1.0 / 5.0, 1.0 / 7.0, 1.0 / 9.0, 1.0 / 11.0, 1.0 / 13.0, 1.0 / 15.0];
+        if self.0 <= 0.0 {
+            return Gf(f64::NEG_INFINITY);
+        }
+        let bits = self.0.to_bits();
+        let mut e = ((bits >> 52) & 0x7ff) as i64 - 1_023;
+        let mut m = Gf(f64::from_bits((bits & ((1u64 << 52) - 1)) | (1_023u64 << 52)));
+        if m.0 > std::f64::consts::SQRT_2 {
+            m *= Gf::HALF;
+            e += 1;
+        }
+        let t = (m - Gf::ONE) / (m + Gf::ONE);
+        let t2 = t * t;
+        let mut p = Gf(ODD[7]);
+        for c in ODD[..7].iter().rev() {
+            p = Gf(*c) + t2 * p;
+        }
+        Gf::TWO * t * p + Gf::from_i64(e) * Gf(std::f64::consts::LN_2)
+    }
+
+    /// `x^y` for a positive `x` by the fine logarithm and exponential (the fine levels' power; `x^(1/2.2)` in the joint
+    /// law's steady slope).
+    #[must_use]
+    pub fn powf_fine(self, y: Gf) -> Gf {
+        (y * self.ln_fine()).exp_fine()
+    }
 }
 
 impl Add for Gf {
@@ -343,6 +410,30 @@ mod tests {
         assert_eq!(Gf::from_i64(-5).clamp(-Gf::ONE, Gf::ONE), -Gf::ONE);
         assert_eq!(Gf::from_i64(5).clamp(-Gf::ONE, Gf::ONE), Gf::ONE);
         assert_eq!(Gf::HALF.clamp(-Gf::ONE, Gf::ONE), Gf::HALF);
+    }
+
+    /// ★ THE FINE EXPONENTIAL, LOGARITHM AND POWER against the fenced ones (which meet the literal values below): within
+    /// a few units in the last place over twenty decades, the exact points exact, and the same ends.
+    #[test]
+    fn the_fine_exp_ln_and_power_meet_the_fenced_ones() {
+        assert_eq!(Gf::ZERO.exp_fine(), Gf::ONE);
+        assert_eq!(Gf::ONE.ln_fine(), Gf::ZERO);
+        assert_eq!(Gf::ZERO.ln_fine().to_f64(), f64::NEG_INFINITY);
+        assert_eq!(Gf::from_f64(-3.0).ln_fine().to_f64(), f64::NEG_INFINITY);
+        let mut x = Gf::from_f64(1e-14);
+        let ten = Gf::from_f64(10.0);
+        let third = Gf::from_f64(1.0 / 2.2);
+        for _ in 0..19 {
+            let rel = |a: Gf, b: Gf| ((a - b) / b).abs().to_f64();
+            assert!((x.ln_fine() - x.ln()).abs().to_f64() < 5e-13);
+            assert!(rel(x.powf_fine(third), x.powf(third)) < 1e-14);
+            assert!(rel((x.ln() * Gf::HALF).exp_fine(), (x.ln() * Gf::HALF).exp()) < 1e-14);
+            x *= ten;
+        }
+        // The mantissa's two halves (over and under √2) and the exponent's saturation.
+        assert!((Gf::from_f64(1.9).ln_fine() - Gf::from_f64(1.9).ln()).abs().to_f64() < 1e-15);
+        assert_eq!(Gf::from_f64(800.0).exp_fine().to_f64(), Gf::from_f64(800.0).exp().to_f64());
+        assert_eq!(Gf::from_f64(-800.0).exp_fine().to_f64(), Gf::from_f64(-800.0).exp().to_f64());
     }
 
     /// ★ THE FENCED EXPONENTIAL AND LOGARITHM against LITERAL values (a test may not call the

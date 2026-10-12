@@ -3,16 +3,20 @@
 //! one — red on one differing byte. The same test on every other target the game ships on is the
 //! measurement SL10 asks for (the terrain legs script runs it with the golden gate).
 //!
-//! A minute of one core: a GATE (`just artifact-pin`), never a unit test. To record a new digest
-//! after a deliberate change to the solve or the artifact (with `ARTIFACT_VERSION` or
-//! `GENERATOR_VERSION` bumped): `VD_ARTIFACT_RECORD=1 cargo test --release -p vd-bins --test
-//! home_artifact_pin -- --nocapture`, then commit the constant below.
+//! A whole first solve of the home planet: a GATE (`just artifact-pin`), never a unit test. ★ ON
+//! ALL THE HOST'S CORES (ruling B72 item 1; `VD_SOLVE_CORES` states another count): the pins are
+//! recorded by the one-core solve (`just golden-z-record`), so this gate proves the pins AND the
+//! same bytes on many cores in one run. To record a new digest after a deliberate change to the
+//! solve or the artifact (with `ARTIFACT_VERSION` or `GENERATOR_VERSION` bumped):
+//! `VD_ARTIFACT_RECORD=1 cargo test --release -p vd-bins --test home_artifact_pin -- --nocapture`,
+//! then commit the constant below.
 
-use vd_bins::artifact_worker::{SolveJob, run_solve};
+use vd_bins::artifact_worker::{SolveJob, run_solve_on};
 use vd_terrain::home::{home_planet, home_solve_words};
+use vd_terrain::par::Cores;
 
 /// The committed digest of the home planet's artifact on this build.
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x81c0_d090_3ce0_129b, 0xb29e_978b_3db0_1040];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6f92_ab73_2b8f_e622, 0xab3a_2d52_064b_b265];
 
 #[test]
 fn the_home_planets_artifact_digests_to_its_committed_words() {
@@ -20,7 +24,16 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
         body: home_planet(),
         words: home_solve_words(),
     };
-    let artifact = run_solve(&job).expect("the home planet solves");
+    let cores = std::env::var("VD_SOLVE_CORES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+    let started = std::time::Instant::now();
+    let artifact = run_solve_on(&job, Cores(cores)).expect("the home planet solves");
+    println!(
+        "home_artifact_pin: solved on {cores} cores in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
     let digest = artifact.digest();
     println!(
         "home_artifact_pin: edge {}, {} nodes, {} pyramid levels, {} bytes, digest [{:#x}, {:#x}]",
@@ -76,7 +89,7 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
     // `ARTIFACT_KEY_GENERATION`, or every realm opens an artifact of the old solve.
     assert_eq!(
         vd_terrain::ARTIFACT_KEY_GENERATION,
-        25,
+        27,
         "the artifact's key generation belongs to the digest above: bump both together"
     );
     assert_eq!(
