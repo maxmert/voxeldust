@@ -54,6 +54,7 @@ mod register;
 pub mod relay;
 mod saga_arms;
 mod session;
+pub mod stand;
 mod stats;
 mod transient;
 mod window;

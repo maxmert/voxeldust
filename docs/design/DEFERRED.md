@@ -12150,3 +12150,23 @@ generation alone), so a body solves once per generation on a machine, not once p
 - 🟥 **STEPS 2, 3 AND 5 OWED:** the "before" record on every pinned stand (numbers and pictures, no window); the corrected
   climate's bench beside today's code (M0-9, the seasonal circulation of ruling B36 item 1); the window session for the
   clean frame reading at full screen and the eye's rule at full screen (M0-16, Q9's number).
+
+### D-TERRAIN-11 🟨 A BODY STANDS ON ITS REALM'S GROUND — the parked children built, what is still owed (ruling B81 Q6, 2026-10-13)
+
+- 🟩 **THE PARKED CHILDREN STAND, 2026-10-13.** `vd_sim::stub::stand` (the system before the placement writer, the
+  `Ground` the host injects) and `vd_bins::ground::ShardGround` (the shard's fine book where the 128 m level applies, the
+  artifact's ground elsewhere — the read the client's chunks make). A parked child buried in or touching its ground is
+  stood on it, belly 1 m over the highest ground under a 5 × 3 footprint; it follows its ground over 0.5 s; the stand
+  lands in the centre the realm authors (re-adopted, so the containment and the lookups read it). MEASURED: hull 15 stood
+  280 m over its old berth on the fine ground, and the pilot boarded it 3 s later.
+- 🟥 **THE FIRST STATEMENT STANDS ON THE COARSER GROUND.** At boot the shard holds no fine tile until a view names one, so
+  hull 15 rose 1 101 m onto the 8 km ground and came down 820 m 1.2 s later (behind the loading screen). The cure is
+  B81 Q4's idle reasons: the tiles under the realm's arrival places (its berths) held from boot, and the first statement
+  made on them.
+- 🟥 **A WALKER IS NOT STOOD.** Only parked children (berths) stand; an avatar standing in the planet realm whose ground
+  rose is not lifted (Q6 says "each standing body"). Owed with the walker's ground contact.
+- 🟥 **THE DEV SPAWN IS A FIXED POINT.** `VD_SPAWN_POSES` names a point in the planet's frame; account 1000's was hull 15's
+  berth, and the stand moved the hull 280 m off it, so the spawn was re-stated at the hull's standing centre (cluster
+  restarted). The cure is the durable login place (P7): a player logs in where they left — aboard the hull.
+- 🟥 **LOWERING NEEDS NO GRAVITY YET, BUT A LANDED HULL IS NOT RE-STOOD.** A hull that flew and stopped is a drive state
+  away from its parked place: it stands on nothing until the next boot re-plants it at its berth. Owed with the colliders.

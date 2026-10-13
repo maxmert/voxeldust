@@ -111,6 +111,9 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(crate::stub::artifact_ship::ArtifactSource::default());
     world.insert_resource(crate::stub::artifact_ship::ArtifactWants::default());
     world.insert_resource(crate::stub::fine_ship::FineSource::default());
+    // Ruling B81 Q6 — the realm's ground and the children it stands on it; inert until the host injects a ground.
+    world.insert_resource(crate::stub::stand::GroundSource::default());
+    world.insert_resource(crate::stub::stand::Standing::default());
     world.insert_resource(crate::stub::lineage::LineageOwed::default());
     world.insert_resource(crate::stub::lineage::PendingLineage::default());
     world.insert_resource(RealmRegions::default());
@@ -180,7 +183,10 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
             // `observe_clock_syncs` (registered earlier on this SingleThreaded schedule), before any
             // consumer — so every system this tick reads the SAME authored rows. `has_synced`-gated:
             // a pre-sync clock must not author placements (D-Finding-1, same gate as every author).
-            author_placements.run_if(has_synced),
+            // ★ THE PARKED CHILDREN STAND ON THE GROUND FIRST (ruling B81 Q6): the lifts this tick's rows carry.
+            (crate::stub::stand::stand_on_ground, author_placements)
+                .chain()
+                .run_if(has_synced),
             request_pending_grants,
             // ★ THE HELD STICK WALKS EVERY TICK (2026-10-01): right after this tick's inbound, so an input
             // that arrived this tick moves its walker this tick; nested to stay within the chain's
@@ -335,7 +341,7 @@ fn took_child_facts(
                 own_realm,
                 integrates,
                 child_nodes,
-                regions.facing_of(child),
+                (regions.facing_of(child), regions.lift_of(child)),
                 driven,
                 stats,
             );
@@ -570,7 +576,10 @@ fn process_inbound(
                 // the unreliable up-lane because the next tick restates the whole intent: a lost
                 // datagram is corrected before anybody could read the gap.
                 Ok(InterShardFlow::ChildDrive(cd)) => {
-                    let parked = regions.facing_of(cd.child.lowered());
+                    let parked = (
+                        regions.facing_of(cd.child.lowered()),
+                        regions.lift_of(cd.child.lowered()),
+                    );
                     crate::stub::drive::on_child_drive(
                         cd,
                         *from,

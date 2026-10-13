@@ -551,6 +551,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fine_meter: Option<std::sync::Arc<vd_bins::fine_source::FineMeter>> = None;
     // ★ THE FINE TILES (the fine ground's way in, B2): armed beside the artifact ship where the 128 m level applies to the
     // body (its artifact states a sea), its workers on the solve's share of the cores.
+    let mut ground_book = None;
     if let Some((boot, body)) = artifact_boot.as_ref().zip(own_body.as_ref())
         && let Some(artifact) = boot.artifact()
         && let Some(work) = vd_bins::fine_source::FineWork::new(
@@ -561,12 +562,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     {
         fine_meter = Some(work.meter());
+        ground_book = Some(work.ground_book());
         *world.resource_mut::<vd_sim::stub::fine_ship::FineSource>() =
             vd_sim::stub::fine_ship::FineSource(Some(Box::new(work)));
         tracing::info!(
             threads = solve_cores.0,
             "the fine tiles are armed from the store"
         );
+    }
+    // ★ THE REALM'S GROUND (ruling B81 Q6): its parked children stand on what it holds — the fine tiles, and the coarser
+    // ground where it holds none.
+    if let Some((boot, body)) = artifact_boot.as_ref().zip(own_body.as_ref())
+        && let Some(artifact) = boot.artifact()
+    {
+        *world.resource_mut::<vd_sim::stub::stand::GroundSource>() =
+            vd_sim::stub::stand::GroundSource(Some(Box::new(vd_bins::ground::ShardGround::new(
+                *body,
+                std::sync::Arc::clone(artifact),
+                ground_book,
+            ))));
     }
     if let Some(body) = stored_body {
         *world.resource_mut::<vd_sim::stub::drive::OwnBody>() =
@@ -817,6 +831,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 // ★ THE FINE TILES (B2) are armed the same tick, where the level applies.
+                let mut ground_book = None;
                 if let Some((artifact, body)) = boot.artifact().zip(own_body.as_ref())
                     && let Some(work) = vd_bins::fine_source::FineWork::new(
                         own_realm,
@@ -826,6 +841,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 {
                     fine_meter = Some(work.meter());
+                    ground_book = Some(work.ground_book());
                     *node
                         .world_mut()
                         .resource_mut::<vd_sim::stub::fine_ship::FineSource>() =
@@ -834,6 +850,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         threads = solve_cores.0,
                         "the fine tiles are armed from the solve"
                     );
+                }
+                // ★ THE REALM'S GROUND (ruling B81 Q6), the same tick.
+                if let Some((artifact, body)) = boot.artifact().zip(own_body.as_ref()) {
+                    *node
+                        .world_mut()
+                        .resource_mut::<vd_sim::stub::stand::GroundSource>() =
+                        vd_sim::stub::stand::GroundSource(Some(Box::new(
+                            vd_bins::ground::ShardGround::new(
+                                *body,
+                                std::sync::Arc::clone(artifact),
+                                ground_book,
+                            ),
+                        )));
                 }
             }
         }

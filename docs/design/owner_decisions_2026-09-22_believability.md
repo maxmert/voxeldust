@@ -2347,3 +2347,53 @@ client in the future. Decision 2. Agree with (a), but it should not hurt the fut
 3. **IT MUST NOT HURT THE ADVANCE CALCULATION (B86 item 6, option (c))**: the rule says only that a solve which STARTED
    is finished and stored; WHEN a solve starts, and how many at once, stay (c)'s to decide. The same "work in hand"
    reason is the one (c)'s own solves (an unvisited planet booted to solve ahead, its fine tiles) will state.
+
+## B92 (2026-10-13) — the 128 m level's rounds on a fixed drainage network
+
+THE CAUSE, MEASURED (status file, 2026-10-13 later): one 128 m tile took 3.2–8.7 s (mean 6.5 s), and ~70 % of it was the
+fine level's three rounds, which ALL ended at their pass limit (60) without settling: rebuilt every pass, the drainage
+kept CAPTURING (~1 % of the points changed their receiver in every pass, a few nodes sank 4–36 m a pass), so the fine
+ground's heights depended on the pass limit. The bench (`examples/fine_settle_bench.rs`) compared four methods on one
+tile and showed their shaded pictures side by side. The owner: *"Yes, agree with your recommendations. Please, let's
+optimize it."* — then, on the pictures: *"I think they all look amazing, so take the most optimal one pelase"*.
+
+1. **THE FINE LEVEL'S DRAINAGE IS BUILT ONCE** (ruling B77's words: "the stream law's analytic solution on a drainage
+   network built first"): the tree and its flow come from the level's start surface; each round is ONE exact pass of the
+   joint law's steady state on that tree and the clamp-free half step of the rises (B23). The coarse start (rung 9) keeps
+   its rebuilt rounds.
+2. **THE SETTLE LAW ENDS THE ROUNDS**: they stop when no held node's mean moves more than 5 m (the coarse rounds' own
+   `SETTLE_M`); the bound (180 rounds = the old method's own pass budget for this level) only guarantees an end.
+   MEASURED: three tiles beside the home berth settled at 57, 60 and 75 rounds; the node means nearer their rows than
+   today (on the bench tile max 509 / mean 106 m against 1 261 / 319 m).
+3. **THE SLOPES IN LOGARITHMS**: the flow is fixed with the network, so each point's ln(K·q) is taken once and a round
+   costs one exponential a point (the same law, the same integers on every host). MEASURED: a tile 6.5 s → 3.2 s on one
+   thread; the full step of the rises (n instead of n/2) gave no speed and was not taken.
+4. **THE FINE TILES MOVE ONCE** (`FINE_VERSION` 2): every stored fine tile is solved again on its first want. A FAR COPY
+   STILL NEVER STARTS A SOLVE WHILE A WHOLE TILE WAITS; when no whole tile waits, the nearest named far copies are made
+   too, as many at once as the work has threads (B81 Q4's idle work), so a realm at rest fills its middle distance. One
+   rule serves a tile and keeps its block's raw fields in memory (a far copy's fields were dropped before its finish
+   could start, and read back from the store ~1 300 times in 5 s with nothing made).
+
+## B93 (2026-10-13) — B92 amended: the drainage built again every second round; a proven method if this fails
+
+THE DEFECT, MEASURED (status file, 2026-10-13 later): the owner's window look showed vertical ribbed walls and a spire
+~4 km from the berth, on B92's fine ground. The bench's census (every link of the point graph, three tiles beside the
+berth): built only once, the drainage let the two sides of a divide grow apart — 1.0–1.7 % of the links over 63° against
+0.0003–0.012 % before B92, peaks of 11.5–24.4 km against 5.5–6.5 km, up to 12 000 walls across the drainage a tile. B92's
+own check read only the node means, and its pictures looked from above, so they hid the walls. The owner chose option (1)
+of three: *"Let's try (1) I don't want to go incircles for several weeks again please. We can try several things, but if
+nothing works, can we adopt something from the list you reviewed before?"* (the list: spacesim, planet-gen, worldgen,
+SideStep, minos, ymir, platec-rs, plate-tectonics-rust, TerraForge, fastlem, planetsfactory; tectonics and World Orogen
+as reference only).
+
+1. **THE DRAINAGE IS BUILT AGAIN AFTER EVERY SECOND ROUND** (`l1::REBUILD_ROUNDS` = 2, `l1::fine_rounds`; `FINE_VERSION`
+   3): the settle law, the bound, the log slopes and the half step stay. MEASURED with the game's own rounds on the same
+   three tiles: settled at 78 / 78 / 132 rounds; 0.02–0.05 % of the links over 63°, 138–330 across the drainage, spikes
+   ≤ 144 m, peaks 4.7–5.6 km; a whole tile 4.1–5.9 s on one thread with other work on the machine (6.5 s before B92).
+   Rebuilt after every round: settled on one tile of three; after every 5th or 10th: 0.14–0.25 % over 63°.
+2. **EVERY GROUND CHANGE IS JUDGED FROM THE SIDE TOO**: the census's numbers (links over 63° and 79°, walls across the
+   drainage, spikes, pits, the peak) beside the pictures, and the owner's look in the window — never a top-down picture
+   or a mean alone.
+3. **IF THIS FAILS THE OWNER'S LOOK, A PROVEN METHOD IS ADOPTED** from the reviewed list instead of more home-made rounds
+   (B80's lesson): first fastlem's own solver as it runs in its own pictures (the method B80 liked), its licence
+   (MPL-2.0) and its numbers' host-independence stated for the owner's word before it enters the game.

@@ -174,7 +174,9 @@ struct State {
     raw: BTreeMap<TileKey, Arc<Field>>,
     finished: BTreeMap<TileKey, Arc<Vec<u8>>>,
     wire: BTreeMap<(TileKey, u8, u8), Arc<[Bytes]>>,
-    book: FineBook,
+    book: Arc<FineBook>,
+    /// The tiles that joined or left the book since the realm's ground last read it (ruling B81 Q6).
+    book_changed: BTreeSet<TileKey>,
     /// Work in flight: `(tile, finished?)`.
     in_flight: BTreeSet<(TileKey, bool)>,
     /// Records the store does not hold: `(tile, finished?)`.
@@ -182,7 +184,7 @@ struct State {
     /// Tiles whose solve or finish answered nothing: `(tile, finished?)`.
     refused: BTreeSet<(TileKey, bool)>,
     /// This tick's lists, by occupant, each tile with whether its view reads it WHOLE (level 0), and the merged order of
-    /// the last with the tiles some view reads whole — the only ones a solve may start for (send-ahead's first rule).
+    /// the last with the tiles some view reads whole — served first; a far copy only when none of them waits (ruling B92).
     named: Vec<Vec<(TileKey, bool)>>,
     reasons: Vec<TileKey>,
     whole: BTreeSet<TileKey>,
@@ -196,8 +198,34 @@ pub struct FineWork {
     /// The head's three numbers the reach reads — the drawn ground's lowest and highest metres and the sea (rulings
     /// B55, B87): the gateway reads the same off the head, so both name the same tiles at the same levels.
     head_band: (i32, i32, i16),
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
     meter: Arc<FineMeter>,
+}
+
+/// ★ THE BOOK AS THE REALM'S GROUND READS IT (ruling B81 Q6): the provider's own book, shared, and the tiles that joined or
+/// left it since the last read — what the realm's parked children stand on.
+pub struct GroundBook(Arc<Mutex<State>>);
+
+impl GroundBook {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The book as it stands (a pointer: no tile is copied).
+    #[must_use]
+    pub fn book(&self) -> Arc<FineBook> {
+        Arc::clone(&self.lock().book)
+    }
+
+    /// The tiles that joined or left the book since the last call.
+    #[must_use]
+    pub fn take_changed(&self) -> Vec<TileKey> {
+        std::mem::take(&mut self.lock().book_changed)
+            .into_iter()
+            .collect()
+    }
 }
 
 impl FineWork {
@@ -263,19 +291,20 @@ impl FineWork {
             ctx,
             input: input_word(artifact.digest()),
             head_band,
-            state: Mutex::new(State {
+            state: Arc::new(Mutex::new(State {
                 pool,
                 raw: BTreeMap::new(),
                 finished: BTreeMap::new(),
                 wire: BTreeMap::new(),
-                book,
+                book: Arc::new(book),
+                book_changed: BTreeSet::new(),
                 in_flight: BTreeSet::new(),
                 unstored: BTreeSet::new(),
                 refused: BTreeSet::new(),
                 named: Vec::new(),
                 reasons: Vec::new(),
                 whole: BTreeSet::new(),
-            }),
+            })),
             meter,
         })
     }
@@ -297,7 +326,13 @@ impl FineWork {
     /// The shard's own book of finished tiles (its ground read), as it stands.
     #[must_use]
     pub fn book(&self) -> FineBook {
-        self.lock().book.clone()
+        (*self.lock().book).clone()
+    }
+
+    /// The book as the realm's ground reads it (ruling B81 Q6).
+    #[must_use]
+    pub fn ground_book(&self) -> GroundBook {
+        GroundBook(Arc::clone(&self.state))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -351,6 +386,17 @@ impl FineWork {
     }
 
     /// Hands `job` to the workers (or runs it, inline).
+    /// A named tile the work can still make: not finished, its finish not refused, and no raw field of its block refused.
+    fn workable(&self, state: &State, key: TileKey) -> bool {
+        !state.finished.contains_key(&key)
+            && !state.refused.contains(&(key, true))
+            && !self
+                .block_of(key)
+                .iter()
+                .flatten()
+                .any(|b| state.refused.contains(&(*b, false)))
+    }
+
     fn submit(state: &mut State, ctx: &Ctx, meter: &FineMeter, job: Job) {
         match &mut state.pool {
             Pool::Threads { jobs, .. } => {
@@ -403,7 +449,8 @@ impl FineTiles for FineWork {
                                 wrote = true;
                             }
                             state.finished.insert(key, Arc::new(record));
-                            state.book.insert(key, levels);
+                            Arc::make_mut(&mut state.book).insert(key, levels);
+                            state.book_changed.insert(key);
                         }
                         None => {
                             state.refused.insert((key, true));
@@ -432,15 +479,37 @@ impl FineTiles for FineWork {
             .flatten()
             .filter_map(|&(key, whole)| whole.then_some(key))
             .collect();
+        let threads = match &state.pool {
+            Pool::Threads { threads, .. } => *threads,
+            Pool::Inline { .. } => 1,
+        };
+        // ★ WHOLE TILES FIRST, FAR COPIES WHEN NONE WAITS (2026-10-13, ruling B92 with B81 Q4's idle work): the work serves
+        // every tile a view reads whole that is not finished; only when none waits does it serve the nearest far copies,
+        // as many as it has threads — so a fast flight's near ground always goes first, and a realm at rest fills its
+        // middle distance (the fine version's change left every stored far copy unread). MEASURED before the rule: at
+        // 1 000 km over the home planet the reach named 22 575 tiles for their coarse copies alone and queued a full solve
+        // for each, in front of the near ground.
+        let whole_waiting = state
+            .reasons
+            .iter()
+            .any(|&key| state.whole.contains(&key) && self.workable(state, key));
+        let serving: BTreeSet<TileKey> = state
+            .reasons
+            .iter()
+            .copied()
+            .filter(|&key| {
+                (state.whole.contains(&key) || !whole_waiting) && self.workable(state, key)
+            })
+            .take(if whole_waiting { usize::MAX } else { threads })
+            .collect();
         // ★ WHAT NO REASON NAMES LEAVES MEMORY (it stays in the store): the finished tiles outside the reasons, and the
-        // raw fields no unfinished reason's block reads.
+        // raw fields no served tile's block reads — the rule that serves a tile is the rule that keeps its block, so a
+        // raw field is never dropped before its finish starts.
         let wanted: BTreeSet<TileKey> = state.reasons.iter().copied().collect();
-        let mut keep_raw = BTreeSet::new();
-        for key in &state.reasons {
-            if !state.finished.contains_key(key) && state.whole.contains(key) {
-                keep_raw.extend(self.block_of(*key).into_iter().flatten());
-            }
-        }
+        let keep_raw: BTreeSet<TileKey> = serving
+            .iter()
+            .flat_map(|&key| self.block_of(key).into_iter().flatten())
+            .collect();
         state.finished.retain(|key, _| wanted.contains(key));
         state.wire.retain(|(key, _, _), _| wanted.contains(key));
         let gone: Vec<TileKey> = state
@@ -449,14 +518,11 @@ impl FineTiles for FineWork {
             .filter(|key| !wanted.contains(key))
             .collect();
         for key in gone {
-            state.book.remove(key);
+            Arc::make_mut(&mut state.book).remove(key);
+            state.book_changed.insert(key);
         }
         state.raw.retain(|key, _| keep_raw.contains(key));
         // ★ THE NEXT WORK, nearest first, never more in flight than threads (the order follows the newest reasons).
-        let threads = match &state.pool {
-            Pool::Threads { threads, .. } => *threads,
-            Pool::Inline { .. } => 1,
-        };
         let reasons = state.reasons.clone();
         for key in reasons {
             if state.in_flight.len() >= threads {
@@ -488,20 +554,11 @@ impl FineTiles for FineWork {
                 }
                 state.unstored.insert((key, true));
             }
-            // ★ A FAR COPY NEVER STARTS A SOLVE (send-ahead's first rule, 2026-10-13): a tile no view reads whole is served
-            // when stored and is otherwise left to the coarser ground. MEASURED before it: at 1 000 km over the home
-            // planet the reach named 22 575 tiles for their coarse copies alone and queued a full solve for each.
-            if !state.whole.contains(&key) {
+            // A tile outside the served set (a far copy while a whole tile waits) is read back when stored, never made.
+            if !serving.contains(&key) {
                 continue;
             }
             let block = self.block_of(key);
-            if block
-                .iter()
-                .flatten()
-                .any(|b| state.refused.contains(&(*b, false)))
-            {
-                continue;
-            }
             if block.iter().flatten().all(|b| state.raw.contains_key(b)) {
                 let slots =
                     block.map(|b| b.and_then(|b| state.raw.get(&b).map(|f| (b, Arc::clone(f)))));

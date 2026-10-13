@@ -72,6 +72,12 @@ pub struct RealmRegions {
     /// before. Example: a hull parked upright on a plain 1.4° south of the equator yaws about the
     /// ground's vertical, not about the planet's `+Y`, which stands 127° from it there.
     facings: BTreeMap<RealmId, DQuat>,
+    /// ★ WHERE THIS REALM STANDS ITS PARKED CHILDREN ON ITS GROUND (ruling B81 Q6, built 2026-10-13): each lift, in
+    /// metres in this realm's own frame, added to the child's authored centre — written only by
+    /// [`crate::stub::stand`], read by every row this realm authors for the child and by the first state its drive is
+    /// integrated from. Example: hull 15's berth was written over the 8 km ground; the fine ground under it stands
+    /// higher, so the planet authors the hull a lift up its radial until its belly clears the fine ground.
+    lifts: BTreeMap<RealmId, DVec3>,
     /// ★ EVERY PARENT'S DIRECT CHILDREN, BY REGION INDEX (2026-08-30) — the inverse of `parent`.
     ///
     /// [`Self::direct_children`] used to FILTER the whole region list. That is a scan of everything to
@@ -333,6 +339,7 @@ impl RealmRegions {
             root_realm,
             moving: BTreeMap::new(),
             facings: BTreeMap::new(),
+            lifts: BTreeMap::new(),
             ix_of,
             ancestor_chain,
             child_index: ChildIndex::default(),
@@ -413,6 +420,77 @@ impl RealmRegions {
     /// Record the attitude an adopted child now stands in: its berth's facing.
     pub(crate) fn set_facing(&mut self, child: RealmId, facing: DQuat) {
         self.facings.insert(child, facing);
+    }
+
+    /// ★ THE LIFT this realm stands a parked child on its ground with (ruling B81 Q6), metres in this realm's own
+    /// frame; nought for a child it never lifted.
+    #[must_use]
+    pub fn lift_of(&self, child: RealmId) -> DVec3 {
+        self.lifts.get(&child).copied().unwrap_or(DVec3::ZERO)
+    }
+
+    /// Author a parked child's lift ([`crate::stub::stand`] alone writes it). A child whose row is a static row (one
+    /// this realm does not author every tick) has its parent's static rows authored again, so the row carries it.
+    pub(crate) fn set_lift(&mut self, child: RealmId, lift: DVec3) {
+        self.lifts.insert(child, lift);
+        let Some(&ix) = self.ix_of.get(&child) else {
+            return;
+        };
+        let r = self.regions[ix];
+        let static_row =
+            !(self.moving.contains_key(&r.realm) | matches!(r.realm, RealmId::Ship(_)));
+        if let (true, Some(parent)) = (static_row, r.parent) {
+            self.rebuild_static_rows_for(parent);
+        }
+    }
+
+    /// ★ THE STAND LANDS (ruling B81 Q6): a parked child's lift folds into the centre this realm authors for it — the
+    /// child is adopted again at its standing place, so the containment, the lookups and the rows all read the one
+    /// centre — and the lift returns to nought. Example: hull 15 stood 280 m over its old berth; from this tick a pilot
+    /// spawned at its standing centre is inside it.
+    pub(crate) fn fold_lift(&mut self, child: RealmId) {
+        let lift = self.lifts.remove(&child).unwrap_or(DVec3::ZERO);
+        let (Some(own), Some(&ix)) = (self.own_realm, self.ix_of.get(&child)) else {
+            return;
+        };
+        let tier = self.own_frame(own).tier();
+        let mut region = self.regions[ix];
+        let at = region
+            .center
+            .in_parents_frame()
+            .delta_m(LatticePos::ORIGIN, tier)
+            + lift;
+        region.center =
+            vd_core::geometry::ParentCentre::authored(LatticePos::from_metres(at, tier));
+        self.adopt_child(region);
+    }
+
+    /// ★ THE CHILDREN THIS REALM PARKED (its berths, read at boot, and the children it adopted since): every child it
+    /// holds a parked attitude for that is still its own direct child.
+    pub(crate) fn parked_children(&self) -> Vec<RealmId> {
+        let own = self.own_realm;
+        self.facings
+            .keys()
+            .copied()
+            .filter(|c| {
+                self.region_of(*c)
+                    .is_some_and(|r| r.parent.is_some() & (r.parent == own))
+            })
+            .collect()
+    }
+
+    /// ★ WHERE A PARKED CHILD STANDS, for the ground under it: its authored centre in this realm's own metres, its
+    /// lift, its parked attitude and its bound — `None` for a realm that is not this realm's direct child, or that
+    /// moves by an orbit (its place is its motion's, never the ground's).
+    pub(crate) fn parked_at(&self, child: RealmId) -> Option<crate::stub::stand::Parked> {
+        let r = self.region_of(child)?;
+        let parent = self.region_of(r.parent.filter(|p| Some(*p) == self.own_realm)?)?;
+        (!self.moving.contains_key(&child)).then(|| crate::stub::stand::Parked {
+            centre: r.center.metres_in(parent),
+            lift: self.lift_of(child),
+            facing: self.facing_of(child),
+            shape: r.shape,
+        })
     }
 
     /// Name the realm this shard hosts, which is what lets the forest be split into "my direct children"
@@ -916,7 +994,7 @@ impl RealmRegions {
                 r.frame,
                 FramePlacement {
                     origin_cell: r.center.in_parents_frame().cell(),
-                    origin: r.center.in_parents_frame().offset(),
+                    origin: r.center.in_parents_frame().offset() + self.lift_of(r.realm),
                     velocity: DVec3::ZERO,
                     orientation: self.facing_of(r.realm),
                     angular_velocity: DVec3::ZERO,
@@ -1004,7 +1082,7 @@ impl RealmRegions {
                     r.frame,
                     FramePlacement {
                         origin_cell: r.center.in_parents_frame().cell(),
-                        origin: r.center.in_parents_frame().offset(),
+                        origin: r.center.in_parents_frame().offset() + self.lift_of(r.realm),
                         velocity: DVec3::ZERO,
                         orientation: self.facing_of(r.realm),
                         angular_velocity: DVec3::ZERO,
@@ -1342,7 +1420,13 @@ impl RealmRegions {
                         let r = &self.regions[ix];
                         (
                             r.frame,
-                            placement_row(&self.moving, driven, r, self.facing_of(r.realm), secs),
+                            placement_row(
+                                &self.moving,
+                                driven,
+                                r,
+                                (self.facing_of(r.realm), self.lift_of(r.realm)),
+                                secs,
+                            ),
                         )
                     })
                     .collect()
@@ -1354,7 +1438,13 @@ impl RealmRegions {
                 if r.parent == Some(anchor) && !self.moving.contains_key(child) {
                     overlay.push((
                         r.frame,
-                        placement_row(&self.moving, driven, r, self.facing_of(r.realm), secs),
+                        placement_row(
+                            &self.moving,
+                            driven,
+                            r,
+                            (self.facing_of(r.realm), self.lift_of(r.realm)),
+                            secs,
+                        ),
                     ));
                 }
             }

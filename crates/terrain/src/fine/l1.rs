@@ -22,7 +22,7 @@
 use super::delaunay::{Dir, Graph, NONE, chord2, triangulate};
 use super::geometry::{Geometry, geometry, locate};
 use super::points::{CellId, Level, chart_cell, domain_points};
-use super::tree::{accumulate, tree};
+use super::tree::{Tree, accumulate, tree};
 use crate::artifact::{Artifact, RECEIVER_NONE, RECEIVER_SLOT_MASK, node_at, sample_z};
 use crate::body::{BodyDefinition, TAN_REPOSE};
 use crate::gf::Gf;
@@ -40,12 +40,23 @@ pub const COARSE_RUNG: u8 = L1_RUNG + 2;
 pub const TILE_NODES: i32 = 8;
 /// The buffer each side, in macro nodes (B0 step 2b: one node let a cut run along a valley the halves placed apart).
 pub const BUFFER_NODES: i32 = 2;
-/// The rounds of the coarse start and of this level (three warm rounds read as ten cold ones, B0 step 3).
+/// The rounds of the coarse start (each rebuilding its drainage every pass, B0 step 3).
 pub const COARSE_ROUNDS: usize = 10;
-pub const ROUNDS: usize = 3;
-/// A round's passes at most, and the mean's move under which they stop (metres).
+/// A coarse round's passes at most, and the mean's move under which a round or a pass stops (metres).
 pub const MAX_PASSES: usize = 60;
 pub const SETTLE_M: f64 = 5.0;
+/// ★ THE FINE ROUNDS' BOUND (ruling B92): this level's rounds stop by the settle law ([`SETTLE_M`]); the bound only
+/// guarantees an end, and it is the old method's own pass budget for this level (three rounds of [`MAX_PASSES`]), so
+/// the rounds are never slower than the method they replaced. MEASURED: three tiles beside the home berth settled at 78,
+/// 78 and 132 rounds with the drainage rebuilt every [`REBUILD_ROUNDS`] rounds.
+pub const FINE_ROUND_BOUND: usize = 3 * MAX_PASSES;
+/// ★ THE DRAINAGE'S REBUILD (ruling B92 amended, 2026-10-13): this level's drainage is built again from the heights after
+/// every `REBUILD_ROUNDS` rounds. MEASURED (the bench's census, three tiles beside the berth, the same start): built only
+/// ONCE, the two sides of a divide grew apart with no capture to join them — 1.0–1.7 % of the links over 63°, peaks of
+/// 11.5–24.4 km (the owner saw the walls and a spire in the window); rebuilt after every round, the rounds settled on one
+/// tile of three; rebuilt after every second round they settled on all three, with 0.02–0.05 % of the links over 63°
+/// and peaks of 4.7–5.6 km (the method before B92: 0.0003–0.012 %, 5.5–6.5 km, never settled).
+pub const REBUILD_ROUNDS: usize = 2;
 /// The Gaussian read's width and reach, in nodes (the same weight in every direction; a node enters or leaves the
 /// window only at a weight of 4·10⁻⁶).
 pub const READ_SIGMA: f64 = 0.7;
@@ -349,86 +360,183 @@ pub fn domain(
     })
 }
 
-/// The heights on `d` after `rounds` rounds from the rises `u` (one a read node, `d.refs`' order) and the start `h`;
-/// returns each round's passes.
-pub fn rounds(d: &Domain, u: &mut [Gf], h: &mut [Gf], rounds: usize) -> Vec<usize> {
-    let n = h.len();
-    let (k_lp, inv_n, half_n) = (
-        Gf::from_f64(JOINT_K_LP),
-        Gf::from_f64(1.0 / JOINT_N),
-        Gf::from_f64(0.5 * JOINT_N),
-    );
-    let tan = Gf::from_f64(TAN_REPOSE);
-    let settle = Gf::from_f64(SETTLE_M);
-    let tiny = Gf::from_f64(f64::MIN_POSITIVE);
+/// Each held-or-not node's mean height over its points on `d`, weighted by the points' areas (nought for a node with none).
+fn node_means(d: &Domain, h: &[Gf]) -> Vec<Gf> {
     let nl = d.nodes.len();
-    let means = |h: &[Gf]| -> Vec<Gf> {
-        let (mut sum, mut area) = (vec![Gf::ZERO; nl], vec![Gf::ZERO; nl]);
-        for ((&k, &hp), &a) in d.pnode.iter().zip(h).zip(&d.geom.area) {
-            sum[k as usize] += hp * a;
-            area[k as usize] += a;
+    let (mut sum, mut area) = (vec![Gf::ZERO; nl], vec![Gf::ZERO; nl]);
+    for ((&k, &hp), &a) in d.pnode.iter().zip(h).zip(&d.geom.area) {
+        sum[k as usize] += hp * a;
+        area[k as usize] += a;
+    }
+    (0..nl)
+        .map(|k| {
+            if area[k] > Gf::ZERO {
+                sum[k] / area[k]
+            } else {
+                Gf::ZERO
+            }
+        })
+        .collect()
+}
+
+/// Each point's rise: the Gaussian of the read nodes' logarithms.
+fn point_rises(d: &Domain, u: &[Gf]) -> Vec<Gf> {
+    let ln_u: Vec<Gf> = u.iter().map(|x| x.ln_fine()).collect();
+    (0..d.base.len())
+        .map(|p| {
+            let mut s = Gf::ZERO;
+            for t in d.wstart[p] as usize..d.wstart[p + 1] as usize {
+                s += d.wval[t] * ln_u[d.wnode[t] as usize];
+            }
+            s.exp_fine()
+        })
+        .collect()
+}
+
+/// ★ ONE EXACT PASS of the joint law's steady state on the tree `t` with its flow `q`: from the outlets up the order, each
+/// point its receiver's height plus the law's slope over its link (an outlet or a point no outlet reaches its base).
+fn steady_pass(d: &Domain, t: &Tree, q: &[Gf], up: &[Gf], h: &mut [Gf]) {
+    let (k_lp, inv_n) = (Gf::from_f64(JOINT_K_LP), Gf::from_f64(1.0 / JOINT_N));
+    let tan = Gf::from_f64(TAN_REPOSE);
+    let tiny = Gf::from_f64(f64::MIN_POSITIVE);
+    for &c in &t.order {
+        let c = c as usize;
+        let r = t.recv[c];
+        if d.outlet[c] || r == NONE {
+            h[c] = d.base[c];
+            continue;
         }
-        (0..nl)
-            .map(|k| {
-                if area[k] > Gf::ZERO {
-                    sum[k] / area[k]
-                } else {
-                    Gf::ZERO
-                }
-            })
-            .collect()
-    };
+        let s = (up[c] / (k_lp * q[c].greater(tiny)))
+            .powf_fine(inv_n)
+            .lesser(tan);
+        h[c] = h[r as usize] + s * t.link[c];
+    }
+}
+
+/// ★ A ROUND'S SLOPES ON THE NETWORK, in logarithms (ruling B92): each point's slope is exp((L − ln(K·q)) / n) — L the
+/// Gaussian of the read nodes' logarithms of the rise, ln(K·q) the point's own, taken once with each network — held under
+/// the 35° repose; one exponential a point a round, where the rise and the power took three.
+fn round_slopes(d: &Domain, u: &[Gf], ln_kq: &[Gf]) -> Vec<Gf> {
+    let inv_n = Gf::from_f64(1.0 / JOINT_N);
+    let tan = Gf::from_f64(TAN_REPOSE);
+    let ln_u: Vec<Gf> = u.iter().map(|x| x.ln_fine()).collect();
+    (0..d.base.len())
+        .map(|p| {
+            let mut l = Gf::ZERO;
+            for t in d.wstart[p] as usize..d.wstart[p + 1] as usize {
+                l += d.wval[t] * ln_u[d.wnode[t] as usize];
+            }
+            ((l - ln_kq[p]) * inv_n).exp_fine().lesser(tan)
+        })
+        .collect()
+}
+
+/// The heights along the network from its outlets up: each point its receiver's height plus its slope over its link (an
+/// outlet or a point no outlet reaches its base).
+fn integrate(d: &Domain, t: &Tree, slopes: &[Gf], h: &mut [Gf]) {
+    for &c in &t.order {
+        let c = c as usize;
+        let r = t.recv[c];
+        if d.outlet[c] || r == NONE {
+            h[c] = d.base[c];
+            continue;
+        }
+        h[c] = h[r as usize] + slopes[c] * t.link[c];
+    }
+}
+
+/// The largest move of a held node's mean between two passes.
+fn moved_max(d: &Domain, now: &[Gf], last: &[Gf]) -> Gf {
+    (0..d.nodes.len())
+        .filter(|&k| d.held[k])
+        .map(|k| (now[k] - last[k]).abs())
+        .fold(Gf::ZERO, Gf::greater)
+}
+
+/// The clamp-free half step (B23): each held node's rise times (row/mean)^(n/2), a node over the sea only.
+fn half_step(d: &Domain, u: &mut [Gf], means: &[Gf]) {
+    let half_n = Gf::from_f64(0.5 * JOINT_N);
+    for (k, &mean) in means.iter().enumerate() {
+        let r = d.node_ref[k] as usize;
+        if d.held[k] && mean > Gf::ZERO && r < u.len() {
+            u[r] *= (d.node_z[k] / mean).powf_fine(half_n);
+        }
+    }
+}
+
+/// The heights on `d` after `rounds` rounds from the rises `u` (one a read node, `d.refs`' order) and the start `h`, the
+/// drainage REBUILT every pass; returns each round's passes. The coarse start's method.
+pub fn rounds(d: &Domain, u: &mut [Gf], h: &mut [Gf], rounds: usize) -> Vec<usize> {
+    let settle = Gf::from_f64(SETTLE_M);
     let mut log = Vec::with_capacity(rounds);
     for _ in 0..rounds {
-        // Each point's rise: the Gaussian of the read nodes' logarithms.
-        let ln_u: Vec<Gf> = u.iter().map(|x| x.ln_fine()).collect();
-        let up: Vec<Gf> = (0..n)
-            .map(|p| {
-                let mut s = Gf::ZERO;
-                for t in d.wstart[p] as usize..d.wstart[p + 1] as usize {
-                    s += d.wval[t] * ln_u[d.wnode[t] as usize];
-                }
-                s.exp_fine()
-            })
-            .collect();
-        let mut last = means(h);
+        let up = point_rises(d, u);
+        let mut last = node_means(d, h);
         let mut passes = 0;
         while passes < MAX_PASSES {
             passes += 1;
             let t = tree(h, &d.outlet, &d.graph, &d.geom.len);
             let q = accumulate(&t, &d.water);
-            for &c in &t.order {
-                let c = c as usize;
-                let r = t.recv[c];
-                if d.outlet[c] || r == NONE {
-                    h[c] = d.base[c];
-                    continue;
-                }
-                let s = (up[c] / (k_lp * q[c].greater(tiny)))
-                    .powf_fine(inv_n)
-                    .lesser(tan);
-                h[c] = h[r as usize] + s * t.link[c];
-            }
-            let now = means(h);
-            let moved = (0..nl)
-                .filter(|&k| d.held[k])
-                .map(|k| (now[k] - last[k]).abs())
-                .fold(Gf::ZERO, Gf::greater);
+            steady_pass(d, &t, &q, &up, h);
+            let now = node_means(d, h);
+            let moved = moved_max(d, &now, &last);
             last = now;
             if moved <= settle {
                 break;
             }
         }
         log.push(passes);
-        // The clamp-free half step (B23): the rise times (row/mean)^(n/2), a node over the sea only.
-        for (k, &mean) in last.iter().enumerate() {
-            let r = d.node_ref[k] as usize;
-            if d.held[k] && mean > Gf::ZERO && r < u.len() {
-                u[r] *= (d.node_z[k] / mean).powf_fine(half_n);
-            }
-        }
+        half_step(d, u, &last);
     }
     log
+}
+
+/// The drainage of the heights `h` on `d` and each point's ln(K·q) on it (the flow is fixed until the next rebuild).
+fn network(d: &Domain, h: &[Gf]) -> (Tree, Vec<Gf>) {
+    let t = tree(h, &d.outlet, &d.graph, &d.geom.len);
+    let (k_lp, tiny) = (Gf::from_f64(JOINT_K_LP), Gf::from_f64(f64::MIN_POSITIVE));
+    let ln_kq = accumulate(&t, &d.water)
+        .iter()
+        .map(|&qc| (k_lp * qc.greater(tiny)).ln_fine())
+        .collect();
+    (t, ln_kq)
+}
+
+/// ★ THE FINE ROUNDS (ruling B92, 2026-10-13, amended the same day): each round is ONE exact pass of the joint law's
+/// steady state on the drainage (B77's "the stream law's analytic solution on a drainage network built first") and the
+/// half step of the rises; the drainage is built again after every [`REBUILD_ROUNDS`] rounds, so a divide's two sides
+/// meet again by capture; the rounds stop when no held node's mean moves more than [`SETTLE_M`] (the settle law), within
+/// [`FINE_ROUND_BOUND`]. Returns the rounds run. MEASURED before B92 (the bench `fine_settle_bench`): rebuilt every PASS,
+/// the drainage never stopped capturing (~1 % of the points changed their receiver in every pass), so every round ended
+/// at its pass limit mid-drift.
+///
+/// **Example.** A 128 m tile beside the home berth: the drainage of its start is built, two rounds run on it, it is built
+/// again from their heights, and after 78 rounds no node's mean moves 5 m; a ridge between two valleys that drain apart
+/// stays one ridge, because the higher side's points drain over it once the drainage is built again.
+pub fn fine_rounds(d: &Domain, u: &mut [Gf], h: &mut [Gf]) -> usize {
+    fine_rounds_within(d, u, h, FINE_ROUND_BOUND)
+}
+
+/// [`fine_rounds`] within `bound` rounds: the rounds run, `bound` when the settle law never held.
+fn fine_rounds_within(d: &Domain, u: &mut [Gf], h: &mut [Gf], bound: usize) -> usize {
+    let settle = Gf::from_f64(SETTLE_M);
+    let (mut t, mut ln_kq) = network(d, h);
+    let mut last = node_means(d, h);
+    for round in 1..=bound {
+        let slopes = round_slopes(d, u, &ln_kq);
+        integrate(d, &t, &slopes, h);
+        let now = node_means(d, h);
+        let moved = moved_max(d, &now, &last);
+        half_step(d, u, &now);
+        last = now;
+        if moved <= settle {
+            return round;
+        }
+        if round % REBUILD_ROUNDS == 0 {
+            (t, ln_kq) = network(d, h);
+        }
+    }
+    bound
 }
 
 /// A solved 128 m tile: the tile and half its buffer as `side × side` heights in quarter metres over the sea (rows of
@@ -474,7 +582,7 @@ pub fn solve_l1(
             from = t;
         }
     }
-    passes.extend(rounds(&fine, &mut u, &mut h, ROUNDS));
+    passes.push(fine_rounds(&fine, &mut u, &mut h));
     // The raster: the tile and half its buffer, cell centres at this rung, by the walk's weights.
     let n_r = body.ladder().cells_per_edge(L1_RUNG);
     let shift = cells_per_node_shift(body, lattice, L1_RUNG)?;
@@ -586,14 +694,25 @@ mod tests {
             }
         }
         let tile = solve_l1(&moon, &lattice, &artifact, best.1).expect("the tile solves");
+        // The fine rounds' own end (ruling B92): within a bound of none no round runs and the start stands as it was.
+        let fine = domain(&moon, &lattice, &artifact, L1_RUNG, best.1).expect("the fine domain");
+        let (mut u, mut h) = (fine.ref_u0.clone(), fine.base.clone());
+        assert_eq!(fine_rounds_within(&fine, &mut u, &mut h, 0), 0);
+        assert_eq!((u, h), (fine.ref_u0.clone(), fine.base.clone()));
         assert_eq!((tile.side, tile.quarters.len()), (640, 640 * 640));
-        assert_eq!(tile.passes.len(), COARSE_ROUNDS + ROUNDS);
+        // The coarse start's ten rounds each within their passes, and this level's rounds within their bound.
+        assert_eq!(tile.passes.len(), COARSE_ROUNDS + 1);
         assert_eq!(
-            tile.passes
+            tile.passes[..COARSE_ROUNDS]
                 .iter()
                 .filter(|&&p| (p == 0) | (p > MAX_PASSES))
                 .count(),
             0,
+            "{:?}",
+            tile.passes
+        );
+        assert!(
+            (1..=FINE_ROUND_BOUND).contains(&tile.passes[COARSE_ROUNDS]),
             "{:?}",
             tile.passes
         );

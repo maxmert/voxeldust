@@ -446,6 +446,16 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     nice 10; `libc` approved for the shard program; the generator's helpers take the host's start step); A STARTED FIRST
     SOLVE LANDS — SL7 AMENDED (a realm stays alive while its first solve has not landed; it does not report itself empty;
     a failed solve ends the reason); WHEN a solve starts stays the advance calculation's (B86 item 6, must not be hurt).
+    ★ B92 (2026-10-13, the owner on the pictures: "I think they all look amazing, so take the most optimal one"): THE
+    128 m LEVEL'S DRAINAGE IS BUILT ONCE (B77's "network built first"; the rebuilt drainage kept capturing and every
+    fine round ended at its pass limit) — one exact pass + the half step a round, the SETTLE LAW (5 m) ends the rounds
+    within 180, the slopes in logarithms; a tile 6.5 → 3.2 s, the node means nearer their rows; FINE_VERSION 2; a far
+    copy solves only when no whole tile waits.
+    ★ B93 (2026-10-13, the owner saw walls and a spire on B92's ground: "Let's try (1) … if nothing works, can we
+    adopt something from the list"): MEASURED built-once drainage = 1–1.7 % of links over 63°, peaks to 24 km; THE
+    DRAINAGE BUILT AGAIN AFTER EVERY SECOND ROUND (0.02–0.05 %, peaks ≤ 5.6 km, settles 78–132 rounds, 4–6 s a tile;
+    FINE_VERSION 3); every ground change judged FROM THE SIDE (the census + the window), never top-down or a mean alone;
+    if it fails the look, ADOPT A PROVEN METHOD from the reviewed list (fastlem's own solver first), never more rounds.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

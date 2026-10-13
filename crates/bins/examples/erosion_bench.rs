@@ -2323,7 +2323,7 @@ fn main() {
         }
         if args.iter().any(|a| a == "--fine-debug") {
             use vd_terrain::fine::l1::{
-                COARSE_ROUNDS, COARSE_RUNG, L1_RUNG, ROUNDS, domain, rounds,
+                COARSE_ROUNDS, COARSE_RUNG, L1_RUNG, domain, fine_rounds, rounds,
             };
             let t = Instant::now();
             let coarse = domain(&body, &lattice, &artifact, COARSE_RUNG, key).expect("coarse");
@@ -2344,7 +2344,8 @@ fn main() {
                 .map(|(m, &u0)| coarse.refs.binary_search(m).map_or(u0, |i| uc[i]))
                 .collect();
             let mut h = fine.base.clone();
-            let pf = rounds(&fine, &mut u, &mut h, ROUNDS);
+            // The game's method for this level since ruling B92: the drainage built once, the rounds by the settle law.
+            let pf = vec![fine_rounds(&fine, &mut u, &mut h)];
             let t_fr = t.elapsed().as_secs_f64();
             println!(
                 "debug: the coarse domain {t_cd:.2} s ({} points), its rounds {t_cr:.2} s {pc:?}; the fine domain {t_fd:.2} s ({} points), its rounds (cold start here) {t_fr:.2} s {pf:?}",

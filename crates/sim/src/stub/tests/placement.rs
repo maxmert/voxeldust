@@ -1510,7 +1510,7 @@ fn a_driven_child(push: [i64; 3]) -> crate::stub::drive::DrivenChildren {
         parent,
         true,
         &nodes,
-        DQuat::IDENTITY,
+        (DQuat::IDENTITY, glam::DVec3::ZERO),
         &mut driven,
         &mut stats,
     );
@@ -1526,7 +1526,7 @@ fn a_driven_child(push: [i64; 3]) -> crate::stub::drive::DrivenChildren {
         parent,
         true,
         &nodes,
-        DQuat::IDENTITY,
+        (DQuat::IDENTITY, glam::DVec3::ZERO),
         &mut driven,
         &mut stats,
     );
@@ -1669,7 +1669,7 @@ fn a_child_that_neither_orbits_nor_is_driven_keeps_the_whole_berth_its_parent_au
         &BTreeMap::new(),
         &crate::stub::drive::DrivenChildren::default(),
         &r,
-        parked,
+        (parked, DVec3::ZERO),
         12.0,
     );
     assert_eq!(row.origin_cell, r.center.in_parents_frame().cell());

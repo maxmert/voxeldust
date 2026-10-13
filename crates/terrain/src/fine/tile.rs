@@ -31,8 +31,10 @@ pub const RANGE_FORM: u8 = 2;
 pub const RAW_FORM: u8 = 1;
 /// ★ THE FINE GENERATOR'S VERSION (B2; the way-in design §4.2 and §4.6): every change to what a fine tile holds for the
 /// same artifact — the points, the graph, the law, the rounds, the raster, the cut, the means, a record's form — is a
-/// new number, so a store never serves a tile an older generator made.
-pub const FINE_VERSION: u32 = 1;
+/// new number, so a store never serves a tile an older generator made. 2 (ruling B92, 2026-10-13): the 128 m level's
+/// rounds on a drainage network built once. 3 (B92 amended, the same day): the drainage built again after every second
+/// round (`l1::fine_rounds`; built once, it made walls and spires).
+pub const FINE_VERSION: u32 = 3;
 
 /// ★ THE INPUT WORD a stored fine tile is keyed by: the artifact's digest and [`FINE_VERSION`] folded — the same body
 /// and the same artifact give the same word on every host, and a world change (a new artifact) or a fine change gives
