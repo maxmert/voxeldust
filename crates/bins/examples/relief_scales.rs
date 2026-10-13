@@ -123,6 +123,137 @@ fn line(name: &str, scale: &str, r: &[f32]) -> String {
     )
 }
 
+/// ★ HOW DEEP A RIVER LIES UNDER THE 8 km MEANS (ruling B94, step 1's target): the grid cut into cells of 64 × 64 (8 km),
+/// each land cell's receiver the lowest of its eight neighbours' means (when lower than its own), and its EXIT the lowest
+/// ground on the edge they share (a strip 4 cells deep on each side, or the corner's 8 × 8 for a diagonal). The depth is
+/// the lower of the two means less the exit — what the fine level's exits stand at today is a depth of nought. Printed
+/// by the receiver's slope class (the means' drop over the step), with the cell's own relief beside it.
+fn exits(name: &str, g: &Grid) {
+    let k = 64usize;
+    let (cw, ch) = (g.w / k, g.h / k);
+    let means = g.means(k);
+    let cell_relief = |cx: usize, cy: usize| -> f32 {
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for y in cy * k..(cy + 1) * k {
+            for x in cx * k..(cx + 1) * k {
+                lo = lo.min(g.at(x, y));
+                hi = hi.max(g.at(x, y));
+            }
+        }
+        hi - lo
+    };
+    let lowest = |x0: usize, x1: usize, y0: usize, y1: usize| -> f32 {
+        let mut lo = f32::INFINITY;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                lo = lo.min(g.at(x, y));
+            }
+        }
+        lo
+    };
+    // (slope class, depth, the cell's own relief)
+    let mut rows: Vec<(usize, f32, f32)> = Vec::new();
+    for cy in 1..ch.saturating_sub(1) {
+        for cx in 1..cw.saturating_sub(1) {
+            let m = means.at(cx, cy);
+            if !(m.is_finite() && m > 0.0) {
+                continue;
+            }
+            let mut best: Option<(f32, i64, i64)> = None;
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let v = means.at((cx as i64 + dx) as usize, (cy as i64 + dy) as usize);
+                    if v.is_finite() && v < m && best.is_none_or(|b| v < b.0) {
+                        best = Some((v, dx, dy));
+                    }
+                }
+            }
+            let Some((mr, dx, dy)) = best else {
+                continue;
+            };
+            let (ax, ay) = (cx * k, cy * k);
+            let exit = match (dx, dy) {
+                (1, 0) => lowest(ax + k - 4, ax + k + 4, ay, ay + k),
+                (-1, 0) => lowest(ax - 4, ax + 4, ay, ay + k),
+                (0, 1) => lowest(ax, ax + k, ay + k - 4, ay + k + 4),
+                (0, -1) => lowest(ax, ax + k, ay - 4, ay + 4),
+                (sx, sy) => {
+                    let x = if sx > 0 { ax + k } else { ax };
+                    let y = if sy > 0 { ay + k } else { ay };
+                    lowest(x - 4, x + 4, y - 4, y + 4)
+                }
+            };
+            if !(exit.is_finite() && exit > 0.0) {
+                continue;
+            }
+            let step = if dx != 0 && dy != 0 { 1.414 } else { 1.0 } * means.cell_m as f32;
+            let slope = (m - mr) / step;
+            let class = if slope < 0.002 {
+                0
+            } else if slope < 0.01 {
+                1
+            } else if slope < 0.04 {
+                2
+            } else {
+                3
+            };
+            rows.push((class, m.min(mr) - exit, cell_relief(cx, cy)));
+        }
+    }
+    let names = ["under 0.2 %", "0.2–1 %", "1–4 %", "over 4 %"];
+    for (c, label) in names.iter().enumerate() {
+        let mut d: Vec<f32> = rows.iter().filter(|r| r.0 == c).map(|r| r.1).collect();
+        let mut rel: Vec<f32> = rows.iter().filter(|r| r.0 == c).map(|r| r.2).collect();
+        if d.is_empty() {
+            continue;
+        }
+        d.sort_by(f32::total_cmp);
+        rel.sort_by(f32::total_cmp);
+        let q = |v: &[f32], f: f64| v[((v.len() - 1) as f64 * f).round() as usize];
+        println!(
+            "  {name:<34} EXIT DEPTH, 8 km slope {label:>11}: p10 {:>5.0} p50 {:>5.0} p90 {:>5.0} m under the lower mean | the cell's relief p50 {:>5.0} m | {} cells",
+            q(&d, 0.1),
+            q(&d, 0.5),
+            q(&d, 0.9),
+            q(&rel, 0.5),
+            d.len()
+        );
+    }
+}
+
+/// The 8 km means' relief the way `macro_relief` reads the home planet's rows: each land cell of 64 × 64 with its eight
+/// neighbours (~25 km), every interior cell.
+fn macro3(name: &str, g: &Grid) {
+    let m = g.means(64);
+    let mut r = Vec::new();
+    for y in 1..m.h.saturating_sub(1) {
+        for x in 1..m.w.saturating_sub(1) {
+            let (mut lo, mut hi, mut land) = (f32::INFINITY, f32::NEG_INFINITY, true);
+            for dy in 0..3 {
+                for dx in 0..3 {
+                    let v = m.at(x + dx - 1, y + dy - 1);
+                    land &= v.is_finite() && v > 0.0;
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            if land {
+                r.push(hi - lo);
+            }
+        }
+    }
+    println!(
+        "{}",
+        line(name, "3x3 8km", &{
+            r.sort_by(f32::total_cmp);
+            r
+        })
+    );
+}
+
 fn report(name: &str, g: &Grid) {
     println!("{}", line(name, "1 km", &reliefs(g, WIN_1KM)));
     println!("{}", line(name, "5 km", &reliefs(g, WIN_5KM)));
@@ -130,6 +261,7 @@ fn report(name: &str, g: &Grid) {
         "{}",
         line(name, "41 km", &reliefs(&g.means(MEAN_BLOCK), WIN_MEANS))
     );
+    macro3(name, g);
 }
 
 /// ★ THE SIDE VIEW: from the cell `from`, 2 km over the ground, looking along `heading_deg` (0 up the grid's rows, 90 along
@@ -363,8 +495,48 @@ fn main() {
     println!(
         "THE LOCAL RELIEF (the window's highest less its lowest), land windows only, cells of ~128 m"
     );
+    if std::env::var("VD_SKIP_HOME").is_ok() {
+        for path in &args[1..] {
+            let Some(spec) = path.strip_prefix("grid:") else {
+                // An Earth tile: its readings alone (no picture).
+                let g = earth_grid(path);
+                let name = std::path::Path::new(path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("earth");
+                report(&format!("Earth {name}"), &g);
+                continue;
+            };
+            let parts: Vec<&str> = spec.split(':').collect();
+            let (w, h): (usize, usize) =
+                (parts[1].parse().expect("W"), parts[2].parse().expect("H"));
+            let bytes = std::fs::read(parts[0]).expect("the grid reads");
+            let z: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            let g = Grid {
+                w,
+                h,
+                cell_m: 128.0,
+                z,
+            };
+            let name = std::path::Path::new(parts[0])
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("grid");
+            render(
+                &g,
+                (g.w / 2, g.h * 7 / 8),
+                0.0,
+                &format!("{out}/bench_{name}.png"),
+            );
+        }
+        return;
+    }
     let home = home_grid();
     report("the home planet, fine ground", &home);
+    exits("the home planet, fine ground", &home);
     // Each home tile alone: which are flat and which hold mountains.
     let side = 512usize;
     let mut per_tile = Vec::new();
@@ -418,12 +590,41 @@ fn main() {
     render(&home, mid(11, 9), 0.0, &format!("{out}/home_plain.png"));
     render(&home, mid(6, 16), 0.0, &format!("{out}/home_hills.png"));
     for path in &args[1..] {
+        // A raw grid from the settle bench (`grid:PATH:W:H`, little-endian f32, 128 m cells): a side view alone.
+        if let Some(spec) = path.strip_prefix("grid:") {
+            let parts: Vec<&str> = spec.split(':').collect();
+            let (w, h): (usize, usize) =
+                (parts[1].parse().expect("W"), parts[2].parse().expect("H"));
+            let bytes = std::fs::read(parts[0]).expect("the grid reads");
+            let z: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            let g = Grid {
+                w,
+                h,
+                cell_m: 128.0,
+                z,
+            };
+            let name = std::path::Path::new(parts[0])
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("grid");
+            render(
+                &g,
+                (g.w / 2, g.h * 7 / 8),
+                0.0,
+                &format!("{out}/bench_{name}.png"),
+            );
+            continue;
+        }
         let g = earth_grid(path);
         let name = std::path::Path::new(path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("earth");
         report(&format!("Earth {name}"), &g);
+        exits(&format!("Earth {name}"), &g);
         render(
             &g,
             (g.w / 2, g.h * 3 / 4),

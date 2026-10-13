@@ -31,7 +31,15 @@ const BERTH: [f64; 3] = [
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let pick: usize = args.get(1).map_or(0, |s| s.parse().expect("an index"));
+    // The tile: an index among the berth's whole tiles, or `F,TX,TY` named outright.
+    let named_tile: Option<(u8, u32, u32)> = args.get(1).and_then(|s| {
+        let v: Vec<u32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (v.len() == 3).then(|| (v[0] as u8, v[1], v[2]))
+    });
+    let pick: usize = named_tile.map_or_else(
+        || args.get(1).map_or(0, |s| s.parse().expect("an index")),
+        |_| 0,
+    );
     let limit: usize = args
         .get(2)
         .map_or(200, |s| s.parse().expect("a pass limit"));
@@ -77,11 +85,14 @@ fn main() {
         radial,
         vd_core::geometry::drawable_theta_min_rad(),
     );
-    let ((face, tx, ty), _) = *named
-        .iter()
-        .filter(|(_, l)| *l == 0)
-        .nth(pick)
-        .expect("a whole tile");
+    let (face, tx, ty) = named_tile.unwrap_or_else(|| {
+        named
+            .iter()
+            .filter(|(_, l)| *l == 0)
+            .nth(pick)
+            .expect("a whole tile")
+            .0
+    });
     let key = TileKey {
         face: Face::from_index(face).expect("a face"),
         tx: tx as i32,
@@ -89,7 +100,33 @@ fn main() {
     };
     println!("tile ({face}, {tx}, {ty}), pass limit {limit}");
     // THE GAME'S OWN START: the coarse domain's rounds, then the fine start read off them (`solve_l1`, copied).
-    let coarse = domain(&body, &lattice, &artifact, COARSE_RUNG, key).expect("a coarse domain");
+    let mut coarse = domain(&body, &lattice, &artifact, COARSE_RUNG, key).expect("a coarse domain");
+    // ★ THE BASE LEVEL TEST (`lower<D>`, 2026-10-13, the flat plains): every outlet where an 8 km river leaves the domain
+    // stands D metres under the lower node's row — a river bed under its node's mean, as Earth's plains' rivers lie under
+    // their uplands — on both domains.
+    let lower_m: Option<f64> = mode
+        .strip_prefix("lower")
+        .map(|d| d.parse().expect("lower<D>"));
+    if let Some(d) = lower_m {
+        lower_exits(&mut coarse, d);
+    }
+    // ★ THE CHANNEL TEST (`channels<D>`): every 8 km river link inside the domain is a line of outlets — the points within
+    // a point's spacing of the link — at a bed D metres under the rows it joins, so the fine streams meet the 8 km
+    // rivers anywhere inside the tile (B77's "a drainage network built first").
+    let channel_m: Option<f64> = mode
+        .strip_prefix("channels")
+        .map(|d| d.parse().expect("channels<D>"));
+    let radius = body.radius_m();
+    if let Some(d) = channel_m {
+        let n = channel_outlets(&mut coarse, &lattice, &artifact, radius, 600.0, d);
+        println!("the coarse channels: {n} points");
+    }
+    // ★ A, THE LAWFUL EXIT (`lawexits`, ruling B94 step 1 as the owner started it): each river exit under its row by the
+    // channel law's depth (see [`law_exits`]).
+    let law = mode == "lawexits";
+    if law {
+        law_exits(&mut coarse, &lattice, &artifact, radius, false);
+    }
     let mut uc = coarse.ref_u0.clone();
     let mut hc = coarse.base.clone();
     let coarse_passes = rounds(&coarse, &mut uc, &mut hc, COARSE_ROUNDS);
@@ -97,7 +134,18 @@ fn main() {
         "coarse rounds' passes {coarse_passes:?} ({} points)",
         coarse.dirs.len()
     );
-    let fine = domain(&body, &lattice, &artifact, L1_RUNG, key).expect("a fine domain");
+    let mut fine = domain(&body, &lattice, &artifact, L1_RUNG, key).expect("a fine domain");
+    if let Some(d) = lower_m {
+        let n = lower_exits(&mut fine, d);
+        println!("the base level: {n} river exits {d} m under their rows");
+    }
+    if let Some(d) = channel_m {
+        let n = channel_outlets(&mut fine, &lattice, &artifact, radius, 150.0, d);
+        println!("the fine channels: {n} points, {d} m under the rows");
+    }
+    if law {
+        law_exits(&mut fine, &lattice, &artifact, radius, true);
+    }
     let mut u: Vec<Gf> = fine
         .refs
         .iter()
@@ -124,6 +172,15 @@ fn main() {
     );
     if mode == "pictures" {
         pictures(&fine, &u, &h, face);
+        return;
+    }
+    if lower_m.is_some() | channel_m.is_some() | law {
+        let (mut un, mut hn) = (u.clone(), h.clone());
+        let rounds_run = vd_terrain::fine::l1::fine_rounds(&fine, &mut un, &mut hn);
+        println!("the game's rounds run: {rounds_run}");
+        fit(&fine, &hn);
+        census(&mode, &fine, &hn);
+        relief_of(&fine, &hn, face, &mode);
         return;
     }
     if mode == "census" {
@@ -181,6 +238,273 @@ fn fit(d: &Domain, h: &[Gf]) {
     println!(
         "FIT: the held nodes' fine mean against their own row: max {max:.1} m, mean {mean:.1} m"
     );
+}
+
+/// ★ THE LAWFUL EXIT (bench only): each 8 km river that leaves the domain leaves at its BED, under the lower row by
+/// `D = HI·Rf`:
+/// - `Rf`, the channel relief inside the cell — Whipple & Tucker 1999 (JGR 104:17661) eq. 22,
+///   `Rf = ks·ka^−θ·(L^(1−hθ) − xc^(1−hθ))/(1−hθ)`, with the steepness `ks = S·A^θ` read off the 8 km world (S the drop
+///   to the receiver over the link, A the node's drainage area = its discharge over its rain), θ = 1/n of the joint law
+///   (n = 2.2, so the law's own concavity), Hack's law `A = ka·x^h` (Hack 1957: ka = 6.69 m^0.33, h = 1.67), the channel
+///   head at xc = 320 m (Whipple & Tucker's 10⁵ m² head area; their calibration bodies the King Range and Taiwan's
+///   Central Range), and L the link's length;
+/// - `HI`, the share of that relief under the channel's mean — the same law's steady profile `z ∝ L^(1−p) − x^(1−p)`
+///   (p = hθ) averaged along the channel: `HI = (1−p)/(2−p)`, a property of the law, never a reading.
+fn law_exits(
+    d: &mut Domain,
+    lattice: &vd_terrain::macro_lattice::MacroLattice,
+    artifact: &vd_terrain::artifact::Artifact,
+    radius_m: f64,
+    print: bool,
+) {
+    use vd_terrain::artifact::{RECEIVER_NONE, RECEIVER_SLOT_MASK};
+    use vd_terrain::fine::l1::decode_class;
+    let (ka, h, xc) = (6.69f64, 1.67f64, 320.0f64);
+    let theta = 1.0 / vd_terrain::solve::JOINT_N;
+    let p = h * theta;
+    let hi = (1.0 - p) / (2.0 - p);
+    let unit = |g: [vd_recipe::Gi; 3]| {
+        let s = (1u64 << 40) as f64;
+        let v = [
+            g[0].raw() as f64 / s,
+            g[1].raw() as f64 / s,
+            g[2].raw() as f64 / s,
+        ];
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / l, v[1] / l, v[2] / l]
+    };
+    let local: std::collections::BTreeMap<u32, usize> =
+        d.nodes.iter().enumerate().map(|(i, &k)| (k, i)).collect();
+    let sea = f64::from(artifact.sea_m);
+    let mut depths = Vec::new();
+    for (li, &k) in d.nodes.iter().enumerate() {
+        let f = artifact.rows[k as usize].receiver_facies;
+        if f & RECEIVER_NONE != 0 {
+            continue;
+        }
+        let r = lattice.neighbours(k)[(f & RECEIVER_SLOT_MASK) as usize];
+        if local.contains_key(&r) {
+            continue;
+        }
+        let (a, b) = (unit(lattice.direction(k)), unit(lattice.direction(r)));
+        let mid = {
+            let m = [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+            let l = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+            [m[0] / l, m[1] / l, m[2] / l]
+        };
+        // The domain's own exit: the node's point nearest the link's midpoint.
+        let Some(pt) = (0..d.pnode.len())
+            .filter(|&q| d.pnode[q] as usize == li && d.outlet[q])
+            .min_by(|&x, &y| {
+                let dx = unit(d.dirs[x]);
+                let dy = unit(d.dirs[y]);
+                let ex =
+                    (dx[0] - mid[0]).powi(2) + (dx[1] - mid[1]).powi(2) + (dx[2] - mid[2]).powi(2);
+                let ey =
+                    (dy[0] - mid[0]).powi(2) + (dy[1] - mid[1]).powi(2) + (dy[2] - mid[2]).powi(2);
+                ex.total_cmp(&ey)
+            })
+        else {
+            continue;
+        };
+        let len = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+            * radius_m;
+        let (zk, zr) = (
+            f64::from(artifact.rows[k as usize].z_m) - sea,
+            f64::from(artifact.rows[r as usize].z_m) - sea,
+        );
+        let slope = ((zk - zr) / len).max(0.0);
+        let rain = decode_class(artifact.rows[k as usize].rain, 4) as f64 / 1_000.0;
+        let q = decode_class(artifact.rows[k as usize].discharge_log, 2) as f64 / 1_000.0;
+        let area = if rain > 0.0 { q / rain } else { 0.0 };
+        let ks = slope * area.powf(theta);
+        let rf = ks * ka.powf(-theta) * (len.powf(1.0 - p) - xc.powf(1.0 - p)) / (1.0 - p);
+        let depth = hi * rf.max(0.0);
+        d.base[pt] -= Gf::from_f64(depth);
+        depths.push((depth, slope, area, rf));
+    }
+    if print {
+        depths.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let n = depths.len();
+        let at = |f: f64| depths[((n.max(1) - 1) as f64 * f).round() as usize];
+        if n > 0 {
+            for (label, f) in [("least", 0.0), ("median", 0.5), ("most", 1.0)] {
+                let (dd, s, a, rf) = at(f);
+                println!(
+                    "LAW EXIT {label}: depth {dd:.1} m (Rf {rf:.0} m, HI {hi:.3}) — slope {:.3} %, area {:.0} km²",
+                    s * 100.0,
+                    a / 1e6
+                );
+            }
+        }
+        println!("the lawful exits: {n} river exits lowered");
+    }
+}
+
+/// The 8 km river links inside the domain as outlets: each point within `width_m` of a link from a node to its receiver
+/// (both in the domain) stands at the rows' interpolation along the link less `depth_m`; returns how many points.
+fn channel_outlets(
+    d: &mut Domain,
+    lattice: &vd_terrain::macro_lattice::MacroLattice,
+    artifact: &vd_terrain::artifact::Artifact,
+    radius_m: f64,
+    width_m: f64,
+    depth_m: f64,
+) -> usize {
+    use vd_terrain::artifact::{RECEIVER_NONE, RECEIVER_SLOT_MASK};
+    let unit = |g: [vd_recipe::Gi; 3]| {
+        let s = (1u64 << 40) as f64;
+        let v = [
+            g[0].raw() as f64 / s,
+            g[1].raw() as f64 / s,
+            g[2].raw() as f64 / s,
+        ];
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / l, v[1] / l, v[2] / l]
+    };
+    let local: std::collections::BTreeMap<u32, usize> =
+        d.nodes.iter().enumerate().map(|(i, &k)| (k, i)).collect();
+    let mut of_node: Vec<Vec<usize>> = vec![Vec::new(); d.nodes.len()];
+    for (p, &k) in d.pnode.iter().enumerate() {
+        of_node[k as usize].push(p);
+    }
+    let mut marked = 0usize;
+    for (li, &k) in d.nodes.iter().enumerate() {
+        let f = artifact.rows[k as usize].receiver_facies;
+        if f & RECEIVER_NONE != 0 {
+            continue;
+        }
+        let r = lattice.neighbours(k)[(f & RECEIVER_SLOT_MASK) as usize];
+        let Some(&lr) = local.get(&r) else {
+            continue;
+        };
+        let (a, b) = (unit(lattice.direction(k)), unit(lattice.direction(r)));
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ab2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+        let (za, zb) = (d.node_z[li].to_f64(), d.node_z[lr].to_f64());
+        for &p in of_node[li].iter().chain(&of_node[lr]) {
+            let v = unit(d.dirs[p]);
+            let av = [v[0] - a[0], v[1] - a[1], v[2] - a[2]];
+            let t = ((av[0] * ab[0] + av[1] * ab[1] + av[2] * ab[2]) / ab2).clamp(0.0, 1.0);
+            let c = [a[0] + t * ab[0], a[1] + t * ab[1], a[2] + t * ab[2]];
+            let dist = ((v[0] - c[0]).powi(2) + (v[1] - c[1]).powi(2) + (v[2] - c[2]).powi(2))
+                .sqrt()
+                * radius_m;
+            if dist <= width_m {
+                let bed = Gf::from_f64(za + t * (zb - za) - depth_m);
+                if !d.outlet[p] || bed < d.base[p] {
+                    marked += usize::from(!d.outlet[p]);
+                    d.outlet[p] = true;
+                    d.base[p] = bed;
+                }
+            }
+        }
+    }
+    marked
+}
+
+/// Every outlet over the sea (a river's exit) lowered `d` metres; returns how many.
+fn lower_exits(d: &mut Domain, by: f64) -> usize {
+    let by = Gf::from_f64(by);
+    let mut n = 0;
+    for p in 0..d.base.len() {
+        if d.outlet[p] && d.base[p] > Gf::ZERO {
+            d.base[p] -= by;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The tile's points rastered to its face's cells (each cell its points' mean), the local relief at 1 km and 5 km over
+/// land windows, and the raster written to `$VD_GRID_OUT` (little-endian f32, row by row) for the side view.
+fn relief_of(d: &Domain, h: &[Gf], face: u8, name: &str) {
+    let on: Vec<usize> = (0..h.len()).filter(|&p| d.cells[p].face == face).collect();
+    let (i0, i1) = on.iter().fold((i32::MAX, i32::MIN), |(a, b), &p| {
+        (a.min(d.cells[p].i), b.max(d.cells[p].i))
+    });
+    let (j0, j1) = on.iter().fold((i32::MAX, i32::MIN), |(a, b), &p| {
+        (a.min(d.cells[p].j), b.max(d.cells[p].j))
+    });
+    let (w, ht) = ((i1 - i0 + 1) as usize, (j1 - j0 + 1) as usize);
+    let (mut sum, mut cnt) = (vec![0.0f64; w * ht], vec![0u32; w * ht]);
+    for &p in &on {
+        let at = (d.cells[p].j - j0) as usize * w + (d.cells[p].i - i0) as usize;
+        sum[at] += h[p].to_f64();
+        cnt[at] += 1;
+    }
+    let mut z: Vec<f32> = (0..w * ht)
+        .map(|k| {
+            if cnt[k] > 0 {
+                (sum[k] / f64::from(cnt[k])) as f32
+            } else {
+                f32::NAN
+            }
+        })
+        .collect();
+    // A cell no point fell in takes a neighbour's height (the top-down pictures' own fill).
+    for _ in 0..4 {
+        for y in 0..ht {
+            for x in 0..w {
+                if z[y * w + x].is_nan() {
+                    let near = [
+                        (x.wrapping_sub(1), y),
+                        (x + 1, y),
+                        (x, y.wrapping_sub(1)),
+                        (x, y + 1),
+                    ];
+                    if let Some(v) = near
+                        .iter()
+                        .filter(|(a, b)| *a < w && *b < ht)
+                        .map(|(a, b)| z[b * w + a])
+                        .find(|v| !v.is_nan())
+                    {
+                        z[y * w + x] = v;
+                    }
+                }
+            }
+        }
+    }
+    for win in [8usize, 39] {
+        let mut r = Vec::new();
+        for wy in 0..ht / win {
+            for wx in 0..w / win {
+                let (mut lo, mut hi, mut land) = (f32::INFINITY, f32::NEG_INFINITY, true);
+                for y in wy * win..(wy + 1) * win {
+                    for x in wx * win..(wx + 1) * win {
+                        let v = z[y * w + x];
+                        land &= v.is_finite() && v > 0.0;
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                }
+                if land {
+                    r.push(hi - lo);
+                }
+            }
+        }
+        r.sort_by(f32::total_cmp);
+        if r.is_empty() {
+            continue;
+        }
+        let q = |f: f64| r[((r.len() - 1) as f64 * f).round() as usize];
+        let under = |m: f32| 100.0 * r.iter().filter(|v| **v < m).count() as f64 / r.len() as f64;
+        println!(
+            "RELIEF {name} at {} m: p10 {:.0} p50 {:.0} p90 {:.0} m, under 20 m {:.1} %, under 50 m {:.1} % ({} windows)",
+            win * 128,
+            q(0.1),
+            q(0.5),
+            q(0.9),
+            under(20.0),
+            under(50.0),
+            r.len()
+        );
+    }
+    if let Ok(path) = std::env::var("VD_GRID_OUT") {
+        let bytes: Vec<u8> = z.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(&path, bytes).expect("the raster writes");
+        println!("GRID {path} {w} {ht}");
+    }
 }
 
 /// ★ THE CENSUS (bench only): over every link of the point graph, the slope |dh| / length — the shares over 35° (the

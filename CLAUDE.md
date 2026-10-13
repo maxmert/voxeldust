@@ -456,6 +456,10 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     DRAINAGE BUILT AGAIN AFTER EVERY SECOND ROUND (0.02–0.05 %, peaks ≤ 5.6 km, settles 78–132 rounds, 4–6 s a tile;
     FINE_VERSION 3); every ground change judged FROM THE SIDE (the census + the window), never top-down or a mean alone;
     if it fails the look, ADOPT A PROVEN METHOD from the reviewed list (fastlem's own solver first), never more rounds.
+    ★ B94 (2026-10-13, the owner: "Ok, please proceed with your plan"): THE FLAT LAND HAS TWO SCALES — a tile's rivers
+    leave at the node MEAN, so no valley cuts below it (exits 100 / 300 m lower: Kansas- / Tennessee-like numbers);
+    STEP 1 the fine level's BASE LEVEL by a PUBLISHED LAW (Earth measures and checks it, gives no constant; FINE_VERSION
+    4); STEP 2 the 8 km world's valleys (B78's dry-world cure on the macro copy, generator 27, on the owner's word).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

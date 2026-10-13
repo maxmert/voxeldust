@@ -774,6 +774,7 @@ fn main() {
             "a case is phase2[-water][-lt][-craters][-wedge][-cell][-margins][-spread][-relief][-share][+pass|+flats|+cellK|+airy|+flex|+blendM|+scatterA][~fine][%K]"
         );
         let mut laws = Laws::default();
+        vd_bins::solve_copy::RAIN_RENORMALISED.store(false, std::sync::atomic::Ordering::Relaxed);
         if let Some(every) = climate_every {
             laws.climate_every = every;
         }
@@ -781,6 +782,9 @@ fn main() {
             match cand {
                 "pass" => laws.pass_share = true,
                 "flats" => laws.routing_flats = true,
+                // Ruling B94 step 2: the rain belt renormalised (`solve_copy::RAIN_RENORMALISED`, a probe).
+                "rain" => vd_bins::solve_copy::RAIN_RENORMALISED
+                    .store(true, std::sync::atomic::Ordering::Relaxed),
                 other => {
                     // The land copy's forms and diagnostics (rulings B58 item 2, B59–B61): cellK, airy, flex; the game's
                     // own margins, spread, spectrum and share (no change on generator 26); the diagnostics blendM

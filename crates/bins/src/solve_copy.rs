@@ -18,6 +18,60 @@
 //! a byte of the world the game solves.
 
 use vd_terrain::BodyDefinition;
+
+/// ★ A CANDIDATE UNDER MEASUREMENT, NOT A RULED LAW (2026-10-13, ruling B94 step 2; the macro study's defect 1,
+/// `docs/investigation/2026-10-11/macro_rain_rise_study.md`): the rain belt's factor renormalised so its area mean is one —
+/// the belt then only moves the supply between latitudes and never removes it. Each band of the circulation is uniform in
+/// the sine of the latitude, so the factor's area mean is `sinking + (rising − sinking)·8/15` (0.575) on any body. The
+/// bench sets it (`belts_bench … +rain`); off, the copy is the game's. The rain is scaled after the game's climate, the
+/// runoff and the aridity follow it; the ice's line does not (a probe, stated).
+pub static RAIN_RENORMALISED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn rained(mut c: vd_terrain::climate::Climate) -> vd_terrain::climate::Climate {
+    use vd_terrain::climate::{BELT_RISING_SHARE, BELT_SINKING_SHARE, aridity_q8, runoff_mm_yr};
+    if !RAIN_RENORMALISED.load(std::sync::atomic::Ordering::Relaxed) {
+        return c;
+    }
+    let mean = BELT_SINKING_SHARE + (BELT_RISING_SHARE - BELT_SINKING_SHARE) * 8.0 / 15.0;
+    for i in 0..c.rain_mm_yr.len() {
+        let rain = (f64::from(c.rain_mm_yr[i]) / mean).round() as u32;
+        c.rain_mm_yr[i] = rain;
+        let pet = Gf::from_i64(i64::from(c.pet_mm_yr[i]));
+        c.runoff_mm_yr[i] = runoff_mm_yr(Gf::from_i64(i64::from(rain)), pet)
+            .to_f64()
+            .round()
+            .max(0.0) as u32;
+        let t_k = Gf::from_f64(f64::from(c.temperature_dk[i]) / 10.0);
+        c.aridity_q8[i] = aridity_q8(t_k, rain);
+    }
+    c
+}
+
+/// The game's climate, then [`rained`].
+fn climate_on(
+    body: &BodyDefinition,
+    lattice: &vd_terrain::macro_lattice::MacroLattice,
+    words: &vd_terrain::solve::SolveWords,
+    z: &[i32],
+    sea: Option<vd_terrain::climate::SeaView<'_>>,
+    cores: vd_terrain::par::Cores,
+) -> vd_terrain::climate::Climate {
+    rained(vd_terrain::climate::climate_on(
+        body, lattice, words, z, sea, cores,
+    ))
+}
+
+/// The game's climate on the default cores, then [`rained`].
+fn climate_of(
+    body: &BodyDefinition,
+    lattice: &vd_terrain::macro_lattice::MacroLattice,
+    words: &vd_terrain::solve::SolveWords,
+    z: &[i32],
+    sea: Option<vd_terrain::climate::SeaView<'_>>,
+) -> vd_terrain::climate::Climate {
+    rained(vd_terrain::climate::climate(body, lattice, words, z, sea))
+}
 use vd_terrain::Gf;
 use vd_terrain::artifact::Artifact;
 use vd_terrain::belts::{BELT_NONE, BeltReport, Belts};
@@ -567,8 +621,7 @@ pub fn solve_copy_watched(
     let mut state = MacroSolve::from_land(body, &land)?;
     state.cores = cores;
     let gravity = body.facts().gravity_mm_s2;
-    let pre_climate =
-        vd_terrain::climate::climate_on(body, &lattice, words, &land.z, land.sea_view(), cores);
+    let pre_climate = climate_on(body, &lattice, words, &land.z, land.sea_view(), cores);
     let surface = vd_terrain::craters::Surface {
         crust: &land.crust,
         boundary_m: &land.boundary_m,
@@ -697,7 +750,7 @@ pub fn solve_copy_watched(
                 report.sea_unsettled |= !sea.settled;
             }
             let clock = std::time::Instant::now();
-            let c = vd_terrain::climate::climate_on(
+            let c = climate_on(
                 body,
                 &lattice,
                 words,
@@ -957,7 +1010,7 @@ pub fn solve_copy_watched(
     report.craters = report.crater_record.len();
     let climate = match climate {
         Some(c) => c,
-        None => vd_terrain::climate::climate_on(
+        None => climate_on(
             body,
             &lattice,
             words,
@@ -999,7 +1052,7 @@ pub fn solve_copy_watched(
     let mut final_climate = climate;
     let mut budget = None;
     if has_water {
-        let mut climate = vd_terrain::climate::climate_on(
+        let mut climate = climate_on(
             body,
             &lattice,
             words,
@@ -1016,14 +1069,7 @@ pub fn solve_copy_watched(
             volume,
             &mut report.routes,
             &mut |s: &MacroSolve| {
-                climate = vd_terrain::climate::climate_on(
-                    body,
-                    &lattice,
-                    words,
-                    &s.z,
-                    Some(s.sea_view()),
-                    cores,
-                );
+                climate = climate_on(body, &lattice, words, &s.z, Some(s.sea_view()), cores);
                 lakes = vd_terrain::lakes::budget(s, &climate);
                 lakes.report.volume_m3
             },
@@ -1081,8 +1127,7 @@ pub fn solve_copy_watched(
 #[must_use]
 pub fn artifact_of(body: &BodyDefinition, words: &SolveWords, s: &Solved) -> Artifact {
     let lattice = body.macro_lattice().expect("a lattice");
-    let climate =
-        vd_terrain::climate::climate(body, &lattice, words, &s.state.z, Some(s.state.sea_view()));
+    let climate = climate_of(body, &lattice, words, &s.state.z, Some(s.state.sea_view()));
     Artifact::of(&s.state, &s.facies, &climate, words.water_km3 > 0)
 }
 
@@ -1141,7 +1186,7 @@ mod tests {
                 Artifact::of(
                     &state,
                     &facies,
-                    &vd_terrain::climate::climate(
+                    &climate_of(
                         &moon,
                         &moon.macro_lattice().expect("a lattice"),
                         &words,

@@ -2397,3 +2397,21 @@ as reference only).
 3. **IF THIS FAILS THE OWNER'S LOOK, A PROVEN METHOD IS ADOPTED** from the reviewed list instead of more home-made rounds
    (B80's lesson): first fastlem's own solver as it runs in its own pictures (the method B80 liked), its licence
    (MPL-2.0) and its numbers' host-independence stated for the owner's word before it enters the game.
+
+## B94 (2026-10-13) — the flat land's two scales: the fine level's base level first, then the 8 km world's valleys
+
+THE MEASUREMENT (status file, 2026-10-13 later; `examples/relief_scales.rs`, `fine_settle_bench lower<D>|channels<D>`,
+`erosion_bench --lem-own`): the home planet's plains are flatter than Earth's flattest (5 km relief 10–25 m against
+Kansas's 45 m); a fine tile drains only through the 8 km rivers' exits on its rim, each at the lower node's MEAN, so with
+every node's mean held to its row no valley can cut below the mean; lowering the exits 100 / 300 m gives Kansas-like /
+Tennessee-like relief numbers; the 8 km links as channels draw straight grooves (refused, B58, B76); fastlem's own solver
+on our ground is flatter, not better; every variant keeps one even texture of ~1 km ridges — the 10–50 km valleys must
+come from the 8 km world. The owner: *"Ok, please proceed with your plan"*.
+
+1. **STEP 1, THE FINE LEVEL'S BASE LEVEL**: a river leaves a tile at its BED, under the node mean — by a PUBLISHED LAW with
+   its own calibration body, read from what the 8 km world holds (T9, B38); Earth's tiles MEASURE how deep a river lies
+   under the 8 km means and check the law, and give it no constant (B79 Q1). Built into the tile solve (FINE_VERSION 4)
+   with the relief numbers and side views beside Earth's before the owner's look.
+2. **STEP 2, THE 8 km WORLD'S VALLEYS (generator 27)**: on the copy of the macro solve, whether the dry world's cure (B78)
+   makes the 8 km rivers cut valleys into the plains (41 km relief toward Earth's 96–129 m); the world moves once, on the
+   owner's word.

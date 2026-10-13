@@ -417,6 +417,10 @@ fn main() {
             .cloned()
     };
     let gates_only = args.iter().any(|a| a == "--gates-only");
+    lem::OWN_SOLVER.store(
+        args.iter().any(|a| a == "--lem-own"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     lem::ROCK_SCATTER.store(
         args.iter().any(|a| a == "--lem-rock"),
         std::sync::atomic::Ordering::Relaxed,
@@ -6417,6 +6421,14 @@ mod lem {
         }
     }
 
+    /// ★ FASTLEM'S OWN SOLVER (`--lem-own`; 2026-10-13, the owner's B on the hills' form): in place of the joint law's
+    /// steady state, fastlem's unmodified `TerrainGenerator` (the Salève model — stream power with `m = 0.5`, `n = 1`, the
+    /// stream tree rebuilt until no height moves; Cordonnier et al. 2016), each site its uplift from the same node hold,
+    /// its erodibility the square root of its rain (so `K·A^0.5` reads `(rain·A)^0.5`, the water's own), its outlets and
+    /// their heights the same, no slope over the same threshold. The hold's correction follows `n = 1`.
+    pub static OWN_SOLVER: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     /// The bench's switch for the rock's stated scatter (`--lem-rock`; off: one rock, the lawful default).
     pub static ROCK_SCATTER: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
@@ -7198,9 +7210,36 @@ mod lem {
                 .iter()
                 .map(|s| radial(&ln_u, nw, node_m, s.x, s.y).exp() / rock(s.x, s.y))
                 .collect();
-            let (passes, still, q_now, recv_now) =
-                steady(graph, &outlet, &base, &water, &u, &mut h, 60);
-            (q, recv) = (q_now, recv_now);
+            let own = OWN_SOLVER.load(std::sync::atomic::Ordering::Relaxed);
+            let (passes, still) = if own {
+                let params: Vec<fastlem::core::parameters::TopographicalParameters> = (0..n)
+                    .map(|i| {
+                        fastlem::core::parameters::TopographicalParameters::default()
+                            .set_base_elevation(base[i])
+                            .set_is_outlet(outlet[i])
+                            .set_uplift_rate(u[i])
+                            .set_erodibility(
+                                (water[i] / areas[i].max(f64::MIN_POSITIVE))
+                                    .max(1e-9)
+                                    .sqrt(),
+                            )
+                            .set_max_slope(Some(threshold().atan()))
+                    })
+                    .collect();
+                let terrain = fastlem::lem::generator::TerrainGenerator::default()
+                    .set_model(model.clone())
+                    .set_parameters(params)
+                    .set_max_iteration(60)
+                    .generate()
+                    .expect("fastlem's generator runs");
+                h = terrain.elevations().to_vec();
+                (0, 0)
+            } else {
+                let (passes, still, q_now, recv_now) =
+                    steady(graph, &outlet, &base, &water, &u, &mut h, 60);
+                (q, recv) = (q_now, recv_now);
+                (passes, still)
+            };
             // Each node's area-weighted mean against its own: the uplift follows the ratio to the law's power.
             let (mut sum, mut area) = (vec![0.0f64; nw * nw], vec![0.0f64; nw * nw]);
             for (i, s) in sites.iter().enumerate() {
@@ -7213,10 +7252,11 @@ mod lem {
                 let mean = sum[k] / area[k].max(f64::MIN_POSITIVE);
                 if node_z[k] > 0.0 {
                     worst = worst.max((mean - node_z[k]).abs());
+                    let power = if own { 1.0 } else { JOINT_N };
                     if mean > 1.0 {
-                        u_node[k] *= (node_z[k] / mean).clamp(0.25, 4.0).powf(JOINT_N);
+                        u_node[k] *= (node_z[k] / mean).clamp(0.25, 4.0).powf(power);
                     } else {
-                        u_node[k] *= 4.0f64.powf(JOINT_N);
+                        u_node[k] *= 4.0f64.powf(power);
                     }
                 }
             }
