@@ -27,9 +27,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use vd_core::glam::{DQuat, DVec3};
 use vd_core::pose::LatticePos;
 use vd_core::pose::RealmId;
-use vd_core::glam::{DQuat, DVec3};
 use vd_core::{EntityId, NodeId, TickId};
 use vd_sim::io::MsgClass;
 use vd_sim::runtime::{ClockSample, OutboundBox};
@@ -338,7 +338,10 @@ pub(crate) fn cache_artifact_part(
             let assembling = cache.fine_assembling.entry(tile).or_default();
             if assembling.parts.len() != parts as usize || part == 0 {
                 // A record's first part, or another cut: the record starts over.
-                *assembling = FineAssembling { level: None, parts: vec![None; parts as usize] };
+                *assembling = FineAssembling {
+                    level: None,
+                    parts: vec![None; parts as usize],
+                };
             }
             if part == 0 {
                 assembling.level = vd_terrain::fine::tile::range_label(&piece).map(|(lo, _)| lo);
@@ -348,7 +351,9 @@ pub(crate) fn cache_artifact_part(
             if let (true, Some(level)) = (whole, assembling.level) {
                 let done = std::mem::take(&mut assembling.parts);
                 cache.fine_assembling.remove(&tile);
-                cache.fine.insert((tile, level), done.into_iter().flatten().collect());
+                cache
+                    .fine
+                    .insert((tile, level), done.into_iter().flatten().collect());
             }
             cache.last_part_at = now;
             stats.artifact_parts_cached += 1;
@@ -633,29 +638,46 @@ pub(crate) fn serve_artifacts(
     // session and drawn realm whose view went to the shard this beat; a tile no view reads any more leaves the realm's
     // cache (the shard lets it go from its record by the same views).
     let pixel_rad = vd_core::geometry::drawable_theta_min_rad();
-    let mut fine_needs: BTreeMap<(vd_core::SessionId, RealmId), Vec<(FineTile, u8)>> = BTreeMap::new();
+    let mut fine_needs: BTreeMap<(vd_core::SessionId, RealmId), Vec<(FineTile, u8)>> =
+        BTreeMap::new();
     for (sid, session) in &sessions.by_session {
         if !matches!(session.phase, SessionPhase::Active { .. }) {
             continue;
         }
         for (realm, digest) in drawn {
-            let Some(cache) = sessions.artifacts.get(realm).filter(|c| c.digest == *digest) else {
+            let Some(cache) = sessions
+                .artifacts
+                .get(realm)
+                .filter(|c| c.digest == *digest)
+            else {
                 continue;
             };
             if let Some(view) = session_view(session, *realm)
-                && let Some(bag) = sessions.windows.values().find_map(|w| w.ingest.look_of(*realm))
+                && let Some(bag) = sessions
+                    .windows
+                    .values()
+                    .find_map(|w| w.ingest.look_of(*realm))
                 && let Some(body) = body_of_bag(bag)
             {
-                let needs =
-                    vd_terrain::artifact::fine_needs_of_head(&body, cache.band, view.dir, view.radial_m, pixel_rad);
+                let needs = vd_terrain::artifact::fine_needs_of_head(
+                    &body,
+                    cache.band,
+                    view.dir,
+                    view.radial_m,
+                    pixel_rad,
+                );
                 fine_needs.insert((*sid, *realm), needs);
             }
         }
     }
-    let read: BTreeSet<(RealmId, (u8, u32, u32))> =
-        fine_needs.iter().flat_map(|((_, realm), needs)| needs.iter().map(move |(t, _)| (*realm, *t))).collect();
+    let read: BTreeSet<(RealmId, (u8, u32, u32))> = fine_needs
+        .iter()
+        .flat_map(|((_, realm), needs)| needs.iter().map(move |(t, _)| (*realm, *t)))
+        .collect();
     for (realm, cache) in sessions.artifacts.iter_mut() {
-        cache.fine.retain(|(tile, _), _| read.contains(&(*realm, *tile)));
+        cache
+            .fine
+            .retain(|(tile, _), _| read.contains(&(*realm, *tile)));
     }
     // The serve: each session that draws a realm whose artifact is whole here, and has not stated
     // it holds it, gets the head then the parts, paced, each once — within ONE budget a beat for the
@@ -787,7 +809,13 @@ pub(crate) fn serve_artifacts(
                             break;
                         };
                         for bytes in record {
-                            push_control(outbox, session.client, &ServerControlMsg::ArtifactPart { bytes: bytes.clone() });
+                            push_control(
+                                outbox,
+                                session.client,
+                                &ServerControlMsg::ArtifactPart {
+                                    bytes: bytes.clone(),
+                                },
+                            );
                             stats.artifact_parts_served += 1;
                             budget = budget.saturating_sub(bytes.len());
                         }

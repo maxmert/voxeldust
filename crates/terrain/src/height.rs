@@ -41,7 +41,9 @@ use crate::fine::read::FineZ;
 use crate::strata::Biome;
 use crate::units::{direction_of_unit, metres_of_q28, q28_of_metres};
 use vd_recipe::Gi;
-use vd_recipe::height::{OCTAVES_CAP, biome_of as recipe_biome, relief_parts_from, roughness_factor};
+use vd_recipe::height::{
+    OCTAVES_CAP, biome_of as recipe_biome, relief_parts_from, roughness_factor,
+};
 use vd_recipe::terrace::terrace;
 
 /// The surface's radius along a unit direction at a rung, in GAP STEPS at
@@ -276,7 +278,10 @@ mod tests {
         let z0 = Gi::new(-1_200 * crate::units::STEPS_PER_M) << crate::units::LENGTH_BITS;
         let held = OneFineRead(FineZ::Held(z0));
         let want = metres_of_q28(terrace(&body.terrace_at(5), body.radius + z0));
-        assert_eq!(height_field_m(&body, &held, dir, 5).map(f64::to_bits), Some(want.to_bits()));
+        assert_eq!(
+            height_field_m(&body, &held, dir, 5).map(f64::to_bits),
+            Some(want.to_bits())
+        );
         let missing = OneFineRead(FineZ::Missing(TileKey { face, tx: 0, ty: 0 }));
         assert_eq!(height_field_m(&body, &missing, dir, 5), None);
     }

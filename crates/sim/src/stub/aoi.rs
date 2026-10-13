@@ -60,6 +60,25 @@ pub struct ChildLiveness(pub BTreeMap<RealmId, ChildLiveEntry>);
 #[derive(Resource, Debug, Default)]
 pub struct WasOccupied(pub bool);
 
+/// ★ WORK IN HAND (ruling B91, 2026-10-12 — SL7's liveness AMENDED): does this realm hold a FIRST SOLVE THAT HAS NOT
+/// LANDED? The host writes it every tick (the shard program, from its own solve); `false` on every other host. A realm
+/// with work in hand does NOT report itself empty — the third reason SL7 keeps a realm alive, beside its occupants and
+/// a live child — so the reconciler's "live and not empty" arm keeps it, and through the ancestor closure its parents,
+/// until the solve lands or ends with nothing; then the Empty report resumes and the realm leaves on the usual
+/// cooldown. No new data crosses: the realm only stays silent about an emptiness that would end its work. It is NOT
+/// the occupancy bit and never beats it (a solve is no occupant). WHEN a solve starts is not decided here: the advance
+/// calculation (B86 item 6) states its own solves through this same word.
+///
+/// **Example.** A player sees the desert world for three minutes and logs out. The desert world's shard keeps its first
+/// solve, reports no emptiness and stays up the half hour the solve needs; the rows land in its store, the next pass
+/// reports Empty, and the realm is torn down. The next login reads the rows in a second and starts no solve.
+#[derive(Resource, Debug, Default, PartialEq, Eq)]
+pub struct WorkInHand(pub bool);
+
+/// The Empty self-report's two inputs, bundled into ONE `SystemParam` (bevy's 16-param ceiling): the "parent has been
+/// told" latch and the work in hand that withholds the report.
+type SelfReport<'w> = (ResMut<'w, WasOccupied>, Res<'w, WorkInHand>);
+
 /// Identity of ONE AoI observer — the key that gives each occupant its OWN per-child hysteresis latch
 /// (VU S0: the cull is now PER-OBSERVER, not a global scalar-min over all occupants). The observers this
 /// shard evaluates are the occupants it SIMULATES — a durable dot (keyed by its `SessionId`) or a held
@@ -253,8 +272,9 @@ pub(crate) fn evaluate_realm_aoi(
     // into every occupant's scene + restated onward), and the observed interior outlines (READ-ONLY —
     // `emit_realm_frames` owns their writes/prune, and it runs earlier on the same schedule).
     sl7: Sl7Stores,
-    // Lane cure (finding 41) — the bit's "parent has been told" latch (the adopt-edge derivation).
-    mut was_occupied: ResMut<WasOccupied>,
+    // Lane cure (finding 41) — the bit's "parent has been told" latch (the adopt-edge derivation); and the work in hand
+    // that withholds the Empty self-report (ruling B91).
+    self_report: SelfReport,
     // Look horizon slice 4 — the interest emission's route: the directory-attested child head
     // map the admission reads already maintain (READ-ONLY here; `process_inbound` owns the
     // writes). The byte goes direct to the child's head on the route the parent already
@@ -273,6 +293,7 @@ pub(crate) fn evaluate_realm_aoi(
         mut interest_latch,
         mut query_memo,
     ) = sl7;
+    let (mut was_occupied, work_in_hand) = self_report;
     // Authority gate (verbatim `evaluate_realm_boundaries`): a shard without its realm lease demands
     // nothing — the `realm_fence` is the emitter's authority proof carried on every demand.
     let Some(realm_fence) = authority.0 else {
@@ -304,6 +325,7 @@ pub(crate) fn evaluate_realm_aoi(
         &mut outbox,
         parent.0,
         &mut was_occupied.0,
+        work_in_hand.0,
         &mut child_liveness.0,
         &mut open_windows,
         &mut verdict.0,
@@ -342,6 +364,8 @@ fn aoi_decide(
     // Lane cure (finding 41) — the "parent has been told" latch that derives the bit's adopt edge;
     // false again at every Empty self-report.
     was_occupied: &mut bool,
+    // ★ Ruling B91 — a first solve that has not landed: the Empty self-report is withheld while it runs.
+    work_in_hand: bool,
     // Step 5 slice B — the direct children's SL7 occupancy bits: pruned here on the derived TTL,
     // then folded as one synthetic observer per FRESH bit (SL7's occupied-child proxy).
     child_liveness: &mut BTreeMap<RealmId, ChildLiveEntry>,
@@ -575,7 +599,8 @@ fn aoi_decide(
 
     // THE OCCUPANCY TRUTH (look horizon slice 4 splits it from mere list-emptiness): does this
     // realm hold occupants or a live child — the ONLY facts the Empty self-report and the SL7
-    // bit may ever state? The interest down-proxy deliberately does NOT count: a byte from
+    // bit may ever state? (The report is also WITHHELD while a first solve is in hand — ruling B91 —
+    // which states nothing: the bit stays occupancy alone.) The interest down-proxy deliberately does NOT count: a byte from
     // outside must never manufacture an occupancy fact (SL7's bit means occupancy, nothing
     // else), so an interest-held vacated realm keeps reporting Empty — truthfully — while its
     // parent's own demand (the observer stands well inside the AoI band whenever it stands
@@ -589,16 +614,20 @@ fn aoi_decide(
         // Lane cure (finding 41): going empty re-arms the adopt edge — the NEXT occupant's first tick
         // ships the bit immediately, off-cadence, because that transition is what the bit means.
         *was_occupied = false;
-        push_demand(
-            outbox,
-            config.orchestrator,
-            own_coord,
-            own_coord.clone(),
-            realm_fence,
-            DemandVerb::Empty,
-            tick,
-            stats,
-        );
+        // ★ WORK IN HAND WITHHOLDS THE REPORT (ruling B91, SL7 amended): a realm whose first solve has not landed
+        // stays alive by saying nothing — the reconciler keeps a live realm that is not confirmed empty.
+        if !work_in_hand {
+            push_demand(
+                outbox,
+                config.orchestrator,
+                own_coord,
+                own_coord.clone(),
+                realm_fence,
+                DemandVerb::Empty,
+                tick,
+                stats,
+            );
+        }
     }
     if observers.is_empty() {
         // THE WINDOW LANE (Slice A): with zero observers every window's SL7 verdict IS the empty

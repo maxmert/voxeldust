@@ -43,10 +43,17 @@ impl FineTiles for Stated {
     }
     fn want(&self, _dir: [f64; 3], radial_m: f64) -> Vec<(FineName, u8)> {
         assert!(radial_m > 0.0, "{radial_m}");
-        vec![((2, 0, 0), self.need0.load(Ordering::SeqCst) as u8), ((2, 1, 0), 2), ((2, 2, 0), 0)]
+        vec![
+            ((2, 0, 0), self.need0.load(Ordering::SeqCst) as u8),
+            ((2, 1, 0), 2),
+            ((2, 2, 0), 0),
+        ]
     }
     fn hold(&self, tiles: &[FineName]) {
-        self.held.lock().expect("the held list").extend_from_slice(tiles);
+        self.held
+            .lock()
+            .expect("the held list")
+            .extend_from_slice(tiles);
     }
     fn levels(&self) -> u8 {
         6
@@ -63,7 +70,11 @@ impl FineTiles for Stated {
             (2, 1, 0) => 1,
             _ => return None,
         };
-        let size = if (tile == (2, 0, 0)) & (lo == 0) { LARGE } else { 5 };
+        let size = if (tile == (2, 0, 0)) & (lo == 0) {
+            LARGE
+        } else {
+            5
+        };
         Some(
             (0..count)
                 .map(|k| {
@@ -77,13 +88,21 @@ impl FineTiles for Stated {
 }
 
 /// The bulk bytes the shard sent to `to` this tick with the audience given, in order.
-fn bulks_to(sent: &[(NodeId, MsgClass, Vec<u8>)], to: NodeId, audience: &BulkAudience) -> Vec<Vec<u8>> {
+fn bulks_to(
+    sent: &[(NodeId, MsgClass, Vec<u8>)],
+    to: NodeId,
+    audience: &BulkAudience,
+) -> Vec<Vec<u8>> {
     sent.iter()
         .filter(|(at, class, _)| *at == to && *class == MsgClass::Control)
-        .filter_map(|(_, _, bytes)| match postcard::from_bytes::<ShardToGateway>(bytes) {
-            Ok(ShardToGateway::BulkFor { audience: a, bytes, .. }) if a == *audience => Some(bytes),
-            _ => None,
-        })
+        .filter_map(
+            |(_, _, bytes)| match postcard::from_bytes::<ShardToGateway>(bytes) {
+                Ok(ShardToGateway::BulkFor {
+                    audience: a, bytes, ..
+                }) if a == *audience => Some(bytes),
+                _ => None,
+            },
+        )
         .collect()
 }
 
@@ -106,7 +125,10 @@ fn want_from(gateway: NodeId, view: Option<f64>) -> Inbound {
         &GatewayToShard::ArtifactWant {
             realm: config().realm,
             digest: [1, 2],
-            view: view.map(|radial_m| vd_wire::session_flow::ArtifactView { dir: [0.0, 0.0, 1.0], radial_m }),
+            view: view.map(|radial_m| vd_wire::session_flow::ArtifactView {
+                dir: [0.0, 0.0, 1.0],
+                radial_m,
+            }),
         },
     )
 }
@@ -137,8 +159,16 @@ fn a_view_is_answered_by_distance_one_level_a_record_the_coarsest_first() {
     *rig.world.resource_mut::<FineSource>() = FineSource::default();
     rig.grant_realm();
     let _ = rig.attach();
-    rig.world.resource_mut::<Dots>().0.get_mut(&SESSION).expect("the attached dot").pose =
-        StampedPose::at_rest(config().frame, DVec3::new(0.0, 0.0, 1_000.0), UniverseTick(5));
+    rig.world
+        .resource_mut::<Dots>()
+        .0
+        .get_mut(&SESSION)
+        .expect("the attached dot")
+        .pose = StampedPose::at_rest(
+        config().frame,
+        DVec3::new(0.0, 0.0, 1_000.0),
+        UniverseTick(5),
+    );
     let stated = Stated::default();
     let (vanish, need0) = (Arc::clone(&stated.vanish), Arc::clone(&stated.need0));
     *rig.world.resource_mut::<FineSource>() = FineSource(Some(Box::new(stated)));
@@ -165,9 +195,15 @@ fn a_view_is_answered_by_distance_one_level_a_record_the_coarsest_first() {
             vec![0xF0, 0, 3, 0, 1],
         ]
     );
-    assert_eq!(rig.world.resource::<ArtifactWants>().2[&GATEWAY].current, Some(((2, 0, 0), 0, 4)));
+    assert_eq!(
+        rig.world.resource::<ArtifactWants>().2[&GATEWAY].current,
+        Some(((2, 0, 0), 0, 4))
+    );
     let out = bulks(&rig.tick(vec![]), &cache);
-    assert_eq!((out.len(), out[0].clone(), out[3].clone()), (4, vec![0xF0, 0, 4, 0, 1], vec![0xF0, 0, 7, 0, 1]));
+    assert_eq!(
+        (out.len(), out[0].clone(), out[3].clone()),
+        (4, vec![0xF0, 0, 4, 0, 1], vec![0xF0, 0, 7, 0, 1])
+    );
     assert_eq!(
         bulks(&rig.tick(vec![]), &cache),
         vec![
@@ -184,13 +220,24 @@ fn a_view_is_answered_by_distance_one_level_a_record_the_coarsest_first() {
         let stats = rig.world.resource::<StubStats>();
         assert_eq!((stats.fine_parts_sent, stats.fine_tiles_sent), (19, 10));
         let record = &rig.world.resource::<ArtifactWants>().2[&GATEWAY];
-        assert_eq!(record.sent.iter().map(|(t, l)| (*t, *l)).collect::<Vec<_>>(), vec![((2, 0, 0), 0), ((2, 1, 0), 2)]);
+        assert_eq!(
+            record
+                .sent
+                .iter()
+                .map(|(t, l)| (*t, *l))
+                .collect::<Vec<_>>(),
+            vec![((2, 0, 0), 0), ((2, 1, 0), 2)]
+        );
         assert_eq!(record.current, None);
     }
     // A second gateway whose session reads the first tile only at level 3: its levels 5 … 3, then the second tile's
     // 5 … 2 — one tick.
     need0.store(3, Ordering::SeqCst);
-    let out = heads(bulks_to(&rig.tick(vec![want_from(OTHER_GATEWAY, Some(5_000.0))]), OTHER_GATEWAY, &cache));
+    let out = heads(bulks_to(
+        &rig.tick(vec![want_from(OTHER_GATEWAY, Some(5_000.0))]),
+        OTHER_GATEWAY,
+        &cache,
+    ));
     assert_eq!(
         out,
         vec![
@@ -208,17 +255,29 @@ fn a_view_is_answered_by_distance_one_level_a_record_the_coarsest_first() {
     need0.store(0, Ordering::SeqCst);
     let _ = rig.tick(vec![want(None)]);
     let _ = rig.tick(vec![want(Some(1_000.0))]);
-    assert_eq!(rig.world.resource::<ArtifactWants>().2[&GATEWAY].current, Some(((2, 0, 0), 0, 4)));
+    assert_eq!(
+        rig.world.resource::<ArtifactWants>().2[&GATEWAY].current,
+        Some(((2, 0, 0), 0, 4))
+    );
     vanish.store(true, Ordering::SeqCst);
     assert_eq!(
         bulks(&rig.tick(vec![]), &cache),
-        vec![vec![0xF0, 1, 0, 5, 6], vec![0xF0, 1, 0, 4, 5], vec![0xF0, 1, 0, 3, 4], vec![0xF0, 1, 0, 2, 3]]
+        vec![
+            vec![0xF0, 1, 0, 5, 6],
+            vec![0xF0, 1, 0, 4, 5],
+            vec![0xF0, 1, 0, 3, 4],
+            vec![0xF0, 1, 0, 2, 3]
+        ]
     );
-    assert_eq!(rig.world.resource::<ArtifactWants>().2[&GATEWAY].current, None);
+    assert_eq!(
+        rig.world.resource::<ArtifactWants>().2[&GATEWAY].current,
+        None
+    );
 }
 
 /// ★ B87: a viewer outside the realm — a pilot aboard a hull over it, a station in its orbit — is answered through its
-/// gateway's cache for the realm by the same call, one level a record, the coarsest first.
+/// gateway's cache for the realm by the same call, one level a record, the coarsest first. Each beat is its own tick (the
+/// rig's clock stands still unless a test moves it, and a beat's views replace the last beat's by the tick they came in).
 #[test]
 fn a_gateways_views_are_answered_to_its_realm_cache_and_lapse_with_the_keep_alive() {
     let mut rig = Rig::new();
@@ -227,27 +286,46 @@ fn a_gateways_views_are_answered_to_its_realm_cache_and_lapse_with_the_keep_aliv
     let held = Arc::clone(&stated.held);
     *rig.world.resource_mut::<FineSource>() = FineSource(Some(Box::new(stated)));
     let cache = BulkAudience::Realm(config().realm);
+    let mut beat = 0u64;
+    let mut at_next_tick = |rig: &mut Rig, inbound: Vec<Inbound>| {
+        beat += 1;
+        rig.set_local_tick(beat);
+        rig.tick(inbound)
+    };
     // A view: the first tile's levels 5 … 1 and four of its level-nought parts to the realm's cache this tick.
-    let out = bulks(&rig.tick(vec![want(Some(2_000.0))]), &cache);
-    assert_eq!((out.len(), out[0].clone(), out[5].clone()), (9, vec![0xF0, 0, 0, 5, 6], vec![0xF0, 0, 0, 0, 1]));
+    let out = bulks(&at_next_tick(&mut rig, vec![want(Some(2_000.0))]), &cache);
+    assert_eq!(
+        (out.len(), out[0].clone(), out[5].clone()),
+        (9, vec![0xF0, 0, 0, 5, 6], vec![0xF0, 0, 0, 0, 1])
+    );
     // Between beats the named tiles are held as reasons; the answer goes on.
-    let out = bulks(&rig.tick(vec![]), &cache);
+    let out = bulks(&at_next_tick(&mut rig, vec![]), &cache);
     assert_eq!((out.len(), out[0].clone()), (4, vec![0xF0, 0, 4, 0, 1]));
     assert!(held.lock().expect("the held list").contains(&(2, 0, 0)));
     // The views of a new beat replace the last's; the same tiles add nothing new.
-    let _ = rig.tick(vec![want(Some(2_000.0)), want(Some(2_500.0))]);
-    assert_eq!(rig.world.resource::<ArtifactWants>().2[&GATEWAY].views.len(), 2);
-    let _ = rig.tick(vec![]);
-    assert!(bulks(&rig.tick(vec![]), &cache).is_empty());
+    let _ = at_next_tick(&mut rig, vec![want(Some(2_000.0)), want(Some(2_500.0))]);
+    assert_eq!(
+        rig.world.resource::<ArtifactWants>().2[&GATEWAY]
+            .views
+            .len(),
+        2
+    );
+    let _ = at_next_tick(&mut rig, vec![]);
+    assert!(bulks(&at_next_tick(&mut rig, vec![]), &cache).is_empty());
     // A head want starts the gateway's record over (its cache is new): the levels go again on the next view.
-    let _ = rig.tick(vec![want(None)]);
-    assert!(!rig.world.resource::<ArtifactWants>().2.contains_key(&GATEWAY));
-    let out = bulks(&rig.tick(vec![want(Some(2_000.0))]), &cache);
+    let _ = at_next_tick(&mut rig, vec![want(None)]);
+    assert!(
+        !rig.world
+            .resource::<ArtifactWants>()
+            .2
+            .contains_key(&GATEWAY)
+    );
+    let out = bulks(&at_next_tick(&mut rig, vec![want(Some(2_000.0))]), &cache);
     assert_eq!(out[0], vec![0xF0, 0, 0, 5, 6]);
     // No view for a keep-alive's lifetime: the gateway is forgotten.
     let ttl = window_ttl_ticks(&config());
     for _ in 0..=ttl + 1 {
-        let _ = rig.tick(vec![]);
+        let _ = at_next_tick(&mut rig, vec![]);
     }
     assert!(rig.world.resource::<ArtifactWants>().2.is_empty());
     assert_eq!(NONE_HELD, u8::MAX);
@@ -261,7 +339,8 @@ fn the_providers_work_reads_the_realms_own_store() {
     let stated = Stated::default();
     let with_store = Arc::clone(&stated.with_store);
     *rig.world.resource_mut::<FineSource>() = FineSource(Some(Box::new(stated)));
-    *rig.world.resource_mut::<crate::stub::exterior::RealmStore>() =
+    *rig.world
+        .resource_mut::<crate::stub::exterior::RealmStore>() =
         crate::stub::exterior::RealmStore(Some(Box::new(crate::io::mem::MemStore::default())));
     let _ = rig.tick(vec![]);
     assert_eq!(with_store.load(Ordering::SeqCst), 1);

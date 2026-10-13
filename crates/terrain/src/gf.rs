@@ -266,13 +266,24 @@ impl Gf {
     /// constants (one division remains: `t = (m − 1)/(m + 1)`). A non-positive `x` answers negative infinity.
     #[must_use]
     pub fn ln_fine(self) -> Gf {
-        const ODD: [f64; 8] = [1.0, 1.0 / 3.0, 1.0 / 5.0, 1.0 / 7.0, 1.0 / 9.0, 1.0 / 11.0, 1.0 / 13.0, 1.0 / 15.0];
+        const ODD: [f64; 8] = [
+            1.0,
+            1.0 / 3.0,
+            1.0 / 5.0,
+            1.0 / 7.0,
+            1.0 / 9.0,
+            1.0 / 11.0,
+            1.0 / 13.0,
+            1.0 / 15.0,
+        ];
         if self.0 <= 0.0 {
             return Gf(f64::NEG_INFINITY);
         }
         let bits = self.0.to_bits();
         let mut e = ((bits >> 52) & 0x7ff) as i64 - 1_023;
-        let mut m = Gf(f64::from_bits((bits & ((1u64 << 52) - 1)) | (1_023u64 << 52)));
+        let mut m = Gf(f64::from_bits(
+            (bits & ((1u64 << 52) - 1)) | (1_023u64 << 52),
+        ));
         if m.0 > std::f64::consts::SQRT_2 {
             m *= Gf::HALF;
             e += 1;
@@ -431,9 +442,20 @@ mod tests {
             x *= ten;
         }
         // The mantissa's two halves (over and under √2) and the exponent's saturation.
-        assert!((Gf::from_f64(1.9).ln_fine() - Gf::from_f64(1.9).ln()).abs().to_f64() < 1e-15);
-        assert_eq!(Gf::from_f64(800.0).exp_fine().to_f64(), Gf::from_f64(800.0).exp().to_f64());
-        assert_eq!(Gf::from_f64(-800.0).exp_fine().to_f64(), Gf::from_f64(-800.0).exp().to_f64());
+        assert!(
+            (Gf::from_f64(1.9).ln_fine() - Gf::from_f64(1.9).ln())
+                .abs()
+                .to_f64()
+                < 1e-15
+        );
+        assert_eq!(
+            Gf::from_f64(800.0).exp_fine().to_f64(),
+            Gf::from_f64(800.0).exp().to_f64()
+        );
+        assert_eq!(
+            Gf::from_f64(-800.0).exp_fine().to_f64(),
+            Gf::from_f64(-800.0).exp().to_f64()
+        );
     }
 
     /// ★ THE FENCED EXPONENTIAL AND LOGARITHM against LITERAL values (a test may not call the

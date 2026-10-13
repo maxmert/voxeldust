@@ -37,7 +37,11 @@ fn dot(a: [Gf; 3], b: [Gf; 3]) -> Gf {
 }
 
 fn cross(a: [Gf; 3], b: [Gf; 3]) -> [Gf; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 /// Each point's mixed Voronoi area (m²) and each link's length (m), the lengths in `graph.adj`'s order.
@@ -66,9 +70,19 @@ pub fn geometry(dirs: &[Dir], graph: &Graph, r_m: Gf) -> Geometry {
         let (da, db, dc) = (dot(ab, ac), dot(sub(a, b), bc), dot(sub(a, c), sub(b, c)));
         let corners = [t[0] as usize, t[1] as usize, t[2] as usize];
         if da < Gf::ZERO || db < Gf::ZERO || dc < Gf::ZERO {
-            let obtuse = if da < Gf::ZERO { 0 } else if db < Gf::ZERO { 1 } else { 2 };
+            let obtuse = if da < Gf::ZERO {
+                0
+            } else if db < Gf::ZERO {
+                1
+            } else {
+                2
+            };
             for (k, &v) in corners.iter().enumerate() {
-                area[v] += if k == obtuse { whole * half } else { whole * quarter };
+                area[v] += if k == obtuse {
+                    whole * half
+                } else {
+                    whole * quarter
+                };
             }
         } else {
             // cot at a corner = its dot over twice the area.
@@ -107,7 +121,11 @@ pub fn locate(dirs: &[Dir], graph: &Graph, from: u32, q: &Dir) -> Option<(u32, [
                 continue 'walk;
             }
         }
-        let (a, b, c) = (&dirs[v[0] as usize], &dirs[v[1] as usize], &dirs[v[2] as usize]);
+        let (a, b, c) = (
+            &dirs[v[0] as usize],
+            &dirs[v[1] as usize],
+            &dirs[v[2] as usize],
+        );
         let la = Gf::from_f64(orient(q, b, c) as f64);
         let lb = Gf::from_f64(orient(a, q, c) as f64);
         let lc = Gf::from_f64(orient(a, b, q) as f64);
@@ -122,8 +140,8 @@ const PREV: [usize; 3] = [2, 0, 1];
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::delaunay::triangulate;
+    use super::*;
     use vd_recipe::Gi;
 
     /// A direction's words: `(x, y)` units across a plane `2^40` units out (the test's sphere has that radius in metres,
@@ -140,7 +158,14 @@ mod tests {
     fn the_mixed_area_tiles_each_triangle_and_the_lengths_are_the_links() {
         // An acute triangle (0, 1, 2); one obtuse triangle three times, its obtuse corner (5) last, first and second;
         // and a flat one that adds nothing.
-        let dirs = [at(0, 0), at(4, 0), at(2, 3), at(10, 0), at(20, 0), at(15, 1)];
+        let dirs = [
+            at(0, 0),
+            at(4, 0),
+            at(2, 3),
+            at(10, 0),
+            at(20, 0),
+            at(15, 1),
+        ];
         let graph = Graph {
             tris: vec![[0, 1, 2], [3, 4, 5], [5, 3, 4], [3, 5, 4], [0, 0, 1]],
             tri_n: Vec::new(),
@@ -153,7 +178,10 @@ mod tests {
         assert!(near(g.area[1], 184.0 / 96.0));
         assert!(near(g.area[2], 208.0 / 96.0));
         // The obtuse triangle's area 5, three times: the obtuse corner half each time, the others a quarter.
-        assert_eq!([g.area[3], g.area[4], g.area[5]], [Gf::from_f64(3.75), Gf::from_f64(3.75), Gf::from_f64(7.5)]);
+        assert_eq!(
+            [g.area[3], g.area[4], g.area[5]],
+            [Gf::from_f64(3.75), Gf::from_f64(3.75), Gf::from_f64(7.5)]
+        );
         assert_eq!(g.len, vec![Gf::from_f64(4.0), Gf::from_f64(26.0).sqrt()]);
     }
 
@@ -168,11 +196,15 @@ mod tests {
         assert_eq!(graph.tris.len(), 2);
         // Each triangle's centroid, walked to from the first triangle, is that triangle at weights near a third each.
         for (t, v) in graph.tris.iter().enumerate() {
-            let q: Dir = [0, 1, 2].map(|k| dirs[v[0] as usize][k] + dirs[v[1] as usize][k] + dirs[v[2] as usize][k]);
+            let q: Dir = [0, 1, 2]
+                .map(|k| dirs[v[0] as usize][k] + dirs[v[1] as usize][k] + dirs[v[2] as usize][k]);
             let (found, w) = locate(&dirs, &graph, 0, &q).expect("inside");
             assert_eq!(found, t as u32);
             for x in w {
-                assert!((x - Gf::from_f64(1.0 / 3.0)).abs() < Gf::from_f64(1e-3), "{w:?}");
+                assert!(
+                    (x - Gf::from_f64(1.0 / 3.0)).abs() < Gf::from_f64(1e-3),
+                    "{w:?}"
+                );
             }
         }
         // Beyond the first corner, away from the opposite one: outside the hull.

@@ -762,7 +762,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.36");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.39");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

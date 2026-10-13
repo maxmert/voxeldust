@@ -103,7 +103,11 @@ impl Level {
         if room == 0 {
             return None;
         }
-        let sub_bits = if room < SUB_BITS_MAX { room } else { SUB_BITS_MAX };
+        let sub_bits = if room < SUB_BITS_MAX {
+            room
+        } else {
+            SUB_BITS_MAX
+        };
         Some(Level {
             seed: seed ^ POINT_SALT,
             level,
@@ -132,7 +136,11 @@ impl Level {
     #[must_use]
     pub fn radius2(&self, cell: CellId) -> i128 {
         let at = |i: i32, j: i32| direction(i32::from(cell.face), i, j, self.inv_n);
-        let (c, ci, cj) = (at(cell.i, cell.j), at(cell.i + 1, cell.j), at(cell.i, cell.j + 1));
+        let (c, ci, cj) = (
+            at(cell.i, cell.j),
+            at(cell.i + 1, cell.j),
+            at(cell.i, cell.j + 1),
+        );
         let chord2 = |a: [Gi; 3], b: [Gi; 3]| {
             let d = |k: usize| i128::from(a[k].raw() - b[k].raw());
             d(0) * d(0) + d(1) * d(1) + d(2) * d(2)
@@ -164,7 +172,14 @@ impl Level {
             (cell.j << self.sub_bits) | sub.1,
             self.inv_sub,
         );
-        Candidate { cell, k, sub, dir, priority, r2 }
+        Candidate {
+            cell,
+            k,
+            sub,
+            dir,
+            priority,
+            r2,
+        }
     }
 
     /// The candidates of `cell` (its radius measured once).
@@ -185,10 +200,16 @@ impl Level {
     /// Whether `c` survives Matérn's rule against the candidates of its cell and its eight neighbours, `at` giving a
     /// cell's candidates (a cache or a fresh draw: the same words either way).
     #[must_use]
-    pub fn kept_with(&self, c: &Candidate, at: &mut impl FnMut(CellId) -> [Candidate; CANDIDATES as usize]) -> bool {
+    pub fn kept_with(
+        &self,
+        c: &Candidate,
+        at: &mut impl FnMut(CellId) -> [Candidate; CANDIDATES as usize],
+    ) -> bool {
         for dj in -1..=1 {
             for di in -1..=1 {
-                let Some(cell) = self.neighbour(c.cell, di, dj) else { continue };
+                let Some(cell) = self.neighbour(c.cell, di, dj) else {
+                    continue;
+                };
                 for q in at(cell) {
                     // Only a higher-ranked candidate drops `c`, by ITS OWN cell's radius.
                     if q.rank() > c.rank() && q.chord2(c) < q.r2 {
@@ -204,7 +225,10 @@ impl Level {
     #[must_use]
     pub fn kept(&self, cell: CellId) -> Vec<Candidate> {
         let mut fresh = |c: CellId| self.candidates(c);
-        self.candidates(cell).into_iter().filter(|c| self.kept_with(c, &mut fresh)).collect()
+        self.candidates(cell)
+            .into_iter()
+            .filter(|c| self.kept_with(c, &mut fresh))
+            .collect()
     }
 }
 
@@ -216,13 +240,21 @@ pub fn chart_cell(face: Face, gi: i32, gj: i32, n: i32) -> Option<CellId> {
     let in_i = (gi >= 0) & (gi < n);
     let in_j = (gj >= 0) & (gj < n);
     if in_i & in_j {
-        return Some(CellId { face: face.index(), i: gi, j: gj });
+        return Some(CellId {
+            face: face.index(),
+            i: gi,
+            j: gj,
+        });
     }
     if !(in_i | in_j) {
         return None;
     }
     let (side, along, over) = if !in_i {
-        if gi < 0 { (Edge::UMinus, gj, -gi) } else { (Edge::UPlus, gj, gi - n + 1) }
+        if gi < 0 {
+            (Edge::UMinus, gj, -gi)
+        } else {
+            (Edge::UPlus, gj, gi - n + 1)
+        }
     } else if gj < 0 {
         (Edge::VMinus, gi, -gj)
     } else {
@@ -230,13 +262,25 @@ pub fn chart_cell(face: Face, gi: i32, gj: i32, n: i32) -> Option<CellId> {
     };
     let c = across(face, side, along, n);
     let rec = partner_of(face, side);
-    let inward = if rec.dst_edge.is_plus() { -(over - 1) } else { over - 1 };
-    let (i, j) = if rec.dst_edge.is_u() { (c.i + inward, c.j) } else { (c.i, c.j + inward) };
+    let inward = if rec.dst_edge.is_plus() {
+        -(over - 1)
+    } else {
+        over - 1
+    };
+    let (i, j) = if rec.dst_edge.is_u() {
+        (c.i + inward, c.j)
+    } else {
+        (c.i, c.j + inward)
+    };
     // A chart may reach past the partner face too (a domain wider than a face); no cell exists there.
     if (i < 0) | (i >= n) | (j < 0) | (j >= n) {
         return None;
     }
-    Some(CellId { face: c.face.index(), i, j })
+    Some(CellId {
+        face: c.face.index(),
+        i,
+        j,
+    })
 }
 
 /// ★ WHERE A CELL STANDS IN `face`'s CHART — the inverse of [`chart_cell`]: a cell of `face` at its own index; a cell of
@@ -257,8 +301,16 @@ pub fn chart_of(face: Face, cell: CellId, n: i32) -> Option<(i32, i32)> {
             continue;
         }
         // The cell's place along the partner's side and its depth in from that side.
-        let (along, at) = if rec.dst_edge.is_u() { (cell.j, cell.i) } else { (cell.i, cell.j) };
-        let depth = if rec.dst_edge.is_plus() { n - 1 - at } else { at };
+        let (along, at) = if rec.dst_edge.is_u() {
+            (cell.j, cell.i)
+        } else {
+            (cell.i, cell.j)
+        };
+        let depth = if rec.dst_edge.is_plus() {
+            n - 1 - at
+        } else {
+            at
+        };
         // A reversed side runs the other way (the committed table holds none — `vd_seed::seam` asserts it at compile
         // time — so the rule is written without a branch no table takes).
         let along = along + i32::from(rec.reversed) * (n - 1 - 2 * along);
@@ -281,11 +333,19 @@ pub fn chart_of(face: Face, cell: CellId, n: i32) -> Option<(i32, i32)> {
 /// elsewhere the neighbour is drawn afresh — the same words. The points come in chart order (rows, then columns, then
 /// the candidate's index), so every host lists them the same.
 #[must_use]
-pub fn domain_points(level: &Level, face: Face, i0: i32, j0: i32, w: i32, h: i32) -> Vec<Candidate> {
+pub fn domain_points(
+    level: &Level,
+    face: Face,
+    i0: i32,
+    j0: i32,
+    w: i32,
+    h: i32,
+) -> Vec<Candidate> {
     let n = level.n_l as i32;
     let (cw, ch) = (w + 2, h + 2);
     let slot = |gi: i32, gj: i32| ((gj - j0 + 1) * cw + (gi - i0 + 1)) as usize;
-    let mut chart: Vec<Option<[Candidate; CANDIDATES as usize]>> = Vec::with_capacity((cw * ch) as usize);
+    let mut chart: Vec<Option<[Candidate; CANDIDATES as usize]>> =
+        Vec::with_capacity((cw * ch) as usize);
     for gj in j0 - 1..j0 + h + 1 {
         for gi in i0 - 1..i0 + w + 1 {
             chart.push(chart_cell(face, gi, gj, n).map(|c| level.candidates(c)));
@@ -294,13 +354,21 @@ pub fn domain_points(level: &Level, face: Face, i0: i32, j0: i32, w: i32, h: i32
     let mut out = Vec::new();
     for gj in j0..j0 + h {
         for gi in i0..i0 + w {
-            let Some(cands) = chart[slot(gi, gj)] else { continue };
+            let Some(cands) = chart[slot(gi, gj)] else {
+                continue;
+            };
             // On `face` and a cell away from its edge, the chart's 3 × 3 is the cell's true neighbourhood.
-            let interior = (cands[0].cell.face == face.index()) & (gi > 0) & (gi < n - 1) & (gj > 0) & (gj < n - 1);
+            let interior = (cands[0].cell.face == face.index())
+                & (gi > 0)
+                & (gi < n - 1)
+                & (gj > 0)
+                & (gj < n - 1);
             for c in cands {
                 let keep = if interior {
-                    let mut from_chart =
-                        |cell: CellId| chart[slot(cell.i, cell.j)].expect("an interior cell's neighbours lie in the chart");
+                    let mut from_chart = |cell: CellId| {
+                        chart[slot(cell.i, cell.j)]
+                            .expect("an interior cell's neighbours lie in the chart")
+                    };
                     level.kept_with(&c, &mut from_chart)
                 } else {
                     let mut fresh = |cell: CellId| level.candidates(cell);
@@ -345,12 +413,19 @@ mod tests {
     #[test]
     fn a_candidate_is_the_same_words_every_time_and_differs_by_seed_and_level() {
         let l = level();
-        let cell = CellId { face: 3, i: 23_552, j: 71_168 };
+        let cell = CellId {
+            face: 3,
+            i: 23_552,
+            j: 71_168,
+        };
         assert_eq!(l.candidate(cell, 2), l.candidate(cell, 2));
         let other_seed = Level::new(0x1234_5678_9ABC_DEF1, 7, N_128).expect("valid");
         assert_ne!(l.candidate(cell, 2).sub, other_seed.candidate(cell, 2).sub);
         let other_level = Level::new(0x1234_5678_9ABC_DEF0, 6, N_128).expect("valid");
-        assert_ne!(l.candidate(cell, 2).priority, other_level.candidate(cell, 2).priority);
+        assert_ne!(
+            l.candidate(cell, 2).priority,
+            other_level.candidate(cell, 2).priority
+        );
     }
 
     #[test]
@@ -365,7 +440,10 @@ mod tests {
             for (a, p) in pts.iter().enumerate() {
                 for q in &pts[a + 1..] {
                     let higher = if p.rank() > q.rank() { p } else { q };
-                    assert!(p.chord2(q) >= higher.r2, "two kept points within the higher one's radius");
+                    assert!(
+                        p.chord2(q) >= higher.r2,
+                        "two kept points within the higher one's radius"
+                    );
                 }
             }
         }
@@ -377,7 +455,11 @@ mod tests {
         let pts = domain_points(&l, Face::PosX, 500, 700, 8, 8);
         for gj in 700..708 {
             for gi in 500..508 {
-                let cell = CellId { face: Face::PosX.index(), i: gi, j: gj };
+                let cell = CellId {
+                    face: Face::PosX.index(),
+                    i: gi,
+                    j: gj,
+                };
                 let mine: Vec<Candidate> = pts.iter().copied().filter(|p| p.cell == cell).collect();
                 assert_eq!(mine, l.kept(cell));
             }
@@ -390,7 +472,11 @@ mod tests {
         let l = Level::new(77, 7, 64).expect("valid");
         let from_x = domain_points(&l, Face::PosX, 56, 20, 16, 8);
         // Every point the +X chart found on +Y is a point a chart on +Y itself keeps there.
-        let on_y: Vec<Candidate> = from_x.iter().copied().filter(|p| p.cell.face == Face::PosY.index()).collect();
+        let on_y: Vec<Candidate> = from_x
+            .iter()
+            .copied()
+            .filter(|p| p.cell.face == Face::PosY.index())
+            .collect();
         assert!(!on_y.is_empty(), "the chart reaches +Y");
         for p in &on_y {
             assert!(l.kept(p.cell).contains(p), "the same point on both faces");
@@ -408,7 +494,11 @@ mod tests {
     #[test]
     fn a_face_corner_cell_has_seven_neighbours_and_the_corner_region_holds_no_cell() {
         let l = Level::new(5, 7, 64).expect("valid");
-        let corner = CellId { face: Face::PosZ.index(), i: 0, j: 0 };
+        let corner = CellId {
+            face: Face::PosZ.index(),
+            i: 0,
+            j: 0,
+        };
         let mut count = 0;
         for dj in -1..=1 {
             for di in -1..=1 {
@@ -423,7 +513,18 @@ mod tests {
         // A chart that runs past the partner face too finds no cell there.
         assert_eq!(chart_cell(Face::PosZ, 200, 3, 64), None);
         // A face index past the six refuses.
-        assert_eq!(l.neighbour(CellId { face: 9, i: 0, j: 0 }, 1, 0), None);
+        assert_eq!(
+            l.neighbour(
+                CellId {
+                    face: 9,
+                    i: 0,
+                    j: 0
+                },
+                1,
+                0
+            ),
+            None
+        );
     }
 
     #[test]
@@ -432,7 +533,10 @@ mod tests {
         let pts = domain_points(&l, Face::PosZ, -2, -2, 4, 4);
         // The 2 × 2 cells past both edges hold nothing; the rest lie on +Z and its two partners.
         assert!(!pts.is_empty());
-        assert!(pts.iter().all(|p| p.cell.face != Face::PosZ.index() || (p.cell.i < 2 && p.cell.j < 2)));
+        assert!(
+            pts.iter()
+                .all(|p| p.cell.face != Face::PosZ.index() || (p.cell.i < 2 && p.cell.j < 2))
+        );
     }
 
     #[test]
@@ -461,7 +565,11 @@ mod tests {
                             None => {
                                 // Neither the face nor one of its partners: the opposite face.
                                 assert_ne!(f, face.index());
-                                assert!(Edge::ALL.iter().all(|&s| partner_of(face, s).dst_face.index() != f));
+                                assert!(
+                                    Edge::ALL
+                                        .iter()
+                                        .all(|&s| partner_of(face, s).dst_face.index() != f)
+                                );
                             }
                         }
                     }
@@ -473,7 +581,16 @@ mod tests {
     #[test]
     fn every_side_of_a_face_crosses_to_a_cell_of_its_partner() {
         for face in Face::ALL {
-            for (gi, gj) in [(-1, 10), (64, 10), (10, -1), (10, 64), (-3, 10), (66, 10), (10, -3), (10, 66)] {
+            for (gi, gj) in [
+                (-1, 10),
+                (64, 10),
+                (10, -1),
+                (10, 64),
+                (-3, 10),
+                (66, 10),
+                (10, -3),
+                (10, 66),
+            ] {
                 let c = chart_cell(face, gi, gj, 64).expect("one edge crossed");
                 assert_ne!(c.face, face.index());
                 assert!((0..64).contains(&c.i) && (0..64).contains(&c.j));

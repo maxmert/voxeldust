@@ -2029,7 +2029,13 @@ impl LadderView {
         // the picture is drawn from now.
         let mut hidden_columns = occluded_columns(&ladder, body, artifact, eye, &sweep.drawn);
         if let Some(drawn_eye) = drawn_eye_m {
-            let also = occluded_columns(&ladder, body, artifact, DVec3::from_array(drawn_eye), &sweep.drawn);
+            let also = occluded_columns(
+                &ladder,
+                body,
+                artifact,
+                DVec3::from_array(drawn_eye),
+                &sweep.drawn,
+            );
             hidden_columns.retain(|c| also.contains(c));
         }
         let mut out = WantedSet {
@@ -2038,7 +2044,11 @@ impl LadderView {
             bounded: sweep.shadow.is_some(),
             ..WantedSet::default()
         };
-        for c in sweep.drawn.iter().filter(|c| hidden_columns.contains(&c.col)) {
+        for c in sweep
+            .drawn
+            .iter()
+            .filter(|c| hidden_columns.contains(&c.col))
+        {
             let mut z = c.z.0;
             while z <= c.z.1 {
                 out.hidden.insert(ChunkKey {

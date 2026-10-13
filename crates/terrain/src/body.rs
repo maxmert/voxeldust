@@ -1441,7 +1441,10 @@ impl BodyDefinition {
     #[must_use]
     pub fn with_fine_band_m(self, low_m: i32, high_m: i32, sea_m: i16) -> Option<BodyDefinition> {
         let octaves = self.fine_relief_bound();
-        let law = match self.macro_lattice().filter(|_| crate::fine::read::applies(sea_m)) {
+        let law = match self
+            .macro_lattice()
+            .filter(|_| crate::fine::read::applies(sea_m))
+        {
             Some(lattice) => {
                 let m = Gf::from_f64(TAN_REPOSE)
                     * Gf::from_f64(lattice.node_m())
@@ -1766,10 +1769,20 @@ mod tests {
         // ★ THE FINE GROUND'S BAND (B2): with a sea stated the bound is the 128 m law's (tan 35° × the node's
         // half-diagonal, 4 055 m at the home planet's 8 192 m node) where it passes the octaves'; a dry head keeps the
         // octaves' band exactly.
-        assert_eq!(body.with_fine_band_m(-9_862, 12_019, crate::artifact::DRY_M), body.with_band_m(-9_862, 12_019));
+        assert_eq!(
+            body.with_fine_band_m(-9_862, 12_019, crate::artifact::DRY_M),
+            body.with_band_m(-9_862, 12_019)
+        );
         let fine = body.with_fine_band_m(-9_862, 12_019, 0).expect("a band");
         let (low, high) = fine.ground_range_m();
-        assert_eq!(((low + 9_862.0 + 4_055.0).abs() < 1.0, (high - 12_019.0 - 4_055.0).abs() < 1.0), (true, true), "{low} {high}");
+        assert_eq!(
+            (
+                (low + 9_862.0 + 4_055.0).abs() < 1.0,
+                (high - 12_019.0 - 4_055.0).abs() < 1.0
+            ),
+            (true, true),
+            "{low} {high}"
+        );
     }
 
     /// The frequency of one octave, reassembled from the charter's pair, at the noise's bits.

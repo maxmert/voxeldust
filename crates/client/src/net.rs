@@ -664,15 +664,20 @@ impl ClientState {
         }
         // ★ THE FINE TILES HELD (ruling B81 Q3: the client acknowledges held tiles), each tile's finest level once it
         // lands, by realm, in statements of at most `FINE_HELD_PER_MSG` tiles.
-        let mut by_realm: std::collections::BTreeMap<vd_core::pose::RealmId, Vec<(u8, u32, u32, u8)>> =
-            std::collections::BTreeMap::new();
+        let mut by_realm: std::collections::BTreeMap<
+            vd_core::pose::RealmId,
+            Vec<(u8, u32, u32, u8)>,
+        > = std::collections::BTreeMap::new();
         for (realm, tile) in self.artifacts.take_fine_held() {
             by_realm.entry(realm).or_default().push(tile);
         }
         for (realm, tiles) in by_realm {
             for chunk in tiles.chunks(FINE_HELD_PER_MSG) {
-                let buf = postcard::to_allocvec(&ClientControlMsg::FineHeld { realm, tiles: chunk.to_vec() })
-                    .expect("closed wire enums serialize");
+                let buf = postcard::to_allocvec(&ClientControlMsg::FineHeld {
+                    realm,
+                    tiles: chunk.to_vec(),
+                })
+                .expect("closed wire enums serialize");
                 let _ = self.send_bytes(transport, MsgClass::Control, buf);
                 self.fine_held_sent += chunk.len() as u64;
             }

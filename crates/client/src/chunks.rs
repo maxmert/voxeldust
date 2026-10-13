@@ -497,7 +497,9 @@ impl ParentMesh {
         key: ChunkKey,
     ) -> Option<ParentMesh> {
         let field = field_of(body, artifact, key)?;
-        let rough = artifact.zip(body.macro_lattice()).is_some_and(|(a, lattice)| a.is_rough(&lattice, key));
+        let rough = artifact
+            .zip(body.macro_lattice())
+            .is_some_and(|(a, lattice)| a.is_rough(&lattice, key));
         let samples = sample_box(body, field.as_deref().map(|f| f as &dyn ZField), key)?;
         // The parent's surface with its sealed hollows as rock, as the drawn chunk reads its own.
         let samples = sealed_hollows(body, &samples).unwrap_or(samples);
@@ -899,7 +901,10 @@ impl ParentCache {
         let mut store = self.lock();
         let mut waited = false;
         loop {
-            let usable = store.map.get(&(realm, key)).is_some_and(|e| !(fine & e.mesh.rough));
+            let usable = store
+                .map
+                .get(&(realm, key))
+                .is_some_and(|e| !(fine & e.mesh.rough));
             if usable {
                 let found = touch(&mut store, realm, key);
                 store.stats.hits += 1;
@@ -1326,7 +1331,9 @@ pub fn geometry_with(
     let mut geometry = geometry_from(body, artifact, realm, key, &samples, parents)?;
     geometry.field_level = field.as_deref().map_or(NO_FIELD, |f| f.level());
     geometry.built_on = artifact.map(|a| a.head.digest);
-    geometry.rough |= artifact.zip(body.macro_lattice()).is_some_and(|(a, lattice)| a.is_rough(&lattice, key));
+    geometry.rough |= artifact
+        .zip(body.macro_lattice())
+        .is_some_and(|(a, lattice)| a.is_rough(&lattice, key));
     Some(geometry)
 }
 
@@ -1370,7 +1377,8 @@ pub fn geometry_from(
         .filter_map(|p| parents.get(realm, body, artifact, p))
         .collect();
     // ★ ROUGH (B86 item 7): built on a rough view, or a parent's mesh stood on the rough ground.
-    let rough = artifact.is_some_and(ArtifactCache::is_rough_view) | parent_meshes.iter().any(|p| p.rough);
+    let rough =
+        artifact.is_some_and(ArtifactCache::is_rough_view) | parent_meshes.iter().any(|p| p.rough);
     // How far the coarser surface can stand from this vertex: the sink of the coarser rung.
     let reach_m = sink_m(body, coarser);
     let mut fallbacks = 0u32;
@@ -2306,7 +2314,8 @@ impl ChunkLane {
         if !self.rough.contains(&(realm, key)) | self.upgrading.contains(&(realm, key)) {
             return false;
         }
-        let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm)) else {
+        let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm))
+        else {
             return false;
         };
         body.macro_lattice().is_some_and(|lattice| {
@@ -2322,7 +2331,8 @@ impl ChunkLane {
         if !self.upgradable(realm, key) {
             return;
         }
-        let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm)) else {
+        let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm))
+        else {
             return;
         };
         self.upgrading.insert((realm, key));
@@ -2764,7 +2774,11 @@ mod tests {
         lane.state_artifact(realm, &tiny_cache(realm, 0, None));
         assert_eq!(lane.snow_line(realm), None, "the head alone");
         lane.state_artifact(realm, &tiny_cache(realm, 0, Some(six_blocks())));
-        assert_eq!(lane.snow_line(realm).map(|l| l[3]), Some(1.0), "the whole artifact");
+        assert_eq!(
+            lane.snow_line(realm).map(|l| l[3]),
+            Some(1.0),
+            "the whole artifact"
+        );
         lane.state_artifact(realm, &tiny_cache(realm, 1, None));
         assert_eq!(lane.snow_line(realm), None, "a new head, not whole");
         lane.state_artifact(realm, &tiny_cache(realm, 1, Some(six_blocks())));

@@ -2325,3 +2325,25 @@ moment, as we have loading limits. So let's take the most optimized version plea
    capture keeps its reference defaults (its pictures change only on the owner's word, B71).
 3. **THE FREEZES STAY OPEN, MEASURED**: ~2 frames a second 50–150 ms late with every setting, the terrain's own work in
    them ~5 ms and the network thread on time — the drawing side's; found by a profiler next.
+
+## B91 (2026-10-12) — the freezes' cure: the solves below the window and the tick; a started first solve lands
+
+THE CAUSE, MEASURED (status file, 2026-10-12 later): the window's late frames (50–200 ms, about two a second while the
+ground loads) are the cores taken by TWO FAR PLANETS' FIRST SOLVES (Planet 17313999383825979787 and the desert world,
+7 threads each) that start at every login and never land — the shard stops minutes after the session, long before a
+solve of tens of minutes ends. The headless A/B: 247 late frames → 2 with the solving shards in the background band, the
+load 30 s in both. The owner: *"Decision 1. Agree with your pro proposal, especially if we will cache solved tiles on the
+client in the future. Decision 2. Agree with (a), but it should not hurt the future (c)."*
+
+1. **THE SOLVE THREADS RUN BELOW THE TICK AND THE WINDOW**: every thread of a first solve and of the fine tiles' solve
+   lowers its own class (macOS "utility", Linux nice 10) — the free cores are the solve's, a frame or a tick that needs a
+   core gets it first; the bytes are the same in any class. `libc` (until now a test-only dependency, already in the
+   build) is APPROVED for the shard program for this. On macOS a thread's class is NOT inherited (MEASURED), so the
+   generator's helper threads take a START STEP from the host (the generator itself calls no system).
+2. **A STARTED FIRST SOLVE LANDS — AMENDS SL7's LIVENESS**: a realm stays alive while it holds occupants, OR a live
+   direct child, OR A FIRST SOLVE THAT HAS NOT LANDED; it states it by not reporting itself empty, so no new data
+   crosses. A solve that ends without an artifact (a failed or dead solve thread) ends the reason too — never a shard
+   kept for ever.
+3. **IT MUST NOT HURT THE ADVANCE CALCULATION (B86 item 6, option (c))**: the rule says only that a solve which STARTED
+   is finished and stored; WHEN a solve starts, and how many at once, stay (c)'s to decide. The same "work in hand"
+   reason is the one (c)'s own solves (an unvisited planet booted to solve ahead, its fine tiles) will state.

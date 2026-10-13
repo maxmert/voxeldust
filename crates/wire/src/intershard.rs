@@ -1190,7 +1190,8 @@ pub enum DemandVerb {
     SpinUp = 0,
     /// Still reached — keep it running (steady-state re-assertion).
     KeepAlive = 1,
-    /// Child → parent: I hold no occupants (occupancy self-report, RLM R1).
+    /// Child → parent: I hold no occupants (occupancy self-report, RLM R1). Withheld while the realm holds a first
+    /// solve that has not landed (ruling B91, SL7 amended) — the report means "nothing keeps me alive".
     Empty = 2,
     /// No occupant AoI reaches this child: it may be reclaimed.
     TearDown = 3,

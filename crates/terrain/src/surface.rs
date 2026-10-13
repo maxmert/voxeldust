@@ -165,7 +165,10 @@ mod tests {
         // The three heights name the law at every other latitude, both hemispheres alike.
         for s in [0.1, 0.3, 0.7, 0.9, -0.4] {
             let law = line_at(&laws, Gf::from_f64(s), 3_000).to_f64();
-            assert!((line.at(Gf::from_f64(s)).to_f64() - law).abs() < 1.0e-6, "at {s}");
+            assert!(
+                (line.at(Gf::from_f64(s)).to_f64() - law).abs() < 1.0e-6,
+                "at {s}"
+            );
         }
     }
 }

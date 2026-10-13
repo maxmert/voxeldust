@@ -805,7 +805,10 @@ fn ground_vertex_layout(
     if paint && layout.0.contains(ATTRIBUTE_SURFACE) {
         attributes.push(ATTRIBUTE_SURFACE.at_shader_location(SURFACE_SHADER_LOCATION));
         attributes.push(ATTRIBUTE_HEIGHT.at_shader_location(HEIGHT_SHADER_LOCATION));
-        descriptor.vertex.shader_defs.push(SURFACE_SHADER_DEF.into());
+        descriptor
+            .vertex
+            .shader_defs
+            .push(SURFACE_SHADER_DEF.into());
         descriptor.vertex.shader_defs.push("VERTEX_COLORS".into());
         if let Some(fragment) = descriptor.fragment.as_mut() {
             fragment.shader_defs.push(SURFACE_SHADER_DEF.into());
@@ -3523,8 +3526,15 @@ fn draw_loading(ctx: &egui::Context, terrain: Option<&terrain::Terrain>) {
         return;
     }
     let (resident, wanted) = terrain.map_or((0, 0), |t| t.ground_progress);
-    let share = if wanted > 0 { resident as f32 / wanted as f32 } else { 0.0 };
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("vd_loading")));
+    let share = if wanted > 0 {
+        resident as f32 / wanted as f32
+    } else {
+        0.0
+    };
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new("vd_loading"),
+    ));
     let screen = ctx.viewport_rect();
     painter.rect_filled(screen, 0.0, egui::Color32::from_rgb(14, 15, 19));
     let centre = screen.center();
@@ -3535,7 +3545,10 @@ fn draw_loading(ctx: &egui::Context, terrain: Option<&terrain::Terrain>) {
         egui::FontId::proportional(28.0),
         egui::Color32::from_gray(225),
     );
-    let bar = egui::Rect::from_center_size(centre + egui::vec2(0.0, 16.0), egui::vec2(screen.width() * 0.4, 6.0));
+    let bar = egui::Rect::from_center_size(
+        centre + egui::vec2(0.0, 16.0),
+        egui::vec2(screen.width() * 0.4, 6.0),
+    );
     painter.rect_filled(bar, 3.0, egui::Color32::from_gray(50));
     let mut done = bar;
     done.set_width(bar.width() * share.clamp(0.0, 1.0));

@@ -22,6 +22,8 @@ pub mod artifact_source;
 pub mod artifact_store;
 pub mod artifact_worker;
 pub mod fine_source;
+// ★ THE SOLVE'S CLASS (ruling B91): a solve thread lowers its own scheduling class below the tick and the window.
+pub mod thread_class;
 // ★ THE DRAINAGE GATES, ONE COPY (plan step 1, ruling B6): G-HACK, G-BREACH, the spill census and
 // the three stands, read by the R1 bench, the drain census and the shipped-ground instrument alike.
 pub mod drainage_gates;

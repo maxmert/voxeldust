@@ -417,48 +417,135 @@ fn main() {
             .cloned()
     };
     let gates_only = args.iter().any(|a| a == "--gates-only");
-    lem::ROCK_SCATTER.store(args.iter().any(|a| a == "--lem-rock"), std::sync::atomic::Ordering::Relaxed);
-    lem::RELAX_STEPS.store(arg("--lem-relax-steps", 400), std::sync::atomic::Ordering::Relaxed);
-    WINDOW_M.store(arg("--lem-window-km", 8) * 1_000, std::sync::atomic::Ordering::Relaxed);
-    lem::STEADY_FORM.store(args.iter().any(|a| a == "--lem-steady"), std::sync::atomic::Ordering::Relaxed);
-    lem::HOLD.store(args.iter().any(|a| a == "--lem-hold"), std::sync::atomic::Ordering::Relaxed);
-    lem::L1_LINEAR.store(args.iter().any(|a| a == "--l1-linear"), std::sync::atomic::Ordering::Relaxed);
-    lem::SETTLE.store(args.iter().any(|a| a == "--l1-settle"), std::sync::atomic::Ordering::Relaxed);
-    lem::TRACE.store(args.iter().any(|a| a == "--l1-trace"), std::sync::atomic::Ordering::Relaxed);
-    lem::JOINT_LOOP.store(args.iter().any(|a| a == "--l1-joint"), std::sync::atomic::Ordering::Relaxed);
-    lem::FAST_TREE.store(args.iter().any(|a| a == "--l1-fast-tree"), std::sync::atomic::Ordering::Relaxed);
-    lem::MEANS_SETTLE.store(args.iter().any(|a| a == "--l1-means-settle"), std::sync::atomic::Ordering::Relaxed);
-    lem::COARSE_START.store(args.iter().any(|a| a == "--l1-coarse-start"), std::sync::atomic::Ordering::Relaxed);
+    lem::ROCK_SCATTER.store(
+        args.iter().any(|a| a == "--lem-rock"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::RELAX_STEPS.store(
+        arg("--lem-relax-steps", 400),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    WINDOW_M.store(
+        arg("--lem-window-km", 8) * 1_000,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::STEADY_FORM.store(
+        args.iter().any(|a| a == "--lem-steady"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::HOLD.store(
+        args.iter().any(|a| a == "--lem-hold"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::L1_LINEAR.store(
+        args.iter().any(|a| a == "--l1-linear"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::SETTLE.store(
+        args.iter().any(|a| a == "--l1-settle"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::TRACE.store(
+        args.iter().any(|a| a == "--l1-trace"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::JOINT_LOOP.store(
+        args.iter().any(|a| a == "--l1-joint"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::FAST_TREE.store(
+        args.iter().any(|a| a == "--l1-fast-tree"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::MEANS_SETTLE.store(
+        args.iter().any(|a| a == "--l1-means-settle"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::COARSE_START.store(
+        args.iter().any(|a| a == "--l1-coarse-start"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     lem::L1_ROUNDS.store(arg("--l1-rounds", 10), std::sync::atomic::Ordering::Relaxed);
-    lem::WARP.store(args.iter().any(|a| a == "--l1-warp"), std::sync::atomic::Ordering::Relaxed);
-    lem::SETTLE_M.store(arg("--l1-settle-m", 1), std::sync::atomic::Ordering::Relaxed);
-    lem::CYCLE_STOP.store(args.iter().any(|a| a == "--l1-cycle-stop"), std::sync::atomic::Ordering::Relaxed);
-    lem::HYSTERESIS_PPM.store(arg("--l1-hysteresis-ppm", 0), std::sync::atomic::Ordering::Relaxed);
+    lem::WARP.store(
+        args.iter().any(|a| a == "--l1-warp"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::SETTLE_M.store(
+        arg("--l1-settle-m", 1),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::CYCLE_STOP.store(
+        args.iter().any(|a| a == "--l1-cycle-stop"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::HYSTERESIS_PPM.store(
+        arg("--l1-hysteresis-ppm", 0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     lem::POWER_MODE.store(arg("--l1-power", 0), std::sync::atomic::Ordering::Relaxed);
     lem::POINT_SET.store(arg("--point-set", 0), std::sync::atomic::Ordering::Relaxed);
-    lem::SLOPE_HOLD.store(args.iter().any(|a| a == "--l1-slope-hold"), std::sync::atomic::Ordering::Relaxed);
-    lem::FILL.store(args.iter().any(|a| a == "--l1-fill"), std::sync::atomic::Ordering::Relaxed);
-    lem::CARVE.store(args.iter().any(|a| a == "--l1-carve"), std::sync::atomic::Ordering::Relaxed);
-    lem::L2_CHANNELS.store(args.iter().any(|a| a == "--l2-channels"), std::sync::atomic::Ordering::Relaxed);
-    lem::L2_HOLD_CELLS.store(args.iter().any(|a| a == "--l2-hold-cells"), std::sync::atomic::Ordering::Relaxed);
-    lem::DAMPED.store(args.iter().any(|a| a == "--l1-damped"), std::sync::atomic::Ordering::Relaxed);
-    lem::SLOPE_SWEEPS.store(arg("--l1-slope-sweeps", 80), std::sync::atomic::Ordering::Relaxed);
-    lem::HOLD_INNER.store(args.iter().any(|a| a == "--l1-hold-inner"), std::sync::atomic::Ordering::Relaxed);
+    lem::SLOPE_HOLD.store(
+        args.iter().any(|a| a == "--l1-slope-hold"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::FILL.store(
+        args.iter().any(|a| a == "--l1-fill"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::CARVE.store(
+        args.iter().any(|a| a == "--l1-carve"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::L2_CHANNELS.store(
+        args.iter().any(|a| a == "--l2-channels"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::L2_HOLD_CELLS.store(
+        args.iter().any(|a| a == "--l2-hold-cells"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::DAMPED.store(
+        args.iter().any(|a| a == "--l1-damped"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::SLOPE_SWEEPS.store(
+        arg("--l1-slope-sweeps", 80),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::HOLD_INNER.store(
+        args.iter().any(|a| a == "--l1-hold-inner"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     if args.iter().any(|a| a == "--power-error") {
         // The fenced powers against the platform's over the law's range (x from 1e-14 to 1e4, log-spaced).
         let (mut worst_gf, mut worst_fine) = (0.0f64, 0.0f64);
         let (mut t_plat, mut t_gf, mut t_fine) = (0.0f64, 0.0f64, 0.0f64);
-        let xs: Vec<f64> = (0..2_000_000).map(|i| 10f64.powf(-14.0 + 18.0 * (i as f64 + 0.5) / 2.0e6)).collect();
+        let xs: Vec<f64> = (0..2_000_000)
+            .map(|i| 10f64.powf(-14.0 + 18.0 * (i as f64 + 0.5) / 2.0e6))
+            .collect();
         let t = Instant::now();
         let plat: Vec<f64> = xs.iter().map(|x| x.powf(1.0 / lem::JOINT_N_PUB)).collect();
         t_plat += t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let gf: Vec<f64> = xs.iter().map(|x| vd_terrain::Gf::from_f64(*x).powf(vd_terrain::Gf::from_f64(1.0 / lem::JOINT_N_PUB)).to_f64()).collect();
+        let gf: Vec<f64> = xs
+            .iter()
+            .map(|x| {
+                vd_terrain::Gf::from_f64(*x)
+                    .powf(vd_terrain::Gf::from_f64(1.0 / lem::JOINT_N_PUB))
+                    .to_f64()
+            })
+            .collect();
         t_gf += t.elapsed().as_secs_f64();
         let t = Instant::now();
         let fine: Vec<f64> = xs
             .iter()
-            .map(|x| lem::fine_exp(lem::fine_ln(vd_terrain::Gf::from_f64(*x)) * vd_terrain::Gf::from_f64(1.0 / lem::JOINT_N_PUB)).to_f64())
+            .map(|x| {
+                lem::fine_exp(
+                    lem::fine_ln(vd_terrain::Gf::from_f64(*x))
+                        * vd_terrain::Gf::from_f64(1.0 / lem::JOINT_N_PUB),
+                )
+                .to_f64()
+            })
             .collect();
         t_fine += t.elapsed().as_secs_f64();
         for i in 0..xs.len() {
@@ -474,11 +561,20 @@ fn main() {
         return;
     }
     if let Some(v) = sarg("--l1-sc") {
-        lem::THRESHOLD_MILLI.store((v.parse::<f64>().expect("a slope") * 1_000.0).round() as usize, std::sync::atomic::Ordering::Relaxed);
+        lem::THRESHOLD_MILLI.store(
+            (v.parse::<f64>().expect("a slope") * 1_000.0).round() as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     lem::L1_SIGMA_C.store(arg("--l1-sigma", 70), std::sync::atomic::Ordering::Relaxed);
-    lem::HOLD_CELL_M.store(arg("--lem-hold-m", 128), std::sync::atomic::Ordering::Relaxed);
-    lem::SHARED_AREA.store(args.iter().any(|a| a == "--lem-mfd"), std::sync::atomic::Ordering::Relaxed);
+    lem::HOLD_CELL_M.store(
+        arg("--lem-hold-m", 128),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    lem::SHARED_AREA.store(
+        args.iter().any(|a| a == "--lem-mfd"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     if let Some(um) = sarg("--uplift-um").and_then(|v| v.parse::<usize>().ok()) {
         lem::RISE_NM.store(um * 1_000, std::sync::atomic::Ordering::Relaxed);
         lem::RISE_SET.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -502,7 +598,11 @@ fn main() {
         let mut cam = s.cam;
         if let Some(c) = sarg("--cam") {
             let v: Vec<f64> = c.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-            assert_eq!(v.len(), 5, "--cam EAST_KM,SOUTH_KM,BEARING_DEG,PITCH_DEG,OVER_M");
+            assert_eq!(
+                v.len(),
+                5,
+                "--cam EAST_KM,SOUTH_KM,BEARING_DEG,PITCH_DEG,OVER_M"
+            );
             cam = view::Camera {
                 x: v[0] * 1_000.0,
                 n: -v[1] * 1_000.0,
@@ -515,7 +615,14 @@ fn main() {
         let out = sarg("--out").expect("--out PNG");
         let sample = view::layered(&s.coarse, s.w, s.cell_m, &s.fine, s.fw, s.x0, s.y0, s.fcell);
         let detail = view::layered_cell(s.fw as f64 * s.fcell, s.x0, s.y0, s.fcell, s.cell_m);
-        view::render_with(&sample, &detail, 2.0 * s.w as f64 * s.cell_m, &cam, s.dry, &out);
+        view::render_with(
+            &sample,
+            &detail,
+            2.0 * s.w as f64 * s.cell_m,
+            &cam,
+            s.dry,
+            &out,
+        );
         println!(
             "the view: {out} (the camera {:.2} km east, {:.2} km south, bearing {:.0}°, pitch {:.1}°, {:.0} m over the ground)",
             cam.x / 1_000.0,
@@ -540,11 +647,33 @@ fn main() {
         let out = lem::solve(&nodes, &rain, nw, 8_192.0, spacing_m, cell_m);
         let w = out.w;
         let (real_all, rw) = earth_cells(&path, cell_m);
-        let real: Vec<f64> = (0..w * w).map(|k| real_all[(k / w).min(rw - 1) * rw + (k % w).min(rw - 1)]).collect();
-        lem_report(&out.raster, &real, "earth", w, cell_m, hillshade_dir.as_deref(), &label);
+        let real: Vec<f64> = (0..w * w)
+            .map(|k| real_all[(k / w).min(rw - 1) * rw + (k % w).min(rw - 1)])
+            .collect();
+        lem_report(
+            &out.raster,
+            &real,
+            "earth",
+            w,
+            cell_m,
+            hillshade_dir.as_deref(),
+            &label,
+        );
         if let Some(dir) = hillshade_dir.as_deref() {
             let fine_m = arg("--lem-fine-m", 16) as f64;
-            lem_fine_views(&out, &rain, nw, 8_192.0, cell_m, &real, Some(&path), dir, &label, fine_m, None);
+            lem_fine_views(
+                &out,
+                &rain,
+                nw,
+                8_192.0,
+                cell_m,
+                &real,
+                Some(&path),
+                dir,
+                &label,
+                fine_m,
+                None,
+            );
         }
         return;
     }
@@ -589,14 +718,31 @@ fn main() {
              {rain_m:.3} m/yr; {steps} steps of {dt_yr:.0} years ({:.0} Myr); routing {}; hillslope law {}; {}; start {}",
             nw as f64 * 8.192,
             steps as f64 * dt_yr / 1.0e6,
-            if reg.mfd { "MFD" } else if reg.rho8 { "Rho8" } else if reg.dinf { "D∞" } else { "D8" },
+            if reg.mfd {
+                "MFD"
+            } else if reg.rho8 {
+                "Rho8"
+            } else if reg.dinf {
+                "D∞"
+            } else {
+                "D8"
+            },
             if reg.creep { "on" } else { "off" },
-            if reg.threshold { "the threshold law at 35°" } else { "the stepped talus" },
-            if args.iter().any(|a| a == "--start-relief") { "smooth + the older relief" } else { "smooth" }
+            if reg.threshold {
+                "the threshold law at 35°"
+            } else {
+                "the stepped talus"
+            },
+            if args.iter().any(|a| a == "--start-relief") {
+                "smooth + the older relief"
+            } else {
+                "smooth"
+            }
         );
         let a = r2::run(&reg, &start, steps, dt_yr);
         let b = r2::run(&reg, &a.z, steps, dt_yr);
-        let change = |x: &[f64], y: &[f64]| x.iter().zip(y).map(|(p, q)| (p - q).abs()).sum::<f64>();
+        let change =
+            |x: &[f64], y: &[f64]| x.iter().zip(y).map(|(p, q)| (p - q).abs()).sum::<f64>();
         let mean = |x: &[f64]| x.iter().sum::<f64>() / x.len() as f64;
         println!(
             "  the mean height: start {:.0} m, after A {:.0} m, after B {:.0} m",
@@ -654,7 +800,10 @@ fn main() {
         let [x, y, d] = r2::stripes(&reg, &z);
         println!("  THE STRIPES EARTH: along x {x:.3}, along y {y:.3}, along the diagonals {d:.3}");
         let (lean, nl) = r2::lean(&reg, &z, 0.05);
-        println!("  THE GRID'S LEAN EARTH: {:.1} % over {nl} cells (none: 22 %)", lean * 100.0);
+        println!(
+            "  THE GRID'S LEAN EARTH: {:.1} % over {nl} cells (none: 22 %)",
+            lean * 100.0
+        );
         if let Some(dir) = hillshade_dir.as_deref() {
             for (what, file) in shade::write_views(&z, w, 0, cell_m, 0.0, dir, &label, "earth") {
                 println!("  the shaded relief, {what}: {file}");
@@ -671,10 +820,17 @@ fn main() {
     if args.iter().any(|a| a == "--fine-moon") {
         use vd_terrain::artifact::ZField;
         let moon = vd_terrain::home::home_moon();
-        let words = vd_terrain::solve::SolveWords { water_km3: 3_000_000, ..home_solve_words() };
+        let words = vd_terrain::solve::SolveWords {
+            water_km3: 3_000_000,
+            ..home_solve_words()
+        };
         let t = Instant::now();
         let art = run_solve(&SolveJob { body: moon, words }).expect("the solve");
-        println!("B1 THE WET MOON: solved in {:.1} s, sea {} m", t.elapsed().as_secs_f64(), art.sea_m);
+        println!(
+            "B1 THE WET MOON: solved in {:.1} s, sea {} m",
+            t.elapsed().as_secs_f64(),
+            art.sea_m
+        );
         let lat = MacroLattice::of(&moon).expect("a lattice");
         let edge = lat.edge as i32;
         let mut best = (0usize, None);
@@ -685,7 +841,10 @@ fn main() {
                     let land = (0..64)
                         .map(|k| (tx * 8 + (k & 7), ty * 8 + (k >> 3)))
                         .filter(|&(i, j)| (i < edge) & (j < edge))
-                        .filter(|&(i, j)| art.z_m(lat.index(face, i, j)).is_some_and(|z| z > art.sea_m))
+                        .filter(|&(i, j)| {
+                            art.z_m(lat.index(face, i, j))
+                                .is_some_and(|z| z > art.sea_m)
+                        })
                         .count();
                     if land > best.0 {
                         best = (land, Some(vd_terrain::fine::l1::TileKey { face, tx, ty }));
@@ -699,7 +858,12 @@ fn main() {
         let dt = t.elapsed().as_secs_f64();
         match tile {
             Some(tile) => {
-                let held: Vec<i32> = tile.quarters.iter().copied().filter(|&q| q != i32::MIN).collect();
+                let held: Vec<i32> = tile
+                    .quarters
+                    .iter()
+                    .copied()
+                    .filter(|&q| q != i32::MIN)
+                    .collect();
                 println!(
                     "B1 THE WET MOON's tile {key:?} ({} land nodes of 64): solved in {dt:.1} s, side {}, {} points, passes {:?}, {} cells missing, {:.1} … {:.1} m over the sea",
                     best.0,
@@ -798,11 +962,11 @@ fn main() {
     // line inside a tile, the slope break at the cube corner against a tile's middle, and the map.
     if let Some(v) = sarg("--fine-edge") {
         use std::collections::{BTreeMap, BTreeSet};
+        use vd_terrain::artifact::ZField;
         use vd_terrain::fine::finish::block_keys;
         use vd_terrain::fine::l1::{TILE_NODES, TileKey, cells_per_node_shift, solve_l1};
         use vd_terrain::fine::points::chart_cell;
         use vd_terrain::fine::stitch::{BLEND, Field, MISSING};
-        use vd_terrain::artifact::ZField;
         use vd_terrain::fine::tile::{finish, raw_field};
         let shift = cells_per_node_shift(&body, &lattice, 7).expect("nests");
         let n7 = (lattice.edge << shift) as i32;
@@ -811,9 +975,16 @@ fn main() {
         let edge = lattice.edge as i32;
         // The land nodes in the 2 × 2 tiles at corner `c` of `face`.
         let land = |face: Face, c: usize| -> usize {
-            let (bi, bj) = (if c & 1 == 1 { edge - 16 } else { 0 }, if c & 2 == 2 { edge - 16 } else { 0 });
+            let (bi, bj) = (
+                if c & 1 == 1 { edge - 16 } else { 0 },
+                if c & 2 == 2 { edge - 16 } else { 0 },
+            );
             (0..256)
-                .filter(|q| artifact.z_m(lattice.index(face, bi + (q & 15), bj + (q >> 4))).is_some_and(|z| z > artifact.sea_m))
+                .filter(|q| {
+                    artifact
+                        .z_m(lattice.index(face, bi + (q & 15), bj + (q >> 4)))
+                        .is_some_and(|z| z > artifact.sea_m)
+                })
                 .count()
         };
         let (face, c) = if v == "auto" {
@@ -832,7 +1003,10 @@ fn main() {
             let k: Vec<usize> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             (Face::from_index(k[0] as u8).expect("a face"), k[1])
         };
-        let (vx, vy) = (if c & 1 == 1 { i64::from(n7) } else { 0 }, if c & 2 == 2 { i64::from(n7) } else { 0 });
+        let (vx, vy) = (
+            if c & 1 == 1 { i64::from(n7) } else { 0 },
+            if c & 2 == 2 { i64::from(n7) } else { 0 },
+        );
         let r = 2 * side;
         // The finished tiles over the region (two tiles each way from the corner), and the raw tiles their blocks read.
         let mut fin_keys: BTreeSet<TileKey> = BTreeSet::new();
@@ -840,12 +1014,20 @@ fn main() {
             for bx in -2..2i64 {
                 let (x, y) = (vx + bx * side + side / 2, vy + by * side + side / 2);
                 if let Some(cell) = chart_cell(face, x as i32, y as i32, n7) {
-                    fin_keys.insert(TileKey { face: Face::from_index(cell.face).expect("a face"), tx: cell.i >> ts, ty: cell.j >> ts });
+                    fin_keys.insert(TileKey {
+                        face: Face::from_index(cell.face).expect("a face"),
+                        tx: cell.i >> ts,
+                        ty: cell.j >> ts,
+                    });
                 }
             }
         }
-        let raw_keys: Vec<TileKey> =
-            fin_keys.iter().flat_map(|&k| block_keys(k, shift, n7).into_iter().flatten()).collect::<BTreeSet<_>>().into_iter().collect();
+        let raw_keys: Vec<TileKey> = fin_keys
+            .iter()
+            .flat_map(|&k| block_keys(k, shift, n7).into_iter().flatten())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         println!(
             "B2 THE FACE'S EDGE: face {} corner {c} ({} land nodes in its 2 × 2 tiles); {} finished tiles over {} raw tiles",
             face.index(),
@@ -862,25 +1044,47 @@ fn main() {
                     .iter()
                     .map(|&key| {
                         let (body, lattice, artifact) = (&body, &lattice, &artifact);
-                        scope.spawn(move || (key, raw_field(key, solve_l1(body, lattice, artifact, key).expect("solves"), shift)))
+                        scope.spawn(move || {
+                            (
+                                key,
+                                raw_field(
+                                    key,
+                                    solve_l1(body, lattice, artifact, key).expect("solves"),
+                                    shift,
+                                ),
+                            )
+                        })
                     })
                     .collect();
                 hs.into_iter().map(|h| h.join().expect("a tile")).collect()
             });
             raw.extend(got);
         }
-        println!("B2 THE FACE'S EDGE: {} raw tiles in {:.1} s", raw.len(), t.elapsed().as_secs_f64());
+        println!(
+            "B2 THE FACE'S EDGE: {} raw tiles in {:.1} s",
+            raw.len(),
+            t.elapsed().as_secs_f64()
+        );
         let mut fin: BTreeMap<TileKey, Vec<i32>> = BTreeMap::new();
         for &k in &fin_keys {
             let block = block_keys(k, shift, n7).map(|b| b.map(|b| (b, &raw[&b])));
-            let kind = match block.iter().flatten().map(|(b, _)| b.face).collect::<BTreeSet<_>>().len() {
+            let kind = match block
+                .iter()
+                .flatten()
+                .map(|(b, _)| b.face)
+                .collect::<BTreeSet<_>>()
+                .len()
+            {
                 1 => "inside a face",
                 2 => "on a face's edge",
                 _ => "at the cube corner",
             };
             let t = Instant::now();
             let levels = finish(block, shift, n7).unwrap_or_else(|| panic!("{k:?} finishes"));
-            println!("B2 THE FACE'S EDGE: {k:?} {kind} finished in {:.3} s", t.elapsed().as_secs_f64());
+            println!(
+                "B2 THE FACE'S EDGE: {k:?} {kind} finished in {:.3} s",
+                t.elapsed().as_secs_f64()
+            );
             fin.insert(k, levels.into_iter().next().expect("the square"));
         }
         // The ground in face F's chart over the region: each cell from its own tile's finished square.
@@ -890,14 +1094,24 @@ fn main() {
         for y in 0..w {
             for x in 0..w {
                 if let Some(cell) = chart_cell(face, (gx0 + x) as i32, (gy0 + y) as i32, n7) {
-                    let k = TileKey { face: Face::from_index(cell.face).expect("a face"), tx: cell.i >> ts, ty: cell.j >> ts };
-                    let (ox, oy) = (i64::from(cell.i) - i64::from(k.tx) * side, i64::from(cell.j) - i64::from(k.ty) * side);
+                    let k = TileKey {
+                        face: Face::from_index(cell.face).expect("a face"),
+                        tx: cell.i >> ts,
+                        ty: cell.j >> ts,
+                    };
+                    let (ox, oy) = (
+                        i64::from(cell.i) - i64::from(k.tx) * side,
+                        i64::from(cell.j) - i64::from(k.ty) * side,
+                    );
                     z[(y * w + x) as usize] = fin[&k][(oy * side + ox) as usize];
                 }
             }
         }
         let at = |x: i64, y: i64| -> Option<f64> {
-            ((x >= 0) & (y >= 0) & (x < w) & (y < w)).then(|| z[(y * w + x) as usize]).filter(|&q| q != MISSING).map(|q| f64::from(q) / 4.0)
+            ((x >= 0) & (y >= 0) & (x < w) & (y < w))
+                .then(|| z[(y * w + x) as usize])
+                .filter(|&q| q != MISSING)
+                .map(|q| f64::from(q) / 4.0)
         };
         // The step between the cells `a − 1` and `a` on line `l` against the mean slope of the three pairs around it.
         let jump = |a: i64, l: i64, across_x: bool| -> Option<f64> {
@@ -968,11 +1182,21 @@ fn main() {
         );
         if let Some(dir) = hillshade_dir.as_deref() {
             let _ = std::fs::create_dir_all(dir);
-            let lo = z.iter().filter(|&&q| q != MISSING).copied().min().unwrap_or(0);
-            let zf: Vec<f64> = z.iter().map(|&q| f64::from(if q == MISSING { lo } else { q }) / 4.0).collect();
+            let lo = z
+                .iter()
+                .filter(|&&q| q != MISSING)
+                .copied()
+                .min()
+                .unwrap_or(0);
+            let zf: Vec<f64> = z
+                .iter()
+                .map(|&q| f64::from(if q == MISSING { lo } else { q }) / 4.0)
+                .collect();
             let path_png = format!("{dir}/fine_edge_{}_{c}.png", face.index());
             hillshade_rect(&zf, w as usize, w as usize, 128.0, &path_png);
-            println!("B2 THE FACE'S EDGE: the map {path_png} (the quarter past the cube corner drawn flat at the lowest height)");
+            println!(
+                "B2 THE FACE'S EDGE: the map {path_png} (the quarter past the cube corner drawn flat at the lowest height)"
+            );
         }
         return;
     }
@@ -986,7 +1210,15 @@ fn main() {
         let side = 8 * node;
         let band = node - BLEND;
         let (tx0, ty0) = (k[1], k[2]);
-        let keys: Vec<TileKey> = (-1..3).flat_map(|dy| (-1..3).map(move |dx| TileKey { face, tx: tx0 + dx, ty: ty0 + dy })).collect();
+        let keys: Vec<TileKey> = (-1..3)
+            .flat_map(|dy| {
+                (-1..3).map(move |dx| TileKey {
+                    face,
+                    tx: tx0 + dx,
+                    ty: ty0 + dy,
+                })
+            })
+            .collect();
         let t = Instant::now();
         let raw: Vec<Field> = std::thread::scope(|scope| {
             let hs: Vec<_> = keys
@@ -996,13 +1228,22 @@ fn main() {
                     scope.spawn(move || {
                         let t = solve_l1(body, lattice, artifact, key).expect("solves");
                         // Each raster covers its tile and half its buffer: one node beyond each edge.
-                        Field { gx0: (i64::from(key.tx) * 8 - 1) * node, gy0: (i64::from(key.ty) * 8 - 1) * node, w: t.side, h: t.side, v: t.quarters }
+                        Field {
+                            gx0: (i64::from(key.tx) * 8 - 1) * node,
+                            gy0: (i64::from(key.ty) * 8 - 1) * node,
+                            w: t.side,
+                            h: t.side,
+                            v: t.quarters,
+                        }
                     })
                 })
                 .collect();
             hs.into_iter().map(|h| h.join().expect("a tile")).collect()
         });
-        println!("B85: sixteen raw tiles in {:.1} s; the band ±{band} cells, the blend ±{BLEND}", t.elapsed().as_secs_f64());
+        println!(
+            "B85: sixteen raw tiles in {:.1} s; the band ±{band} cells, the blend ±{BLEND}",
+            t.elapsed().as_secs_f64()
+        );
         let at = |dx: i32, dy: i32| &raw[((dy + 1) * 4 + dx + 1) as usize];
         let t = Instant::now();
         let fin: Vec<Field> = [(0, 0), (1, 0), (0, 1), (1, 1)]
@@ -1019,26 +1260,51 @@ fn main() {
                     at(dx, dy + 1),
                     at(dx + 1, dy + 1),
                 ];
-                finished_tile(block, i64::from(k[1] + dx), i64::from(k[2] + dy), side, band).expect("joins")
+                finished_tile(
+                    block,
+                    i64::from(k[1] + dx),
+                    i64::from(k[2] + dy),
+                    side,
+                    band,
+                )
+                .expect("joins")
             })
             .collect();
-        println!("B85: a finished tile in {:.3} s", t.elapsed().as_secs_f64() / 4.0);
+        println!(
+            "B85: a finished tile in {:.3} s",
+            t.elapsed().as_secs_f64() / 4.0
+        );
         // B2: the generator's own forms — `finish` gives the same square, and the record decodes back exactly.
         {
             use vd_terrain::fine::tile::{decode_levels, encode_levels, finish};
             let n7 = (lattice.edge << shift) as i32;
             let block: [Option<(TileKey, &Field)>; 9] = std::array::from_fn(|s| {
                 let (dx, dy) = (s as i32 % 3 - 1, s as i32 / 3 - 1);
-                Some((TileKey { face, tx: k[1] + dx, ty: k[2] + dy }, at(dx, dy)))
+                Some((
+                    TileKey {
+                        face,
+                        tx: k[1] + dx,
+                        ty: k[2] + dy,
+                    },
+                    at(dx, dy),
+                ))
             });
             let levels = finish(block, shift as u32, n7).expect("finishes");
             let ts = side.trailing_zeros();
             let record = encode_levels(&levels, ts).expect("codes");
             println!(
                 "B2 THE FORMS: `finish` gives the bench's square {}; the record {:.0} KB decodes back {}",
-                if levels[0] == fin[0].v { "exactly" } else { "NOT" },
+                if levels[0] == fin[0].v {
+                    "exactly"
+                } else {
+                    "NOT"
+                },
                 record.len() as f64 / 1_000.0,
-                if decode_levels(&record) == Some((ts, levels)) { "exactly" } else { "NOT" }
+                if decode_levels(&record) == Some((ts, levels)) {
+                    "exactly"
+                } else {
+                    "NOT"
+                }
             );
         }
         // What the shard ships (B85): the finished tile and its mean levels (rungs 8–12), each through the coder, decoded back.
@@ -1046,13 +1312,21 @@ fn main() {
             use vd_terrain::fine::{coder, stitch::mean_levels};
             let f = &fin[0];
             let near = coder::encode(&f.v, f.w, f.h).expect("encodes");
-            assert_eq!(coder::decode(&near, f.w, f.h).as_deref(), Some(&f.v[..]), "the finished tile decodes back");
+            assert_eq!(
+                coder::decode(&near, f.w, f.h).as_deref(),
+                Some(&f.v[..]),
+                "the finished tile decodes back"
+            );
             let levels = mean_levels(f, f.gx0, f.gy0, f.w, 5).expect("the mean levels");
             let mut far = 0usize;
             for (i, l) in levels.iter().enumerate() {
                 let n = f.w >> (i + 1);
                 let b = coder::encode(l, n, n).expect("encodes");
-                assert_eq!(coder::decode(&b, n, n).as_deref(), Some(&l[..]), "a mean level decodes back");
+                assert_eq!(
+                    coder::decode(&b, n, n).as_deref(),
+                    Some(&l[..]),
+                    "a mean level decodes back"
+                );
                 far += b.len();
             }
             println!(
@@ -1073,7 +1347,14 @@ fn main() {
             for (f, (dx, dy)) in fin.iter().zip([(0, 0), (1, 0), (0, 1), (1, 1)]) {
                 let mut levels = vec![f.v.clone()];
                 levels.extend(mean_levels(f, f.gx0, f.gy0, f.w, MEAN_LEVELS).expect("the means"));
-                assert!(book.insert(TileKey { face, tx: k[1] + dx, ty: k[2] + dy }, levels));
+                assert!(book.insert(
+                    TileKey {
+                        face,
+                        tx: k[1] + dx,
+                        ty: k[2] + dy
+                    },
+                    levels
+                ));
             }
             let sea_q = i64::from(artifact.sea_m) * 4;
             let as_q = |z: FineZ| match z {
@@ -1086,7 +1367,9 @@ fn main() {
                 for x in 2..2 * side - 2 {
                     let (gx, gy) = (i64::from(k[1]) * side + x, i64::from(k[2]) * side + y);
                     let f = &fin[((y >= side) as usize) * 2 + (x >= side) as usize];
-                    off7 += usize::from(as_q(book.z(face, 7, 7, gx as i32, gy as i32)) != i64::from(f.at(gx, gy)));
+                    off7 += usize::from(
+                        as_q(book.z(face, 7, 7, gx as i32, gy as i32)) != i64::from(f.at(gx, gy)),
+                    );
                 }
             }
             // Rung 12: level 5's 16 × 16 means of each tile, inner cells.
@@ -1094,11 +1377,20 @@ fn main() {
             for (f, (dx, dy)) in fin.iter().zip([(0i64, 0i64), (1, 0), (0, 1), (1, 1)]) {
                 let lv = &mean_levels(f, f.gx0, f.gy0, f.w, MEAN_LEVELS).expect("the means")[4];
                 // The cells whose stencil (one before, two after) stays on the four held tiles.
-                let (xs, ys) = (if dx == 0 { 1..16 } else { 0..14 }, if dy == 0 { 1..16 } else { 0..14 });
+                let (xs, ys) = (
+                    if dx == 0 { 1..16 } else { 0..14 },
+                    if dy == 0 { 1..16 } else { 0..14 },
+                );
                 for y in ys {
                     for x in xs.clone() {
-                        let (i, j) = ((i64::from(k[1]) + dx) * 16 + x, (i64::from(k[2]) + dy) * 16 + y);
-                        off12 += usize::from(as_q(book.z(face, 12, 12, i as i32, j as i32)) != i64::from(lv[(y * 16 + x) as usize]));
+                        let (i, j) = (
+                            (i64::from(k[1]) + dx) * 16 + x,
+                            (i64::from(k[2]) + dy) * 16 + y,
+                        );
+                        off12 += usize::from(
+                            as_q(book.z(face, 12, 12, i as i32, j as i32))
+                                != i64::from(lv[(y * 16 + x) as usize]),
+                        );
                     }
                 }
             }
@@ -1126,14 +1418,17 @@ fn main() {
         for f in &fin {
             for y in 0..f.h {
                 for x in 0..f.w {
-                    corner[((f.gy0 - gy0 + y as i64) * w + f.gx0 - gx0 + x as i64) as usize] = f.v[y * f.w + x];
+                    corner[((f.gy0 - gy0 + y as i64) * w + f.gx0 - gx0 + x as i64) as usize] =
+                        f.v[y * f.w + x];
                 }
             }
         }
         let (top, _) = stitch_columns(at(0, 0), at(1, 0), gx0 + side, band);
         let (bottom, _) = stitch_columns(at(0, 1), at(1, 1), gx0 + side, band);
         let (all, _) = stitch_rows(&top, &bottom, gy0 + side, band);
-        let bench: Vec<i32> = (0..w * w).map(|i| all.at(gx0 + i % w, gy0 + i / w)).collect();
+        let bench: Vec<i32> = (0..w * w)
+            .map(|i| all.at(gx0 + i % w, gy0 + i / w))
+            .collect();
         // The slope break at a cell across x (or y): the second difference over 4 cells, per cell length, as one number.
         let brk = |f: &[i32], x: i64, y: i64, across_x: bool| -> f64 {
             let z = |d: i64| {
@@ -1147,8 +1442,25 @@ fn main() {
             v[v.len() * q / 100]
         };
         // Each line's largest break within `±reach` of `c` (a column when `across_x`, else a row), over the lines `lines`.
-        let line_max = |f: &[i32], c: i64, reach: i64, across_x: bool, lines: std::ops::Range<i64>| -> Vec<f64> {
-            lines.map(|l| (c - reach..=c + reach).map(|a| if across_x { brk(f, a, l, true) } else { brk(f, l, a, false) }).fold(0.0, f64::max)).collect()
+        let line_max = |f: &[i32],
+                        c: i64,
+                        reach: i64,
+                        across_x: bool,
+                        lines: std::ops::Range<i64>|
+         -> Vec<f64> {
+            lines
+                .map(|l| {
+                    (c - reach..=c + reach)
+                        .map(|a| {
+                            if across_x {
+                                brk(f, a, l, true)
+                            } else {
+                                brk(f, l, a, false)
+                            }
+                        })
+                        .fold(0.0, f64::max)
+                })
+                .collect()
         };
         let reach = band + BLEND;
         // The lines away from the square's outer border and from the other inner edge.
@@ -1191,10 +1503,21 @@ fn main() {
             ((z(0) - z(-1)) - (z(1) - z(-2)) / 3.0).abs()
         };
         let ls = || (0..w).filter(|&l| (l > 3) & (l < w - 4));
-        let edge: Vec<f64> = ls().flat_map(|l| [jump(&corner, side, l, true), jump(&corner, side, l, false)]).collect();
-        let inner: Vec<f64> = ls().flat_map(|l| [jump(&corner, side / 2, l, true), jump(&corner, side / 2, l, false)]).collect();
+        let edge: Vec<f64> = ls()
+            .flat_map(|l| [jump(&corner, side, l, true), jump(&corner, side, l, false)])
+            .collect();
+        let inner: Vec<f64> = ls()
+            .flat_map(|l| {
+                [
+                    jump(&corner, side / 2, l, true),
+                    jump(&corner, side / 2, l, false),
+                ]
+            })
+            .collect();
         // The control: the same lines on the bench's one stitched surface (no tile computed apart meets there).
-        let control: Vec<f64> = ls().flat_map(|l| [jump(&bench, side, l, true), jump(&bench, side, l, false)]).collect();
+        let control: Vec<f64> = ls()
+            .flat_map(|l| [jump(&bench, side, l, true), jump(&bench, side, l, false)])
+            .collect();
         println!(
             "B85: the control, the bench's stitch on the same lines 50th / 99th / largest {:.2} / {:.2} / {:.2} m",
             pct(control.clone(), 50),
@@ -1242,10 +1565,17 @@ fn main() {
     // ground over the tile's own square: the first stage's ground and today's 8 km ground.
     if let Some(v) = sarg("--client-standin") {
         use vd_terrain::Gf;
-        use vd_terrain::fine::l1::{BUFFER_NODES, COARSE_ROUNDS, COARSE_RUNG, L1_RUNG, TILE_NODES, TileKey, cells_per_node_shift, domain, rounds, solve_l1};
+        use vd_terrain::fine::l1::{
+            BUFFER_NODES, COARSE_ROUNDS, COARSE_RUNG, L1_RUNG, TILE_NODES, TileKey,
+            cells_per_node_shift, domain, rounds, solve_l1,
+        };
         use vd_terrain::fine::points::chart_cell;
         let k: Vec<i32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-        let key = TileKey { face: Face::from_index(k[0] as u8).expect("a face"), tx: k[1], ty: k[2] };
+        let key = TileKey {
+            face: Face::from_index(k[0] as u8).expect("a face"),
+            tx: k[1],
+            ty: k[2],
+        };
         let t = Instant::now();
         let full = solve_l1(&body, &lattice, &artifact, key).expect("solves");
         let t_full = t.elapsed().as_secs_f64();
@@ -1259,7 +1589,10 @@ fn main() {
         let n_r = body.ladder().cells_per_edge(L1_RUNG);
         let shift = cells_per_node_shift(&body, &lattice, L1_RUNG).expect("nests");
         let half = BUFFER_NODES >> 1;
-        let (i0, j0) = ((key.tx * TILE_NODES - half) << shift, (key.ty * TILE_NODES - half) << shift);
+        let (i0, j0) = (
+            (key.tx * TILE_NODES - half) << shift,
+            (key.ty * TILE_NODES - half) << shift,
+        );
         let side = ((TILE_NODES + 2 * half) << shift) as usize;
         let inv_n = vd_recipe::bend::inv_n_of(n_r);
         let unit = (vd_terrain::units::STEPS_PER_M << 28) as f64;
@@ -1270,15 +1603,25 @@ fn main() {
         let t = Instant::now();
         for b in lo..lo + edge {
             for a in lo..lo + edge {
-                let Some(c) = chart_cell(key.face, i0 + a as i32, j0 + b as i32, n_r as i32) else { continue };
+                let Some(c) = chart_cell(key.face, i0 + a as i32, j0 + b as i32, n_r as i32) else {
+                    continue;
+                };
                 let q = vd_recipe::bend::direction(i32::from(c.face), c.i, c.j, inv_n);
-                let Some((tri, w)) = vd_terrain::fine::geometry::locate(&d.dirs, &d.graph, from, &q) else { continue };
+                let Some((tri, w)) =
+                    vd_terrain::fine::geometry::locate(&d.dirs, &d.graph, from, &q)
+                else {
+                    continue;
+                };
                 from = tri;
                 let vtx = d.graph.tris[tri as usize];
-                let zc: Gf = w[0] * h[vtx[0] as usize] + w[1] * h[vtx[1] as usize] + w[2] * h[vtx[2] as usize];
+                let zc: Gf = w[0] * h[vtx[0] as usize]
+                    + w[1] * h[vtx[1] as usize]
+                    + w[2] * h[vtx[2] as usize];
                 let zf = f64::from(full.quarters[b * side + a]) / 4.0;
                 let face = Face::from_index(c.face).expect("a face");
-                let zm = vd_terrain::artifact::sample_z(&lattice, &artifact, face, L1_RUNG, c.i, c.j).expect("z");
+                let zm =
+                    vd_terrain::artifact::sample_z(&lattice, &artifact, face, L1_RUNG, c.i, c.j)
+                        .expect("z");
                 let zm = zm.raw() as f64 / unit - f64::from(artifact.sea_m);
                 d_coarse.push((zc.to_f64() - zf).abs());
                 d_macro.push((zm - zf).abs());
@@ -1288,7 +1631,13 @@ fn main() {
         let stats = |mut v: Vec<f64>| {
             v.sort_by(f64::total_cmp);
             let n = v.len();
-            (v.iter().sum::<f64>() / n as f64, v[n / 2], v[n * 9 / 10], v[n * 99 / 100], v[n - 1])
+            (
+                v.iter().sum::<f64>() / n as f64,
+                v[n / 2],
+                v[n * 9 / 10],
+                v[n * 99 / 100],
+                v[n - 1],
+            )
         };
         let (cm, c50, c90, c99, cmax) = stats(d_coarse);
         let (mm, m50, m90, m99, mmax) = stats(d_macro);
@@ -1297,7 +1646,9 @@ fn main() {
             full.points,
             d.dirs.len()
         );
-        println!("STANDIN {key:?}: off the finished ground — the first stage mean {cm:.0} m, median {c50:.0}, 90th {c90:.0}, 99th {c99:.0}, worst {cmax:.0}; today's 8 km ground mean {mm:.0} m, median {m50:.0}, 90th {m90:.0}, 99th {m99:.0}, worst {mmax:.0}");
+        println!(
+            "STANDIN {key:?}: off the finished ground — the first stage mean {cm:.0} m, median {c50:.0}, 90th {c90:.0}, 99th {c99:.0}, worst {cmax:.0}; today's 8 km ground mean {mm:.0} m, median {m50:.0}, 90th {m90:.0}, 99th {m99:.0}, worst {mmax:.0}"
+        );
         return;
     }
 
@@ -1310,9 +1661,13 @@ fn main() {
         let k: Vec<i64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         let body = body.with_sea_m(artifact.sea());
         let drawn = artifact.drawn_range_m(&lattice);
-        let body = body.with_fine_band_m(drawn.0, drawn.1, artifact.sea_m).unwrap_or(body);
+        let body = body
+            .with_fine_band_m(drawn.0, drawn.1, artifact.sea_m)
+            .unwrap_or(body);
         let at: Vec<f64> = sarg("--eye")
-            .unwrap_or_else(|| "4142667.5882631033,-2985007.539965574,-3770764.624794889".to_owned())
+            .unwrap_or_else(|| {
+                "4142667.5882631033,-2985007.539965574,-3770764.624794889".to_owned()
+            })
             .split(',')
             .filter_map(|x| x.trim().parse().ok())
             .collect();
@@ -1322,17 +1677,47 @@ fn main() {
         let relief = body.ground_range_m().1;
         let pixel = vd_core::geometry::drawable_theta_min_rad();
         let chunk_m = 62.0 * f64::from(vd_seed::ladder::cell_m(12));
-        let reach = vd_terrain::artifact::fine_reach_m(12, (ground, ground), relief, r + 1.6, pixel, (chunk_m, lattice.node_m() * 8.0))
-            .unwrap_or(0.0);
+        let reach = vd_terrain::artifact::fine_reach_m(
+            12,
+            (ground, ground),
+            relief,
+            r + 1.6,
+            pixel,
+            (chunk_m, lattice.node_m() * 8.0),
+        )
+        .unwrap_or(0.0);
         let named = vd_terrain::artifact::tiles_within_of(&lattice, dir, reach, 8);
-        let held: std::collections::BTreeSet<(u8, u32, u32)> = named.iter().copied().take(k[5] as usize).collect();
-        println!("B2 WHY: reach {:.0} km, {} named, {} held; the first named {:?}", reach / 1e3, named.len(), held.len(), &named[..3.min(named.len())]);
-        let book = vd_terrain::fine::read::FineBook::new(&body, &lattice, artifact.sea_m).expect("a book");
-        let key = ChunkKey { face: Face::from_index(k[0] as u8).expect("a face"), rung: k[1] as u8, x: k[2] as i32, y: k[3] as i32, z: k[4] as i32 };
+        let held: std::collections::BTreeSet<(u8, u32, u32)> =
+            named.iter().copied().take(k[5] as usize).collect();
+        println!(
+            "B2 WHY: reach {:.0} km, {} named, {} held; the first named {:?}",
+            reach / 1e3,
+            named.len(),
+            held.len(),
+            &named[..3.min(named.len())]
+        );
+        let book =
+            vd_terrain::fine::read::FineBook::new(&body, &lattice, artifact.sea_m).expect("a book");
+        let key = ChunkKey {
+            face: Face::from_index(k[0] as u8).expect("a face"),
+            rung: k[1] as u8,
+            x: k[2] as i32,
+            y: k[3] as i32,
+            z: k[4] as i32,
+        };
         for c in std::iter::once(key).chain(vd_client::chunks::parent_keys(&body, key)) {
             let needs = book.tiles_of_chunk(c.face, c.rung, c.x, c.y);
-            let missing: Vec<TileKey> = needs.iter().copied().filter(|t| !held.contains(&(t.face.index(), t.tx as u32, t.ty as u32))).collect();
-            println!("  {c:?}: reads {} fine tiles, {} not held {:?}", needs.len(), missing.len(), &missing[..missing.len().min(6)]);
+            let missing: Vec<TileKey> = needs
+                .iter()
+                .copied()
+                .filter(|t| !held.contains(&(t.face.index(), t.tx as u32, t.ty as u32)))
+                .collect();
+            println!(
+                "  {c:?}: reads {} fine tiles, {} not held {:?}",
+                needs.len(),
+                missing.len(),
+                &missing[..missing.len().min(6)]
+            );
         }
         return;
     }
@@ -1348,12 +1733,19 @@ fn main() {
         use vd_terrain::fine::stitch::Field;
         let seed = vd_bins::DEV.universe_seed;
         let orbit = vd_bins::home_orbit(seed).expect("the home planet's orbit");
-        let sun = -vd_physics::celestial::orbital_state(&orbit, 0.0).position.normalize();
+        let sun = -vd_physics::celestial::orbital_state(&orbit, 0.0)
+            .position
+            .normalize();
         let planet_seed = vd_bins::home_body(seed).expect("the home planet").seed();
         let unit = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
         let dir_of = |node: u32| {
             let d = lattice.direction(node);
-            DVec3::new(d[0].raw() as f64 / unit, d[1].raw() as f64 / unit, d[2].raw() as f64 / unit).normalize()
+            DVec3::new(
+                d[0].raw() as f64 / unit,
+                d[1].raw() as f64 / unit,
+                d[2].raw() as f64 / unit,
+            )
+            .normalize()
         };
         let edge = lattice.edge as i32;
         let mut best: Option<(i32, TileKey)> = None;
@@ -1369,10 +1761,15 @@ fn main() {
                         continue;
                     }
                     let zs: Vec<i32> = (0..64)
-                        .filter_map(|q| artifact.z_m(lattice.index(face, tx * 8 + (q & 7), ty * 8 + (q >> 3))))
+                        .filter_map(|q| {
+                            artifact.z_m(lattice.index(face, tx * 8 + (q & 7), ty * 8 + (q >> 3)))
+                        })
                         .map(i32::from)
                         .collect();
-                    let (lo, hi) = (*zs.iter().min().unwrap_or(&0), *zs.iter().max().unwrap_or(&0));
+                    let (lo, hi) = (
+                        *zs.iter().min().unwrap_or(&0),
+                        *zs.iter().max().unwrap_or(&0),
+                    );
                     if lo <= i32::from(artifact.sea_m) {
                         continue;
                     }
@@ -1391,7 +1788,13 @@ fn main() {
         // The 5 × 5 raw block, then the 3 × 3 finished around the centre (the centre's own stencil reads one more).
         let shift = vd_terrain::fine::l1::cells_per_node_shift(&body, &lattice, 7).expect("nests");
         let keys: Vec<TileKey> = (-2..=2)
-            .flat_map(|dy| (-2..=2).map(move |dx| TileKey { face: key.face, tx: key.tx + dx, ty: key.ty + dy }))
+            .flat_map(|dy| {
+                (-2..=2).map(move |dx| TileKey {
+                    face: key.face,
+                    tx: key.tx + dx,
+                    ty: key.ty + dy,
+                })
+            })
             .collect();
         let t = Instant::now();
         let raw: Vec<Field> = std::thread::scope(|scope| {
@@ -1400,26 +1803,42 @@ fn main() {
                 .map(|&k| {
                     let (body, lattice, artifact) = (&body, &lattice, &artifact);
                     scope.spawn(move || {
-                        let t = vd_terrain::fine::l1::solve_l1(body, lattice, artifact, k).expect("solves");
+                        let t = vd_terrain::fine::l1::solve_l1(body, lattice, artifact, k)
+                            .expect("solves");
                         vd_terrain::fine::tile::raw_field(k, t, shift)
                     })
                 })
                 .collect();
             hs.into_iter().map(|h| h.join().expect("a tile")).collect()
         });
-        let mut book = vd_terrain::fine::read::FineBook::new(&body, &lattice, artifact.sea_m).expect("a book");
+        let mut book =
+            vd_terrain::fine::read::FineBook::new(&body, &lattice, artifact.sea_m).expect("a book");
         let at = |dx: i32, dy: i32| &raw[((dy + 2) * 5 + dx + 2) as usize];
         for (dx, dy) in (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy))) {
-            let k = TileKey { face: key.face, tx: key.tx + dx, ty: key.ty + dy };
+            let k = TileKey {
+                face: key.face,
+                tx: key.tx + dx,
+                ty: key.ty + dy,
+            };
             let n7 = (lattice.edge << shift) as i32;
             let block: [Option<(TileKey, &Field)>; 9] = std::array::from_fn(|s| {
                 let (sx, sy) = (s as i32 % 3 - 1, s as i32 / 3 - 1);
-                Some((TileKey { face: key.face, tx: k.tx + sx, ty: k.ty + sy }, at(dx + sx, dy + sy)))
+                Some((
+                    TileKey {
+                        face: key.face,
+                        tx: k.tx + sx,
+                        ty: k.ty + sy,
+                    },
+                    at(dx + sx, dy + sy),
+                ))
             });
             let levels = vd_terrain::fine::tile::finish(block, shift, n7).expect("finishes");
             assert!(book.insert(k, levels));
         }
-        println!("B2 THE STAND: 25 raw tiles and 9 finished in {:.1} s", t.elapsed().as_secs_f64());
+        println!(
+            "B2 THE STAND: 25 raw tiles and 9 finished in {:.1} s",
+            t.elapsed().as_secs_f64()
+        );
         // ★ THE FLATS (the owner in the window: "Not sure what flat surface here is"): over the 3 × 3 finished tiles, the
         // share of 128 m cells at or under the sea, the share that is flat (the steepest step to a neighbour under 1 %),
         // and how many of the flat ones stand at or under the sea; and a map with the under-sea cells marked.
@@ -1430,13 +1849,21 @@ fn main() {
             let mut z_all = vec![0f64; 9 * side * side];
             let w3 = 3 * side;
             for (dx, dy) in (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy))) {
-                let k = TileKey { face: key.face, tx: key.tx + dx, ty: key.ty + dy };
+                let k = TileKey {
+                    face: key.face,
+                    tx: key.tx + dx,
+                    ty: key.ty + dy,
+                };
                 for y in 0..side {
                     for x in 0..side {
                         let gx = (i64::from(k.tx) << book.side_shift()) + x as i64;
                         let gy = (i64::from(k.ty) << book.side_shift()) + y as i64;
-                        let q = |gx: i64, gy: i64| match book.z(k.face, 7, 7, gx as i32, gy as i32) {
-                            vd_terrain::fine::read::FineZ::Held(g) => Some(g.raw() as f64 / (128.0 * (1u64 << 28) as f64) - f64::from(artifact.sea_m)),
+                        let q = |gx: i64, gy: i64| match book.z(k.face, 7, 7, gx as i32, gy as i32)
+                        {
+                            vd_terrain::fine::read::FineZ::Held(g) => Some(
+                                g.raw() as f64 / (128.0 * (1u64 << 28) as f64)
+                                    - f64::from(artifact.sea_m),
+                            ),
                             _ => None,
                         };
                         let Some(h) = q(gx, gy) else { continue };
@@ -1449,7 +1876,8 @@ fn main() {
                         under += usize::from(h <= 0.5);
                         flat += usize::from(steep < 0.01);
                         flat_under += usize::from((steep < 0.01) & (h <= 0.5));
-                        z_all[((dy + 1) as usize * side + y) * w3 + (dx + 1) as usize * side + x] = h;
+                        z_all[((dy + 1) as usize * side + y) * w3 + (dx + 1) as usize * side + x] =
+                            h;
                     }
                 }
             }
@@ -1479,16 +1907,26 @@ fn main() {
         let face_of = vd_seed::bend::face_of(centre.to_array());
         let (u, v) = vd_seed::bend::face_coords(face_of, centre.to_array());
         let n0 = body.ladder().cells_per_edge(0);
-        let (i, j) = (vd_seed::ladder::index_of(vd_seed::bend::unbend(u), n0), vd_seed::ladder::index_of(vd_seed::bend::unbend(v), n0));
+        let (i, j) = (
+            vd_seed::ladder::index_of(vd_seed::bend::unbend(u), n0),
+            vd_seed::ladder::index_of(vd_seed::bend::unbend(v), n0),
+        );
         let z = match book.z(face_of, 0, 0, i, j) {
-            vd_terrain::fine::read::FineZ::Held(g) => g.raw() as f64 / (128.0 * (1u64 << 28) as f64),
+            vd_terrain::fine::read::FineZ::Held(g) => {
+                g.raw() as f64 / (128.0 * (1u64 << 28) as f64)
+            }
             other => panic!("{other:?}"),
         };
         let surface = body.radius_m() + z;
         let high = (0..64)
-            .max_by_key(|q| artifact.z_m(lattice.index(key.face, key.tx * 8 + (q & 7), key.ty * 8 + (q >> 3))).unwrap_or(i16::MIN))
+            .max_by_key(|q| {
+                artifact
+                    .z_m(lattice.index(key.face, key.tx * 8 + (q & 7), key.ty * 8 + (q >> 3)))
+                    .unwrap_or(i16::MIN)
+            })
             .expect("a node");
-        let toward = dir_of(lattice.index(key.face, key.tx * 8 + (high & 7), key.ty * 8 + (high >> 3)));
+        let toward =
+            dir_of(lattice.index(key.face, key.tx * 8 + (high & 7), key.ty * 8 + (high >> 3)));
         let forward = (toward - centre * toward.dot(centre)).normalize();
         let up = (centre - forward * forward.dot(centre)).normalize();
         let right = forward.cross(up).normalize();
@@ -1497,7 +1935,8 @@ fn main() {
         println!(
             "B2 THE STAND: the fine ground {:.1} m over the radius (the macro's {:.1} m); the spawn:\n1000=Planet({planet_seed}):{},{},{}@{},{},{},{}",
             z,
-            vd_terrain::height::height_field_m(&body, &artifact, centre.to_array(), 0).map_or(f64::NAN, |g| g - body.radius_m()),
+            vd_terrain::height::height_field_m(&body, &artifact, centre.to_array(), 0)
+                .map_or(f64::NAN, |g| g - body.radius_m()),
             at_m.x,
             at_m.y,
             at_m.z,
@@ -1514,9 +1953,14 @@ fn main() {
             let d = d.normalize();
             let f = vd_seed::bend::face_of(d.to_array());
             let (u, v) = vd_seed::bend::face_coords(f, d.to_array());
-            let (i, j) = (vd_seed::ladder::index_of(vd_seed::bend::unbend(u), n0), vd_seed::ladder::index_of(vd_seed::bend::unbend(v), n0));
+            let (i, j) = (
+                vd_seed::ladder::index_of(vd_seed::bend::unbend(u), n0),
+                vd_seed::ladder::index_of(vd_seed::bend::unbend(v), n0),
+            );
             match book.z(f, 0, 0, i, j) {
-                vd_terrain::fine::read::FineZ::Held(g) => g.raw() as f64 / (128.0 * (1u64 << 28) as f64),
+                vd_terrain::fine::read::FineZ::Held(g) => {
+                    g.raw() as f64 / (128.0 * (1u64 << 28) as f64)
+                }
                 other => panic!("{other:?}"),
             }
         };
@@ -1530,7 +1974,9 @@ fn main() {
                 let (mut hi, mut lo) = (f64::MIN, f64::MAX);
                 for a in (-20..=20).step_by(4) {
                     for c in (-6..=6).step_by(3) {
-                        let p = centre * surface + along * (dist + f64::from(a)) + side_v * f64::from(c);
+                        let p = centre * surface
+                            + along * (dist + f64::from(a))
+                            + side_v * f64::from(c);
                         let z = ground_at(p);
                         hi = hi.max(z);
                         lo = lo.min(z);
@@ -1585,12 +2031,21 @@ fn main() {
         let body = body.with_sea_m(artifact.sea());
         let threads = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1));
         let artifact = std::sync::Arc::new(artifact);
-        let work = vd_bins::fine_source::FineWork::new(vd_core::pose::RealmId::Planet(1), body, artifact.clone(), threads)
-            .expect("the level applies");
+        let work = vd_bins::fine_source::FineWork::new(
+            vd_core::pose::RealmId::Planet(1),
+            body,
+            artifact.clone(),
+            threads,
+        )
+        .expect("the level applies");
         let node = lattice.index(face, k[1] * 8 + 4, k[2] * 8 + 4);
         let d = lattice.direction(node);
         let unit = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
-        let dir = [d[0].raw() as f64 / unit, d[1].raw() as f64 / unit, d[2].raw() as f64 / unit];
+        let dir = [
+            d[0].raw() as f64 / unit,
+            d[1].raw() as f64 / unit,
+            d[2].raw() as f64 / unit,
+        ];
         let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
         let dir = [dir[0] / len, dir[1] / len, dir[2] / len];
         let ground = vd_terrain::height::height_field_m(&body, &*artifact, dir, 0).expect("ground");
@@ -1605,29 +2060,50 @@ fn main() {
             work.tick(Some(&mut store));
             worst_tick = worst_tick.max(t.elapsed().as_secs_f64());
             ticks += 1;
-            let ring = (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy))).all(|(dx, dy)| {
-                work.parts((k[0] as u8, (k[1] + dx) as u32, (k[2] + dy) as u32), 0, vd_sim::stub::fine_ship::NONE_HELD).is_some()
-            });
+            let ring = (-1..=1)
+                .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+                .all(|(dx, dy)| {
+                    work.parts(
+                        (k[0] as u8, (k[1] + dx) as u32, (k[2] + dy) as u32),
+                        0,
+                        vd_sim::stub::fine_ship::NONE_HELD,
+                    )
+                    .is_some()
+                });
             if ring && first_ring_at.is_none() {
                 first_ring_at = Some(t0.elapsed().as_secs_f64());
                 let (raw, fin, fly) = work.progress();
-                println!("B2 THE PROVIDER: the 3 × 3 ring under the eye finished at {:.1} s (raw {raw}, finished {fin}, in flight {fly})", t0.elapsed().as_secs_f64());
+                println!(
+                    "B2 THE PROVIDER: the 3 × 3 ring under the eye finished at {:.1} s (raw {raw}, finished {fin}, in flight {fly})",
+                    t0.elapsed().as_secs_f64()
+                );
             }
             if t0.elapsed().as_secs() >= last_print + 20 {
                 last_print = t0.elapsed().as_secs();
                 let (raw, fin, fly) = work.progress();
-                println!("  {:.0} s: {named} named, raw {raw}, finished {fin}, in flight {fly}, the worst tick {:.1} ms", t0.elapsed().as_secs_f64(), worst_tick * 1e3);
+                println!(
+                    "  {:.0} s: {named} named, raw {raw}, finished {fin}, in flight {fly}, the worst tick {:.1} ms",
+                    t0.elapsed().as_secs_f64(),
+                    worst_tick * 1e3
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let (raw, fin, fly) = work.progress();
-        let parts = work.parts((k[0] as u8, k[1] as u32, k[2] as u32), 0, vd_sim::stub::fine_ship::NONE_HELD).map_or(0, |p| p.len());
+        let parts = work
+            .parts(
+                (k[0] as u8, k[1] as u32, k[2] as u32),
+                0,
+                vd_sim::stub::fine_ship::NONE_HELD,
+            )
+            .map_or(0, |p| p.len());
         // ★ FAR COPIES FIRST (ruling B86 item 3): the bytes a session logging in at the stand receives — each named tile
         // from the finest level its view reads — against every tile whole; and how many tiles each level.
         {
             let want = work.want(dir, ground + 2.0);
             let bytes = |t: vd_sim::stub::fine_ship::FineName, lo: u8| {
-                work.parts(t, lo, vd_sim::stub::fine_ship::NONE_HELD).map_or(0, |p| p.iter().map(|b| b.len()).sum::<usize>())
+                work.parts(t, lo, vd_sim::stub::fine_ship::NONE_HELD)
+                    .map_or(0, |p| p.iter().map(|b| b.len()).sum::<usize>())
             };
             let (mut far, mut whole) = (0usize, 0usize);
             let mut by_level = [0usize; 6];
@@ -1648,7 +2124,11 @@ fn main() {
             t0.elapsed().as_secs_f64(),
             worst_tick * 1e3,
             first_ring_at,
-            vd_sim::io::Store::scan(&store, &[]).iter().map(|(_, v)| v.len()).sum::<usize>() as f64 / 1e6,
+            vd_sim::io::Store::scan(&store, &[])
+                .iter()
+                .map(|(_, v)| v.len())
+                .sum::<usize>() as f64
+                / 1e6,
             vd_sim::io::Store::scan(&store, &[]).len()
         );
         return;
@@ -1663,11 +2143,16 @@ fn main() {
         let sea_tile = (1..(edge >> 3) - 1).find(|&tx| {
             (0..144).all(|q| {
                 let (i, j) = (tx * 8 - 2 + (q % 12), k[1] * 8 - 2 + (q / 12));
-                artifact.z_m(lattice.index(face, i.clamp(0, edge - 1), j.clamp(0, edge - 1))).is_some_and(|z| z <= artifact.sea_m)
+                artifact
+                    .z_m(lattice.index(face, i.clamp(0, edge - 1), j.clamp(0, edge - 1)))
+                    .is_some_and(|z| z <= artifact.sea_m)
             })
         });
         let Some(tx) = sea_tile else {
-            println!("B2 THE SEA RULE: no all-sea tile in row {} of face {}", k[1], k[0]);
+            println!(
+                "B2 THE SEA RULE: no all-sea tile in row {} of face {}",
+                k[1], k[0]
+            );
             return;
         };
         let key = vd_terrain::fine::l1::TileKey { face, tx, ty: k[1] };
@@ -1688,8 +2173,16 @@ fn main() {
         let k: Vec<i32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         let face = Face::from_index(k[0] as u8).expect("a face");
         let keys = [
-            vd_terrain::fine::l1::TileKey { face, tx: k[1], ty: k[2] },
-            vd_terrain::fine::l1::TileKey { face, tx: k[1] + 1, ty: k[2] },
+            vd_terrain::fine::l1::TileKey {
+                face,
+                tx: k[1],
+                ty: k[2],
+            },
+            vd_terrain::fine::l1::TileKey {
+                face,
+                tx: k[1] + 1,
+                ty: k[2],
+            },
         ];
         let t = Instant::now();
         let tiles: Vec<_> = std::thread::scope(|scope| {
@@ -1697,12 +2190,16 @@ fn main() {
                 .iter()
                 .map(|&key| {
                     let (body, lattice, artifact) = (&body, &lattice, &artifact);
-                    scope.spawn(move || vd_terrain::fine::l1::solve_l1(body, lattice, artifact, key).expect("solves"))
+                    scope.spawn(move || {
+                        vd_terrain::fine::l1::solve_l1(body, lattice, artifact, key)
+                            .expect("solves")
+                    })
                 })
                 .collect();
             hs.into_iter().map(|h| h.join().expect("a tile")).collect()
         });
-        let shift = vd_terrain::fine::l1::cells_per_node_shift(&body, &lattice, 7).expect("nests") as i64;
+        let shift =
+            vd_terrain::fine::l1::cells_per_node_shift(&body, &lattice, 7).expect("nests") as i64;
         let node = 1i64 << shift;
         // Each raster covers its tile and half its buffer: one node beyond each edge.
         let field = |key: &vd_terrain::fine::l1::TileKey, t: &vd_terrain::fine::l1::L1Tile| Field {
@@ -1715,7 +2212,12 @@ fn main() {
         let (fa, fb) = (field(&keys[0], &tiles[0]), field(&keys[1], &tiles[1]));
         let ge = (i64::from(k[1]) + 1) * 8 * node;
         let (s, path) = stitch_columns(&fa, &fb, ge, node);
-        println!("B1 (e): two tiles at once in {:.1} s; the cut wanders {}–{} columns from the edge", t.elapsed().as_secs_f64(), path.iter().min().unwrap_or(&0) - ge, path.iter().max().unwrap_or(&0) - ge);
+        println!(
+            "B1 (e): two tiles at once in {:.1} s; the cut wanders {}–{} columns from the edge",
+            t.elapsed().as_secs_f64(),
+            path.iter().min().unwrap_or(&0) - ge,
+            path.iter().max().unwrap_or(&0) - ge
+        );
         // The slope break (the second difference across 4 cells, per cell length) across the cut and inside the west tile.
         let brk = |gx: i64, gy: i64| -> f64 {
             let z = |x: i64| f64::from(s.at(x, gy)) / 4.0;
@@ -1726,9 +2228,17 @@ fn main() {
             v[v.len() * 99 / 100]
         };
         let rows: Vec<i64> = (0..path.len() as i64).collect();
-        let on_cut = pct(rows.iter().map(|&y| brk(path[y as usize], s.gy0 + y)).collect());
-        let inside = pct(rows.iter().map(|&y| brk(ge - 3 * node, s.gy0 + y)).collect());
-        println!("B1 (e): the slope break, 99th: across the cut {on_cut:.3}, inside the west tile {inside:.3}");
+        let on_cut = pct(rows
+            .iter()
+            .map(|&y| brk(path[y as usize], s.gy0 + y))
+            .collect());
+        let inside = pct(rows
+            .iter()
+            .map(|&y| brk(ge - 3 * node, s.gy0 + y))
+            .collect());
+        println!(
+            "B1 (e): the slope break, 99th: across the cut {on_cut:.3}, inside the west tile {inside:.3}"
+        );
         if let Some(dir) = hillshade_dir.as_deref() {
             let _ = std::fs::create_dir_all(dir);
             let z: Vec<f64> = s.v.iter().map(|&q| f64::from(q) / 4.0).collect();
@@ -1742,29 +2252,49 @@ fn main() {
     // passes, the straight-line and lean readings, and its map.
     if let Some(v) = sarg("--fine-l1") {
         let k: Vec<i32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-        let key = vd_terrain::fine::l1::TileKey { face: Face::from_index(k[0] as u8).expect("a face"), tx: k[1], ty: k[2] };
+        let key = vd_terrain::fine::l1::TileKey {
+            face: Face::from_index(k[0] as u8).expect("a face"),
+            tx: k[1],
+            ty: k[2],
+        };
         if args.iter().any(|a| a == "--fine-steps") {
             use vd_terrain::fine::points::{Level, domain_points};
             for rung in [9u8, 7] {
                 let n_r = body.ladder().cells_per_edge(rung);
-                let shift = vd_terrain::fine::l1::cells_per_node_shift(&body, &lattice, rung).expect("nests");
+                let shift = vd_terrain::fine::l1::cells_per_node_shift(&body, &lattice, rung)
+                    .expect("nests");
                 let level = Level::new(body.seed(), rung, n_r).expect("level");
                 let (ni0, nj0) = (k[1] * 8 - 2, k[2] * 8 - 2);
                 let t = Instant::now();
-                let pts = domain_points(&level, key.face, ni0 << shift, nj0 << shift, 12 << shift, 12 << shift);
+                let pts = domain_points(
+                    &level,
+                    key.face,
+                    ni0 << shift,
+                    nj0 << shift,
+                    12 << shift,
+                    12 << shift,
+                );
                 let t_p = t.elapsed().as_secs_f64();
                 let dirs: Vec<_> = pts.iter().map(|p| p.dir).collect();
                 let t = Instant::now();
                 let g = vd_terrain::fine::delaunay::triangulate(&dirs).expect("graph");
                 let t_g = t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                let _ = vd_terrain::fine::geometry::geometry(&dirs, &g, vd_terrain::Gf::from_f64(body.radius_m()));
+                let _ = vd_terrain::fine::geometry::geometry(
+                    &dirs,
+                    &g,
+                    vd_terrain::Gf::from_f64(body.radius_m()),
+                );
                 let t_m = t.elapsed().as_secs_f64();
                 let t = Instant::now();
                 let mut acc = 0i64;
                 for p in &pts {
                     let face = Face::from_index(p.cell.face).expect("face");
-                    acc ^= vd_terrain::artifact::sample_z(&lattice, &artifact, face, rung, p.cell.i, p.cell.j).expect("z").raw();
+                    acc ^= vd_terrain::artifact::sample_z(
+                        &lattice, &artifact, face, rung, p.cell.i, p.cell.j,
+                    )
+                    .expect("z")
+                    .raw();
                 }
                 let t_z = t.elapsed().as_secs_f64();
                 let t = Instant::now();
@@ -1773,7 +2303,12 @@ fn main() {
                     let face = Face::from_index(p.cell.face).expect("face");
                     for dj in -3..=3i64 {
                         for di in -3..=3i64 {
-                            let m = vd_terrain::artifact::node_at(&lattice, face, i64::from(p.cell.i >> shift) + di, i64::from(p.cell.j >> shift) + dj);
+                            let m = vd_terrain::artifact::node_at(
+                                &lattice,
+                                face,
+                                i64::from(p.cell.i >> shift) + di,
+                                i64::from(p.cell.j >> shift) + dj,
+                            );
                             acc2 ^= lattice.direction(m)[0].raw();
                         }
                     }
@@ -1787,7 +2322,9 @@ fn main() {
             return;
         }
         if args.iter().any(|a| a == "--fine-debug") {
-            use vd_terrain::fine::l1::{COARSE_ROUNDS, COARSE_RUNG, L1_RUNG, ROUNDS, domain, rounds};
+            use vd_terrain::fine::l1::{
+                COARSE_ROUNDS, COARSE_RUNG, L1_RUNG, ROUNDS, domain, rounds,
+            };
             let t = Instant::now();
             let coarse = domain(&body, &lattice, &artifact, COARSE_RUNG, key).expect("coarse");
             let t_cd = t.elapsed().as_secs_f64();
@@ -1800,7 +2337,12 @@ fn main() {
             let fine = domain(&body, &lattice, &artifact, L1_RUNG, key).expect("fine");
             let t_fd = t.elapsed().as_secs_f64();
             let t = Instant::now();
-            let mut u: Vec<_> = fine.refs.iter().zip(&fine.ref_u0).map(|(m, &u0)| coarse.refs.binary_search(m).map_or(u0, |i| uc[i])).collect();
+            let mut u: Vec<_> = fine
+                .refs
+                .iter()
+                .zip(&fine.ref_u0)
+                .map(|(m, &u0)| coarse.refs.binary_search(m).map_or(u0, |i| uc[i]))
+                .collect();
             let mut h = fine.base.clone();
             let pf = rounds(&fine, &mut u, &mut h, ROUNDS);
             let t_fr = t.elapsed().as_secs_f64();
@@ -1812,14 +2354,17 @@ fn main() {
             return;
         }
         let t = Instant::now();
-        let tile = vd_terrain::fine::l1::solve_l1(&body, &lattice, &artifact, key).expect("the tile solves");
+        let tile = vd_terrain::fine::l1::solve_l1(&body, &lattice, &artifact, key)
+            .expect("the tile solves");
         let dt = t.elapsed().as_secs_f64();
         let side = tile.side;
         let z: Vec<f64> = tile.quarters.iter().map(|&q| f64::from(q) / 4.0).collect();
         let reg = r2::plain_region(side, 128.0, &z);
         let (straight, ns) = r2::straight_share(&reg, &z, 0.05, 16);
         let (lean, nl) = r2::lean(&reg, &z, 0.05);
-        let (lo, hi) = z.iter().fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        let (lo, hi) = z
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
         println!(
             "B1 (d): the generator's 128 m tile {k:?}: {} points, passes {:?}, {dt:.1} s; {side} × {side} heights {lo:.0}–{hi:.0} m; the straight share {:.1} % of {ns}, the lean {:.1} % of {nl}",
             tile.points,
@@ -1829,7 +2374,8 @@ fn main() {
         );
         {
             let t = Instant::now();
-            let bytes = vd_terrain::fine::coder::encode(&tile.quarters, side, side).expect("encodes");
+            let bytes =
+                vd_terrain::fine::coder::encode(&tile.quarters, side, side).expect("encodes");
             let back = vd_terrain::fine::coder::decode(&bytes, side, side).expect("decodes");
             println!(
                 "B1 (f): the generator's coder: {} KB ({:.2} bytes a sample), decoded back exactly: {} ({:.2} s)",
@@ -1857,9 +2403,14 @@ fn main() {
         let t = Instant::now();
         let pts = domain_points(&level, Face::NegY, 23_000, 70_000, 768, 768);
         let dt = t.elapsed().as_secs_f64();
-        let r2 = level.radius2(vd_terrain::fine::points::CellId { face: Face::NegY.index(), i: 23_384, j: 70_384 });
+        let r2 = level.radius2(vd_terrain::fine::points::CellId {
+            face: Face::NegY.index(),
+            i: 23_384,
+            j: 70_384,
+        });
         // The closest pair, by a bucket of cells (pairs only within the 3 × 3 cells around).
-        let mut by_cell: std::collections::BTreeMap<(i32, i32), Vec<usize>> = std::collections::BTreeMap::new();
+        let mut by_cell: std::collections::BTreeMap<(i32, i32), Vec<usize>> =
+            std::collections::BTreeMap::new();
         for (k, p) in pts.iter().enumerate() {
             by_cell.entry((p.cell.i, p.cell.j)).or_default().push(k);
         }
@@ -1886,10 +2437,20 @@ fn main() {
         // A domain across the face edge: every crossed cell's points equal its own kept set.
         let t = Instant::now();
         let edge = domain_points(&level, Face::NegY, n7 as i32 - 64, 70_000, 128, 32);
-        let mut crossed: Vec<CellId> = edge.iter().filter(|p| p.cell.face != Face::NegY.index()).map(|p| p.cell).collect();
+        let mut crossed: Vec<CellId> = edge
+            .iter()
+            .filter(|p| p.cell.face != Face::NegY.index())
+            .map(|p| p.cell)
+            .collect();
         crossed.sort_unstable();
         crossed.dedup();
-        let same = crossed.iter().all(|&c| edge.iter().copied().filter(|p| p.cell == c).collect::<Vec<_>>() == level.kept(c));
+        let same = crossed.iter().all(|&c| {
+            edge.iter()
+                .copied()
+                .filter(|p| p.cell == c)
+                .collect::<Vec<_>>()
+                == level.kept(c)
+        });
         println!(
             "B1 (a): across the face edge {} cells on the next face, each its own kept set: {same} ({:.2} s)",
             crossed.len(),
@@ -1902,10 +2463,14 @@ fn main() {
         let g = triangulate(&dirs).expect("a graph");
         let dt = t.elapsed().as_secs_f64();
         let degs: Vec<usize> = (0..dirs.len()).map(|i| g.neighbours(i).len()).collect();
-        let (dmin, dmax) = (degs.iter().copied().min().unwrap_or(0), degs.iter().copied().max().unwrap_or(0));
+        let (dmin, dmax) = (
+            degs.iter().copied().min().unwrap_or(0),
+            degs.iter().copied().max().unwrap_or(0),
+        );
         let dmean = degs.iter().sum::<usize>() as f64 / degs.len() as f64;
         // The Delaunay property: for each triangle, no vertex of a neighbouring triangle lies inside its circle.
-        let mut edge_tri: std::collections::BTreeMap<(u32, u32), u32> = std::collections::BTreeMap::new();
+        let mut edge_tri: std::collections::BTreeMap<(u32, u32), u32> =
+            std::collections::BTreeMap::new();
         for (ti, tr) in g.tris.iter().enumerate() {
             for e in 0..3 {
                 edge_tri.insert((tr[e], tr[(e + 1) % 3]), ti as u32);
@@ -1917,8 +2482,18 @@ fn main() {
                 let (x, y) = (tr[e], tr[(e + 1) % 3]);
                 if let Some(&o) = edge_tri.get(&(y, x)) {
                     let ov = g.tris[o as usize];
-                    let d = ov.iter().copied().find(|&v| v != x && v != y).expect("the opposite vertex");
-                    if in_circle(&dirs[tr[0] as usize], &dirs[tr[1] as usize], &dirs[tr[2] as usize], &dirs[d as usize]) > 0 {
+                    let d = ov
+                        .iter()
+                        .copied()
+                        .find(|&v| v != x && v != y)
+                        .expect("the opposite vertex");
+                    if in_circle(
+                        &dirs[tr[0] as usize],
+                        &dirs[tr[1] as usize],
+                        &dirs[tr[2] as usize],
+                        &dirs[d as usize],
+                    ) > 0
+                    {
                         bad += 1;
                     }
                 }
@@ -1936,22 +2511,35 @@ fn main() {
         let ga = triangulate(&a.iter().map(|p| p.dir).collect::<Vec<_>>()).expect("a");
         let gb = triangulate(&b.iter().map(|p| p.dir).collect::<Vec<_>>()).expect("b");
         let key = |p: &vd_terrain::fine::points::Candidate| (p.cell, p.k);
-        let index_b: std::collections::BTreeMap<_, usize> = b.iter().enumerate().map(|(i, p)| (key(p), i)).collect();
+        let index_b: std::collections::BTreeMap<_, usize> =
+            b.iter().enumerate().map(|(i, p)| (key(p), i)).collect();
         let (mut checked, mut differ) = (0usize, 0usize);
         for (i, p) in a.iter().enumerate() {
             // Well inside both: 16 cells from every edge of the overlap (cells 23 144..23 240, rows 70 016..70 240).
             if p.cell.i < 23_144 || p.cell.i >= 23_240 || p.cell.j < 70_016 || p.cell.j >= 70_240 {
                 continue;
             }
-            let Some(&j) = index_b.get(&key(p)) else { continue };
+            let Some(&j) = index_b.get(&key(p)) else {
+                continue;
+            };
             checked += 1;
-            let mut na: Vec<_> = ga.neighbours(i).iter().map(|&m| key(&a[m as usize])).collect();
-            let mut nb: Vec<_> = gb.neighbours(j).iter().map(|&m| key(&b[m as usize])).collect();
+            let mut na: Vec<_> = ga
+                .neighbours(i)
+                .iter()
+                .map(|&m| key(&a[m as usize]))
+                .collect();
+            let mut nb: Vec<_> = gb
+                .neighbours(j)
+                .iter()
+                .map(|&m| key(&b[m as usize]))
+                .collect();
             na.sort();
             nb.sort();
             differ += usize::from(na != nb);
         }
-        println!("B1 (b): two overlapping domains: {checked} points well inside both, {differ} with other neighbours");
+        println!(
+            "B1 (b): two overlapping domains: {checked} points well inside both, {differ} with other neighbours"
+        );
         return;
     }
     // ★ THE PLAIN STAND (B0 step 4, a stated rule on the stored world): among 20 × 20-node windows all of land with a mean
@@ -1960,7 +2548,10 @@ fn main() {
     if args.iter().any(|a| a == "--find-plain") {
         let cache = sarg("--rise-cache").expect("--rise-cache FILE (the present-rise map)");
         let bytes = std::fs::read(&cache).expect("the rise map reads");
-        let rise: Vec<f64> = bytes.chunks_exact(8).map(|w| f64::from_le_bytes(w.try_into().expect("eight bytes"))).collect();
+        let rise: Vec<f64> = bytes
+            .chunks_exact(8)
+            .map(|w| f64::from_le_bytes(w.try_into().expect("eight bytes")))
+            .collect();
         let sea = f64::from(artifact.sea_m);
         let edge = lattice.edge as i64;
         let mut all: Vec<(f64, u8, i64, i64, f64)> = Vec::new();
@@ -1998,7 +2589,12 @@ fn main() {
             }
         }
         // The TYPICAL plain: the window of the median relief (ties by face, then place).
-        all.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.3.cmp(&b.3)).then(a.2.cmp(&b.2)));
+        all.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then(a.1.cmp(&b.1))
+                .then(a.3.cmp(&b.3))
+                .then(a.2.cmp(&b.2))
+        });
         if all.is_empty() {
             println!("THE PLAIN STAND: no window passes the rule");
         } else {
@@ -2017,7 +2613,10 @@ fn main() {
     if args.iter().any(|a| a == "--rise-map") {
         let started = Instant::now();
         let rise = present_rise(&body, &lattice, &words);
-        println!("  the present rise from the first land and the belts' law ({:.1} s)", started.elapsed().as_secs_f64());
+        println!(
+            "  the present rise from the first land and the belts' law ({:.1} s)",
+            started.elapsed().as_secs_f64()
+        );
         rise_map(&lattice, &artifact, &rise);
         return;
     }
@@ -2068,7 +2667,8 @@ fn main() {
         let nw = (arg("--r2-nodes", 12) as i64).min(pick.nodes);
         let inset = (pick.nodes - nw).div_euclid(2);
         // `--lem-at F,I,J`: the region centred on that node (face F, place I, J) instead of the belt tile's middle.
-        let at: Option<Vec<i64>> = sarg("--lem-at").map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect());
+        let at: Option<Vec<i64>> =
+            sarg("--lem-at").map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect());
         let (pick, inset) = match at.as_deref() {
             Some([fc, ci, cj]) => (
                 TilePick {
@@ -2082,10 +2682,18 @@ fn main() {
             _ => (pick, inset),
         };
         let sea = f64::from(artifact.sea_m);
-        let (mut node_z, mut node_rain) = (vec![0.0f64; (nw * nw) as usize], vec![0.0f64; (nw * nw) as usize]);
+        let (mut node_z, mut node_rain) = (
+            vec![0.0f64; (nw * nw) as usize],
+            vec![0.0f64; (nw * nw) as usize],
+        );
         for j in 0..nw {
             for i in 0..nw {
-                let row = artifact.rows[node_at(&lattice, pick.face, pick.i0 + inset + i, pick.j0 + inset + j) as usize];
+                let row = artifact.rows[node_at(
+                    &lattice,
+                    pick.face,
+                    pick.i0 + inset + i,
+                    pick.j0 + inset + j,
+                ) as usize];
                 node_z[(j * nw + i) as usize] = f64::from(row.z_m) - sea;
                 node_rain[(j * nw + i) as usize] = unlog(row.rain, 4) / 1_000.0;
             }
@@ -2104,16 +2712,37 @@ fn main() {
         let out = lem::solve(&node_z, &node_rain, nw, node_m, spacing_m, cell_m);
         let w = out.w;
         let today: Vec<f64> = (0..w * w)
-            .map(|k| lem::smooth_at(&node_z, nw, node_m, ((k % w) as f64 + 0.5) * cell_m, ((k / w) as f64 + 0.5) * cell_m))
+            .map(|k| {
+                lem::smooth_at(
+                    &node_z,
+                    nw,
+                    node_m,
+                    ((k % w) as f64 + 0.5) * cell_m,
+                    ((k / w) as f64 + 0.5) * cell_m,
+                )
+            })
             .collect();
-        lem_report(&out.raster, &today, "today8km", w, cell_m, hillshade_dir.as_deref(), &label);
+        lem_report(
+            &out.raster,
+            &today,
+            "today8km",
+            w,
+            cell_m,
+            hillshade_dir.as_deref(),
+            &label,
+        );
         // THE REGION'S PRESENT RISE from the solve's own laws (no world change): the fine window's rise is its nodes'.
         let started = Instant::now();
         let rise_all = present_rise(&body, &lattice, &words);
         let node_rise: Vec<f64> = (0..nw * nw)
             .map(|k| {
                 let (i, j) = ((k % nw) as i64, (k / nw) as i64);
-                rise_all[node_at(&lattice, pick.face, pick.i0 + inset + i, pick.j0 + inset + j) as usize]
+                rise_all[node_at(
+                    &lattice,
+                    pick.face,
+                    pick.i0 + inset + i,
+                    pick.j0 + inset + j,
+                ) as usize]
             })
             .collect();
         println!(
@@ -2126,7 +2755,19 @@ fn main() {
         );
         if let Some(dir) = hillshade_dir.as_deref() {
             let fine_m = arg("--lem-fine-m", 16) as f64;
-            lem_fine_views(&out, &node_rain, nw, node_m, cell_m, &today, None, dir, &label, fine_m, Some(&node_rise));
+            lem_fine_views(
+                &out,
+                &node_rain,
+                nw,
+                node_m,
+                cell_m,
+                &today,
+                None,
+                dir,
+                &label,
+                fine_m,
+                Some(&node_rise),
+            );
         }
         return;
     }
@@ -2140,7 +2781,11 @@ fn main() {
     // the one stitch (the cut free over one node, `--cut-blend` cells), then `seam_report`.
     if args.iter().any(|a| a == "--seam-l1") {
         lem::RETURN_LISTS.store(false, std::sync::atomic::Ordering::Relaxed);
-        let at: Vec<i64> = sarg("--lem-at").expect("--lem-at F,I,J").split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        let at: Vec<i64> = sarg("--lem-at")
+            .expect("--lem-at F,I,J")
+            .split(',')
+            .filter_map(|x| x.trim().parse().ok())
+            .collect();
         // The region: 22 × 22 nodes, every tile one node in from its edge (`pad`), so each tile's rim is crossed by the
         // 8 km rivers' real links (a region that ends at a tile's rim dropped them: its water ponded at the spill).
         let nwu = 22usize;
@@ -2149,7 +2794,11 @@ fn main() {
         let (i0, j0) = (at[1] - nw / 2, at[2] - nw / 2);
         let sea = f64::from(artifact.sea_m);
         let idx = |i: i64, j: i64| node_at(&lattice, face, i0 + i, j0 + j) as usize;
-        let (mut node_z, mut node_rain, mut node_recv) = (vec![0.0f64; nwu * nwu], vec![0.0f64; nwu * nwu], vec![usize::MAX; nwu * nwu]);
+        let (mut node_z, mut node_rain, mut node_recv) = (
+            vec![0.0f64; nwu * nwu],
+            vec![0.0f64; nwu * nwu],
+            vec![usize::MAX; nwu * nwu],
+        );
         for k in 0..nwu * nwu {
             let (i, j) = ((k % nwu) as i64, (k / nwu) as i64);
             let row = artifact.rows[idx(i, j)];
@@ -2167,14 +2816,25 @@ fn main() {
             let water: Vec<f64> = (0..nwu * nwu)
                 .map(|k| {
                     let row = artifact.rows[idx((k % nwu) as i64, (k / nwu) as i64)];
-                    if row.water_m == vd_terrain::artifact::DRY_M || row.water_m <= row.z_m { f64::NAN } else { f64::from(row.water_m) - sea }
+                    if row.water_m == vd_terrain::artifact::DRY_M || row.water_m <= row.z_m {
+                        f64::NAN
+                    } else {
+                        f64::from(row.water_m) - sea
+                    }
                 })
                 .collect();
             lem::FLOOR_BOUND.with(|fb| *fb.borrow_mut() = water);
         }
         // Each node's water: the 8 km world's own discharge through it (its whole catchment, inside the region or not; the
         // row's mm·m²/yr, a thousand to the cubic metre).
-        let node_q: Vec<f64> = (0..nwu * nwu).map(|k| unlog(artifact.rows[idx((k % nwu) as i64, (k / nwu) as i64)].discharge_log, 2) / 1_000.0).collect();
+        let node_q: Vec<f64> = (0..nwu * nwu)
+            .map(|k| {
+                unlog(
+                    artifact.rows[idx((k % nwu) as i64, (k / nwu) as i64)].discharge_log,
+                    2,
+                ) / 1_000.0
+            })
+            .collect();
         let dir = hillshade_dir.clone().expect("--hillshade DIR");
         let _ = std::fs::create_dir_all(&dir);
         let spacing = 128.0;
@@ -2189,30 +2849,66 @@ fn main() {
             (pad + o[0] * node_m, pad + o[1] * node_m)
         });
         let (dx0, dy0) = origin.unwrap_or((ax0 - buf, ay0 - buf));
-        let a = lem::solve_l1_domain(&node_z, &node_rain, nwu, node_m, &node_recv, &node_q, (dx0, dy0, tile + 2.0 * buf, tile + 2.0 * buf), spacing);
+        let a = lem::solve_l1_domain(
+            &node_z,
+            &node_rain,
+            nwu,
+            node_m,
+            &node_recv,
+            &node_q,
+            (dx0, dy0, tile + 2.0 * buf, tile + 2.0 * buf),
+            spacing,
+        );
         // ★ STEP 5 (`--step5`, the owner's look; B83): four 128 m tiles (2 × 2, each 8 × 8 nodes with its 2-node buffer)
         // solved at once, one a core, stitched by the one rule, and B80's report on the 16 × 16-node square against
         // today's 8 km ground — the maps, the readings and the two eye-height views.
         if args.iter().any(|a| a == "--step5") {
             let t_all = Instant::now();
             let side = tile + 2.0 * buf;
-            let origins = [(pad, pad), (pad + tile, pad), (pad, pad + tile), (pad + tile, pad + tile)];
+            let origins = [
+                (pad, pad),
+                (pad + tile, pad),
+                (pad, pad + tile),
+                (pad + tile, pad + tile),
+            ];
             let tiles: Vec<lem::DomainSolve> = std::thread::scope(|scope| {
                 let handles: Vec<_> = origins
                     .iter()
                     .map(|&(ox, oy)| {
-                        let (node_z, node_rain, node_recv, node_q) = (&node_z, &node_rain, &node_recv, &node_q);
-                        scope.spawn(move || lem::solve_l1_domain(node_z, node_rain, nwu, node_m, node_recv, node_q, (ox, oy, side, side), spacing))
+                        let (node_z, node_rain, node_recv, node_q) =
+                            (&node_z, &node_rain, &node_recv, &node_q);
+                        scope.spawn(move || {
+                            lem::solve_l1_domain(
+                                node_z,
+                                node_rain,
+                                nwu,
+                                node_m,
+                                node_recv,
+                                node_q,
+                                (ox, oy, side, side),
+                                spacing,
+                            )
+                        })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().expect("a tile solves")).collect()
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("a tile solves"))
+                    .collect()
             });
-            println!("STEP 5 {label}: four 128 m tiles solved at once in {:.1} s", t_all.elapsed().as_secs_f64());
+            println!(
+                "STEP 5 {label}: four 128 m tiles solved at once in {:.1} s",
+                t_all.elapsed().as_secs_f64()
+            );
             let c = tiles[0].cell;
-            let band = (CUT_BAND_M.load(std::sync::atomic::Ordering::Relaxed) as f64 / c).round() as i64;
+            let band =
+                (CUT_BAND_M.load(std::sync::atomic::Ordering::Relaxed) as f64 / c).round() as i64;
             let blend = CUT_BLEND_CELLS.load(std::sync::atomic::Ordering::Relaxed) as f64;
             let (ax, ay) = (pad + buf, pad + buf);
-            let (ge_x, ge_y) = (((ax + tile) / c).round() as i64, ((ay + tile) / c).round() as i64);
+            let (ge_x, ge_y) = (
+                ((ax + tile) / c).round() as i64,
+                ((ay + tile) / c).round() as i64,
+            );
             let fl: Vec<Field> = tiles.iter().map(Field::of).collect();
             let (north, _) = stitch_v(&fl[0], &fl[1], ge_x, band, blend);
             let (south, _) = stitch_v(&fl[2], &fl[3], ge_x, band, blend);
@@ -2224,10 +2920,19 @@ fn main() {
             for y in 0..n {
                 for x in 0..n {
                     st[y * n + x] = all.at(cx0 + x as i64, cy0 + y as i64);
-                    today[y * n + x] = lem::smooth_at(&node_z, nwu, node_m, ax + (x as f64 + 0.5) * c, ay + (y as f64 + 0.5) * c);
+                    today[y * n + x] = lem::smooth_at(
+                        &node_z,
+                        nwu,
+                        node_m,
+                        ax + (x as f64 + 0.5) * c,
+                        ay + (y as f64 + 0.5) * c,
+                    );
                 }
             }
-            println!("  the square: {:.1} km a side, {n} × {n} cells of {c:.0} m (the four tiles stitched, their buffers cut away)", n as f64 * c / 1_000.0);
+            println!(
+                "  the square: {:.1} km a side, {n} × {n} cells of {c:.0} m (the four tiles stitched, their buffers cut away)",
+                n as f64 * c / 1_000.0
+            );
             lem_report(&st, &today, "today8km", n, c, Some(&dir), &label);
             return;
         }
@@ -2237,22 +2942,38 @@ fn main() {
             let times: Vec<f64> = std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..n_par)
                     .map(|t| {
-                        let (node_z, node_rain, node_recv, node_q) = (&node_z, &node_rain, &node_recv, &node_q);
+                        let (node_z, node_rain, node_recv, node_q) =
+                            (&node_z, &node_rain, &node_recv, &node_q);
                         scope.spawn(move || {
                             let t0 = Instant::now();
                             let ox = pad + (t % 5) as f64 * 2.0 * node_m;
                             let oy = pad + (t / 5) as f64 * 2.0 * node_m + 2.0 * node_m;
-                            let _ = lem::solve_l1_domain(node_z, node_rain, nwu, node_m, node_recv, node_q, (ox, oy, tile + 2.0 * buf, tile + 2.0 * buf), spacing);
+                            let _ = lem::solve_l1_domain(
+                                node_z,
+                                node_rain,
+                                nwu,
+                                node_m,
+                                node_recv,
+                                node_q,
+                                (ox, oy, tile + 2.0 * buf, tile + 2.0 * buf),
+                                spacing,
+                            );
                             t0.elapsed().as_secs_f64()
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().expect("a tile solves")).collect()
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("a tile solves"))
+                    .collect()
             });
             println!(
                 "ONE TILE A CORE: {n_par} tiles at once in {:.1} s of wall time; each tile {:?} s",
                 t_all.elapsed().as_secs_f64(),
-                times.iter().map(|t| (t * 10.0).round() / 10.0).collect::<Vec<_>>()
+                times
+                    .iter()
+                    .map(|t| (t * 10.0).round() / 10.0)
+                    .collect::<Vec<_>>()
             );
             return;
         }
@@ -2263,7 +2984,11 @@ fn main() {
                     let line: Vec<String> = (col - 8..=col + 8)
                         .map(|x| {
                             let z = a.raster[row * a.w + x];
-                            if x == col { format!("*{z:.0}") } else { format!("{z:.0}") }
+                            if x == col {
+                                format!("*{z:.0}")
+                            } else {
+                                format!("{z:.0}")
+                            }
                         })
                         .collect();
                     println!("  row {row}: {}", line.join(" "));
@@ -2281,11 +3006,25 @@ fn main() {
                 );
             }
             // The tile inside the domain: its buffer `buf` each side; half the buffer shipped with it.
-            let (bx, tc) = ((buf / spacing).round() as usize, (tile / spacing).round() as usize);
-            p_size(&a.raster, a.w, bx, bx, tc, bx / 2, &format!("{label} L1 (128 m)"));
+            let (bx, tc) = (
+                (buf / spacing).round() as usize,
+                (tile / spacing).round() as usize,
+            );
+            p_size(
+                &a.raster,
+                a.w,
+                bx,
+                bx,
+                tc,
+                bx / 2,
+                &format!("{label} L1 (128 m)"),
+            );
             {
                 let node_cells = (node_m / spacing).round() as usize;
-                let (n0x, n0y) = ((dx0 / node_m).round() as usize, (dy0 / node_m).round() as usize);
+                let (n0x, n0y) = (
+                    (dx0 / node_m).round() as usize,
+                    (dy0 / node_m).round() as usize,
+                );
                 p_switch_band(
                     &a.raster,
                     a.w,
@@ -2299,11 +3038,45 @@ fn main() {
                     &format!("{label} L1"),
                 );
             }
-            hillshade_rect(&a.raster, a.w, a.h, a.cell, &format!("{dir}/{label}_tile_a.png"));
+            hillshade_rect(
+                &a.raster,
+                a.w,
+                a.h,
+                a.cell,
+                &format!("{dir}/{label}_tile_a.png"),
+            );
             return;
         }
-        let b = lem::solve_l1_domain(&node_z, &node_rain, nwu, node_m, &node_recv, &node_q, (ax0 + tile - buf, ay0 - buf, tile + 2.0 * buf, tile + 2.0 * buf), spacing);
-        let j = lem::solve_l1_domain(&node_z, &node_rain, nwu, node_m, &node_recv, &node_q, (ax0 - buf, ay0 - buf, 2.0 * tile + 2.0 * buf, tile + 2.0 * buf), spacing);
+        let b = lem::solve_l1_domain(
+            &node_z,
+            &node_rain,
+            nwu,
+            node_m,
+            &node_recv,
+            &node_q,
+            (
+                ax0 + tile - buf,
+                ay0 - buf,
+                tile + 2.0 * buf,
+                tile + 2.0 * buf,
+            ),
+            spacing,
+        );
+        let j = lem::solve_l1_domain(
+            &node_z,
+            &node_rain,
+            nwu,
+            node_m,
+            &node_recv,
+            &node_q,
+            (
+                ax0 - buf,
+                ay0 - buf,
+                2.0 * tile + 2.0 * buf,
+                tile + 2.0 * buf,
+            ),
+            spacing,
+        );
         seam_report(&a, &b, &j, ax0, ay0, tile, &dir, &label);
         return;
     }
@@ -2321,7 +3094,8 @@ fn main() {
         let sea = f64::from(artifact.sea_m);
         let (mut node_z, mut node_rain) = (vec![0.0f64; nwu * nwu], vec![0.0f64; nwu * nwu]);
         for k in 0..nwu * nwu {
-            let row = artifact.rows[node_at(&lattice, face, i0 + (k % nwu) as i64, j0 + (k / nwu) as i64) as usize];
+            let row = artifact.rows
+                [node_at(&lattice, face, i0 + (k % nwu) as i64, j0 + (k / nwu) as i64) as usize];
             node_z[k] = f64::from(row.z_m) - sea;
             node_rain[k] = unlog(row.rain, 4) / 1_000.0;
         }
@@ -2346,7 +3120,10 @@ fn main() {
             }
         };
         let node_rise: Vec<f64> = (0..nwu * nwu)
-            .map(|k| rise_all[node_at(&lattice, face, i0 + (k % nwu) as i64, j0 + (k / nwu) as i64) as usize])
+            .map(|k| {
+                rise_all
+                    [node_at(&lattice, face, i0 + (k % nwu) as i64, j0 + (k / nwu) as i64) as usize]
+            })
             .collect();
         let spacing = arg("--lem-fine-m", 16) as f64;
         let buf = arg("--lem-buffer-m", 1_024) as f64;
@@ -2358,8 +3135,14 @@ fn main() {
         let mut hs = Vec::new();
         for y in 0..64 {
             for x in 0..128 {
-                let (px, py) = (ax0 + (x as f64 + 0.5) * node_m / 64.0, ay0 + (y as f64 + 0.5) * node_m / 64.0);
-                if let Some(z) = out.terrain.get_elevation(&fastlem::models::surface::sites::Site2D { x: px, y: py }) {
+                let (px, py) = (
+                    ax0 + (x as f64 + 0.5) * node_m / 64.0,
+                    ay0 + (y as f64 + 0.5) * node_m / 64.0,
+                );
+                if let Some(z) = out
+                    .terrain
+                    .get_elevation(&fastlem::models::surface::sites::Site2D { x: px, y: py })
+                {
                     hs.push(z);
                 }
             }
@@ -2380,23 +3163,84 @@ fn main() {
             // The four tiles NW, NE, SW, SE and ONE solve of all four.
             let side = node_m + 2.0 * buf;
             let tile = |dx: f64, dy: f64| {
-                lem::solve_domain(&out, &node_rain, nwu, node_m, (ax0 + dx * node_m - buf, ay0 + dy * node_m - buf, side, side), spacing, &node_rise, span, steps)
+                lem::solve_domain(
+                    &out,
+                    &node_rain,
+                    nwu,
+                    node_m,
+                    (ax0 + dx * node_m - buf, ay0 + dy * node_m - buf, side, side),
+                    spacing,
+                    &node_rise,
+                    span,
+                    steps,
+                )
             };
-            let (nw_t, ne_t, sw_t, se_t) = (tile(0.0, 0.0), tile(1.0, 0.0), tile(0.0, 1.0), tile(1.0, 1.0));
-            let joint = lem::solve_domain(&out, &node_rain, nwu, node_m, (ax0 - buf, ay0 - buf, 2.0 * node_m + 2.0 * buf, 2.0 * node_m + 2.0 * buf), spacing, &node_rise, span, steps);
-            corner_report([&nw_t, &ne_t, &sw_t, &se_t], &joint, ax0, ay0, node_m, &dir, &label);
+            let (nw_t, ne_t, sw_t, se_t) = (
+                tile(0.0, 0.0),
+                tile(1.0, 0.0),
+                tile(0.0, 1.0),
+                tile(1.0, 1.0),
+            );
+            let joint = lem::solve_domain(
+                &out,
+                &node_rain,
+                nwu,
+                node_m,
+                (
+                    ax0 - buf,
+                    ay0 - buf,
+                    2.0 * node_m + 2.0 * buf,
+                    2.0 * node_m + 2.0 * buf,
+                ),
+                spacing,
+                &node_rise,
+                span,
+                steps,
+            );
+            corner_report(
+                [&nw_t, &ne_t, &sw_t, &se_t],
+                &joint,
+                ax0,
+                ay0,
+                node_m,
+                &dir,
+                &label,
+            );
             return;
         }
-        let a = lem::solve_domain(&out, &node_rain, nwu, node_m, (ax0 - buf, ay0 - buf, node_m + 2.0 * buf, node_m + 2.0 * buf), spacing, &node_rise, span, steps);
+        let a = lem::solve_domain(
+            &out,
+            &node_rain,
+            nwu,
+            node_m,
+            (ax0 - buf, ay0 - buf, node_m + 2.0 * buf, node_m + 2.0 * buf),
+            spacing,
+            &node_rise,
+            span,
+            steps,
+        );
         {
-            let (bx, tc) = ((buf / spacing).round() as usize, (node_m / spacing).round() as usize);
-            p_size(&a.raster, a.w, bx, bx, tc, bx / 2, &format!("{label} L2 ({spacing:.0} m)"));
+            let (bx, tc) = (
+                (buf / spacing).round() as usize,
+                (node_m / spacing).round() as usize,
+            );
+            p_size(
+                &a.raster,
+                a.w,
+                bx,
+                bx,
+                tc,
+                bx / 2,
+                &format!("{label} L2 ({spacing:.0} m)"),
+            );
             // P-SWITCH at the 16 m level: its own rungs 4 → 5 → 6, then its 64 m means against the 128 m ground (rung 7)
             // read bilinearly — the swap where the 16 m level hands over to the 128 m one.
             let pixel = vd_core::geometry::REFERENCE_VIEW_FOV_Y_RAD / 720.0;
             let mut lv = (a.w, a.raster.clone());
             let s_c = 1.25;
-            println!("  P-SWITCH {label} L2: the step between a rung and the next coarser one over the tile (S_c {s_c:.2})");
+            println!(
+                "  P-SWITCH {label} L2: the step between a rung and the next coarser one over the tile (S_c {s_c:.2})"
+            );
             for r in 0..3usize {
                 let (fw, fv) = (lv.0, lv.1.clone());
                 let fcell = spacing * (1 << r) as f64;
@@ -2407,7 +3251,10 @@ fn main() {
                     for y in 0..nw2 {
                         for x in 0..nw2 {
                             next[y * nw2 + x] = 0.25
-                                * (fv[2 * y * fw + 2 * x] + fv[2 * y * fw + 2 * x + 1] + fv[(2 * y + 1) * fw + 2 * x] + fv[(2 * y + 1) * fw + 2 * x + 1]);
+                                * (fv[2 * y * fw + 2 * x]
+                                    + fv[2 * y * fw + 2 * x + 1]
+                                    + fv[(2 * y + 1) * fw + 2 * x]
+                                    + fv[(2 * y + 1) * fw + 2 * x + 1]);
                         }
                     }
                     (nw2, next)
@@ -2417,10 +3264,17 @@ fn main() {
                 let coarse_at = |px: f64, py: f64| -> f64 {
                     if r < 2 {
                         let (u, v) = (px / ccell - 0.5, py / ccell - 0.5);
-                        let (i, j) = (u.floor().clamp(0.0, (cw - 2) as f64) as usize, v.floor().clamp(0.0, (cw - 2) as f64) as usize);
-                        let (fu, fv2) = ((u - i as f64).clamp(0.0, 1.0), (v - j as f64).clamp(0.0, 1.0));
+                        let (i, j) = (
+                            u.floor().clamp(0.0, (cw - 2) as f64) as usize,
+                            v.floor().clamp(0.0, (cw - 2) as f64) as usize,
+                        );
+                        let (fu, fv2) = (
+                            (u - i as f64).clamp(0.0, 1.0),
+                            (v - j as f64).clamp(0.0, 1.0),
+                        );
                         let at = |p: usize, q: usize| cv[q * cw + p];
-                        (at(i, j) * (1.0 - fu) + at(i + 1, j) * fu) * (1.0 - fv2) + (at(i, j + 1) * (1.0 - fu) + at(i + 1, j + 1) * fu) * fv2
+                        (at(i, j) * (1.0 - fu) + at(i + 1, j) * fu) * (1.0 - fv2)
+                            + (at(i, j + 1) * (1.0 - fu) + at(i + 1, j + 1) * fu) * fv2
                     } else {
                         // The 128 m ground (the region's own solve), bilinear on its cells, in region metres.
                         let (gx, gy) = (a.x0 + px, a.y0 + py);
@@ -2428,7 +3282,8 @@ fn main() {
                         let (i, j) = (u.floor() as usize, v.floor() as usize);
                         let (fu, fv2) = (u - i as f64, v - j as f64);
                         let at = |p: usize, q: usize| out.raster[q * out.w + p];
-                        (at(i, j) * (1.0 - fu) + at(i + 1, j) * fu) * (1.0 - fv2) + (at(i, j + 1) * (1.0 - fu) + at(i + 1, j + 1) * fu) * fv2
+                        (at(i, j) * (1.0 - fu) + at(i + 1, j) * fu) * (1.0 - fv2)
+                            + (at(i, j + 1) * (1.0 - fu) + at(i + 1, j + 1) * fu) * fv2
                     }
                 };
                 let f = 1usize << r;
@@ -2457,8 +3312,38 @@ fn main() {
         if args.iter().any(|a| a == "--seam-one") {
             return;
         }
-        let b = lem::solve_domain(&out, &node_rain, nwu, node_m, (ax0 + node_m - buf, ay0 - buf, node_m + 2.0 * buf, node_m + 2.0 * buf), spacing, &node_rise, span, steps);
-        let j = lem::solve_domain(&out, &node_rain, nwu, node_m, (ax0 - buf, ay0 - buf, 2.0 * node_m + 2.0 * buf, node_m + 2.0 * buf), spacing, &node_rise, span, steps);
+        let b = lem::solve_domain(
+            &out,
+            &node_rain,
+            nwu,
+            node_m,
+            (
+                ax0 + node_m - buf,
+                ay0 - buf,
+                node_m + 2.0 * buf,
+                node_m + 2.0 * buf,
+            ),
+            spacing,
+            &node_rise,
+            span,
+            steps,
+        );
+        let j = lem::solve_domain(
+            &out,
+            &node_rain,
+            nwu,
+            node_m,
+            (
+                ax0 - buf,
+                ay0 - buf,
+                2.0 * node_m + 2.0 * buf,
+                node_m + 2.0 * buf,
+            ),
+            spacing,
+            &node_rise,
+            span,
+            steps,
+        );
         seam_report(&a, &b, &j, ax0, ay0, node_m, &dir, &label);
         return;
     }
@@ -2899,7 +3784,11 @@ fn main() {
                 "\n── THE ×2 STEP at {cell:.0} m: {nodes} nodes ({:.0} km), {steps} steps of {:.0} years ({myr:.0} Myr), {} ──",
                 nodes as f64 * node_m / 1_000.0,
                 dt,
-                if parent.is_none() { "the first level" } else { "from the coarser level" }
+                if parent.is_none() {
+                    "the first level"
+                } else {
+                    "from the coarser level"
+                }
             );
             let a = r2::run(&reg, &start, steps, dt);
             let b = r2::run(&reg, &a.z, steps, dt);
@@ -2956,7 +3845,9 @@ fn main() {
             if let Some(dir) = hillshade_dir.as_deref() {
                 let sea_m = f64::from(artifact.sea_m);
                 let label = format!("{label}_c{cell:.0}");
-                for (what, file) in shade::write_views(&a.z, w, halo, cell, sea_m, dir, &label, "cascade") {
+                for (what, file) in
+                    shade::write_views(&a.z, w, halo, cell, sea_m, dir, &label, "cascade")
+                {
                     println!("  the shaded relief, {what}: {file}");
                 }
             }
@@ -3532,7 +4423,11 @@ fn seed_inflow_boundary(
 /// joint law the solve itself runs — `E = K_lp·rock·Q·S^n`, `Q` the row's discharge, `S` the fall to its receiver over
 /// the chord, the rock the province's erodibility over the basement's — in metres a year. At the solve's steady state it
 /// is the node's rise. Returns the mean, the median and the 90th percentile, and the nodes read.
-fn macro_rate(lattice: &MacroLattice, artifact: &Artifact, pick: TilePick) -> (f64, f64, f64, usize) {
+fn macro_rate(
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    pick: TilePick,
+) -> (f64, f64, f64, usize) {
     use vd_terrain::solve::{FACIES_SEA, JOINT_K_LP, JOINT_N};
     let basement = f64::from(Province::CrystallineBasement.erodibility_q8());
     let mut rates: Vec<f64> = Vec::new();
@@ -3555,7 +4450,12 @@ fn macro_rate(lattice: &MacroLattice, artifact: &Artifact, pick: TilePick) -> (f
             if fall <= 0.0 {
                 continue;
             }
-            let chord = lattice.node_m() * if di != 0 && dj != 0 { std::f64::consts::SQRT_2 } else { 1.0 };
+            let chord = lattice.node_m()
+                * if di != 0 && dj != 0 {
+                    std::f64::consts::SQRT_2
+                } else {
+                    1.0
+                };
             let q = unlog(row.discharge_log, 2) / 1_000.0;
             let rock = Province::ALL
                 .iter()
@@ -3612,7 +4512,8 @@ fn macro_rates_planet(lattice: &MacroLattice, artifact: &Artifact) {
     land.sort_by(f64::total_cmp);
     let m = land.len();
     let at = |p: f64| land[((m as f64 - 1.0) * p) as usize] * 1_000.0;
-    let share = |t: f64| land.iter().filter(|&&r| r * 1_000.0 > t).count() as f64 / m.max(1) as f64 * 100.0;
+    let share =
+        |t: f64| land.iter().filter(|&&r| r * 1_000.0 > t).count() as f64 / m.max(1) as f64 * 100.0;
     println!(
         "THE MACRO'S PRESENT RATE over {m} dry nodes (the joint law, mm/yr): median {:.5}, 90th {:.5}, 99th {:.5}, \
          99.9th {:.5}, the largest {:.5}; over 0.01 mm/yr {:.2} %, over 0.1 {:.3} %, over 1 {:.4} % of the land",
@@ -3663,7 +4564,12 @@ fn macro_rates_planet(lattice: &MacroLattice, artifact: &Artifact) {
                     }
                 }
                 if k * 2 >= (block * block) as usize {
-                    let centre = node_at(lattice, face_e, bi * block + block / 2, bj * block + block / 2);
+                    let centre = node_at(
+                        lattice,
+                        face_e,
+                        bi * block + block / 2,
+                        bj * block + block / 2,
+                    );
                     regions.push((sum / k as f64, centre));
                 }
             }
@@ -3673,7 +4579,11 @@ fn macro_rates_planet(lattice: &MacroLattice, artifact: &Artifact) {
     let one = f64::from(1u32 << 20) * f64::from(1u32 << 20);
     for (mean, centre) in regions.iter().take(8) {
         let d = lattice.direction(*centre);
-        let v = [d[0].raw() as f64 / one, d[1].raw() as f64 / one, d[2].raw() as f64 / one];
+        let v = [
+            d[0].raw() as f64 / one,
+            d[1].raw() as f64 / one,
+            d[2].raw() as f64 / one,
+        ];
         let row = artifact.rows[*centre as usize];
         println!(
             "  a fast region: {:.4} mm/yr over 64 km; --aim {:.6},{:.6},{:.6}; latitude {:.1}°; rain {:.0} mm/yr; height {} m",
@@ -4221,13 +5131,17 @@ mod r2 {
         for y in 0..w - lag {
             for x in 0..w - lag {
                 let h = field[y * w + x];
-                sum += (field[y * w + x + lag] - h).powi(2) + (field[(y + lag) * w + x] - h).powi(2);
+                sum +=
+                    (field[y * w + x + lag] - h).powi(2) + (field[(y + lag) * w + x] - h).powi(2);
                 n += 2;
             }
         }
         let want = SPECTRUM_RMS_M * (lag as f64 * cell_m / SPECTRUM_LAG_M).powf(hurst);
         let scale = want / (sum / n.max(1) as f64).sqrt();
-        println!("  the start's older relief: {want:.1} m rms at {:.0} m, the field scaled by {scale:.2}", lag as f64 * cell_m);
+        println!(
+            "  the start's older relief: {want:.1} m rms at {:.0} m, the field scaled by {scale:.2}",
+            lag as f64 * cell_m
+        );
         field.iter().map(|f| f * scale).collect()
     }
 
@@ -4430,7 +5344,13 @@ mod r2 {
     /// one published value for the tile, the rock the basement's, the repose the wet end of the solve's law (tan 0.47 —
     /// the tile is wet), the sea where the start stands at or under nought, the rim the outlets. A MEASUREMENT input,
     /// never a constant set from Earth (B79 item 1).
-    pub fn earth_region(node_z: &[f64], nw: usize, cpn: usize, cell_m: f64, rain_m: f64) -> (Region, Vec<f64>) {
+    pub fn earth_region(
+        node_z: &[f64],
+        nw: usize,
+        cpn: usize,
+        cell_m: f64,
+        rain_m: f64,
+    ) -> (Region, Vec<f64>) {
         let w = nw * cpn;
         let at = |i: i64, j: i64| {
             let (i, j) = (i.clamp(0, nw as i64 - 1), j.clamp(0, nw as i64 - 1));
@@ -4445,7 +5365,8 @@ mod r2 {
                 let mut rows = [0.0f64; 4];
                 for (r, slot) in rows.iter_mut().enumerate() {
                     let j = iv + r as i64 - 1;
-                    *slot = catmull_rom([at(iu - 1, j), at(iu, j), at(iu + 1, j), at(iu + 2, j)], fu);
+                    *slot =
+                        catmull_rom([at(iu - 1, j), at(iu, j), at(iu + 1, j), at(iu + 2, j)], fu);
                 }
                 catmull_rom(rows, fv)
             })
@@ -4470,7 +5391,7 @@ mod r2 {
                 mfd: false,
                 uplift_m_yr: 0.0,
                 hold_on: true,
-            threshold: false,
+                threshold: false,
             },
             start,
         )
@@ -4563,7 +5484,10 @@ mod r2 {
         let mut sums = [[0.0f64; 2]; 3];
         for y in h..w - h {
             for x in h..w - h {
-                for (k, (dx, dy)) in [(1i64, 0i64), (0, 1), (1, 1), (1, -1)].into_iter().enumerate() {
+                for (k, (dx, dy)) in [(1i64, 0i64), (0, 1), (1, 1), (1, -1)]
+                    .into_iter()
+                    .enumerate()
+                {
                     let c = at(x, y);
                     let (p, m) = (at(x + dx, y + dy), at(x - dx, y - dy));
                     let slot = k.min(2);
@@ -4678,7 +5602,9 @@ mod r2 {
             }
         }
         if reg.creep {
-            println!("  the hillslope law: at most {steep_links} links a step past nine tenths of S_c");
+            println!(
+                "  the hillslope law: at most {steep_links} links a step past nine tenths of S_c"
+            );
         }
         if reg.threshold {
             println!(
@@ -4896,9 +5822,8 @@ mod r2 {
         let w = reg.w;
         let tan = vd_terrain::body::TAN_REPOSE;
         let key = |h: f64| -> i64 { (h * 65_536.0).round() as i64 };
-        let mut heap: BinaryHeap<Reverse<(i64, u32)>> = (0..w * w)
-            .map(|i| Reverse((key(z[i]), i as u32)))
-            .collect();
+        let mut heap: BinaryHeap<Reverse<(i64, u32)>> =
+            (0..w * w).map(|i| Reverse((key(z[i]), i as u32))).collect();
         let mut done = vec![false; w * w];
         let mut slid = 0.0f64;
         while let Some(Reverse((_, c))) = heap.pop() {
@@ -5179,11 +6104,20 @@ mod r2 {
                     for dy in -1i64..=1 {
                         for dx in -1i64..=1 {
                             let (nx, ny) = (cx + dx, cy + dy);
-                            if (dx == 0 && dy == 0) || nx < 0 || ny < 0 || nx >= w as i64 || ny >= w as i64 {
+                            if (dx == 0 && dy == 0)
+                                || nx < 0
+                                || ny < 0
+                                || nx >= w as i64
+                                || ny >= w as i64
+                            {
                                 continue;
                             }
                             let m = ny as usize * w + nx as usize;
-                            let len = if dx != 0 && dy != 0 { d * std::f64::consts::SQRT_2 } else { d };
+                            let len = if dx != 0 && dy != 0 {
+                                d * std::f64::consts::SQRT_2
+                            } else {
+                                d
+                            };
                             let slope = (zf[i] - zf[m]) / len;
                             if slope > 0.0 {
                                 let share = slope.powf(FREEMAN_P);
@@ -5444,10 +6378,14 @@ mod lem {
     pub fn rock_scatter(x: f64, y: f64) -> f64 {
         let sigma = 4.0f64.ln() / 2.0;
         let smooth = |t: f64| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
-        let (mut sum, mut norm, mut wave, mut amp, mut octave) = (0.0f64, 0.0f64, 16_000.0f64, 1.0f64, 0u64);
+        let (mut sum, mut norm, mut wave, mut amp, mut octave) =
+            (0.0f64, 0.0f64, 16_000.0f64, 1.0f64, 0u64);
         while wave >= 32.0 {
             let lattice = |a: i64, b: i64| -> f64 {
-                let key = (octave << 52) ^ ((a as u64 & 0x3FF_FFFF) << 26) ^ (b as u64 & 0x3FF_FFFF) ^ 0x0005_EED0_F0C4;
+                let key = (octave << 52)
+                    ^ ((a as u64 & 0x3FF_FFFF) << 26)
+                    ^ (b as u64 & 0x3FF_FFFF)
+                    ^ 0x0005_EED0_F0C4;
                 2.0 * super::r2::hash01(key) - 1.0
             };
             // Each octave turned by its own angle so no two share the lattice's directions.
@@ -5471,11 +6409,16 @@ mod lem {
 
     /// The rock's factor at a point: one rock unless the bench asks for the stated scatter (`--lem-rock`).
     fn rock(x: f64, y: f64) -> f64 {
-        if ROCK_SCATTER.load(std::sync::atomic::Ordering::Relaxed) { rock_scatter(x, y) } else { 1.0 }
+        if ROCK_SCATTER.load(std::sync::atomic::Ordering::Relaxed) {
+            rock_scatter(x, y)
+        } else {
+            1.0
+        }
     }
 
     /// The bench's switch for the rock's stated scatter (`--lem-rock`; off: one rock, the lawful default).
-    pub static ROCK_SCATTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static ROCK_SCATTER: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     /// The place's stated rise, nanometres a year (`--uplift-um` × 1 000, or the solve's present rise). Valley spacing reads
     /// the absolute rate (Perron's ℓc), while the heights fix only U over K; the relaxation scales both together.
@@ -5486,13 +6429,16 @@ mod lem {
     /// The mean hold on each domain against the coarser cells (`--lem-hold`).
     pub static HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     /// The cell the hold reads, metres (`--lem-hold-m`; the coarse solve's spacing, 128 m, by default).
-    pub static HOLD_CELL_M: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(128);
+    pub static HOLD_CELL_M: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(128);
     /// The area for the slope laws spread over every lower neighbour (`--lem-mfd`): Freeman 1991, the cure of the comb.
-    pub static SHARED_AREA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static SHARED_AREA: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     /// The threshold slope the steady solve reads, thousandths (`--l1-sc`; tan 35° = 0.700 until the design's S_c = 1.25,
     /// review A6, is benched beside it).
-    pub static THRESHOLD_MILLI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(700);
+    pub static THRESHOLD_MILLI: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(700);
     fn threshold() -> f64 {
         THRESHOLD_MILLI.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000.0
     }
@@ -5500,7 +6446,8 @@ mod lem {
         threshold()
     }
     /// The rise and the tree in ONE loop (`--l1-joint`).
-    pub static JOINT_LOOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static JOINT_LOOP: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     /// Each tree pass's moves printed (`--l1-trace`).
     pub static TRACE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     /// The tree passes stop when no height moves more than a quarter metre (`--l1-settle`).
@@ -5511,10 +6458,12 @@ mod lem {
     pub static L1_SIGMA_C: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(70);
 
     /// The steady form in one tree solve in place of the relaxation (`--lem-steady`).
-    pub static STEADY_FORM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static STEADY_FORM: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     /// The fine window's relaxation steps (`--lem-relax-steps`, 0: the tree solve alone).
-    pub static RELAX_STEPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(400);
+    pub static RELAX_STEPS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(400);
 
     /// THE STEADY STATE on a point graph, the tree re-found from the heights until it settles (or `max_passes`): each
     /// outlet holds its `base`; every other point stands over its receiver by the joint law's slope for its water
@@ -5533,7 +6482,10 @@ mod lem {
         let n = h.len();
         let tan = threshold();
         let ns = |t: Instant, slot: &std::sync::atomic::AtomicU64| {
-            slot.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            slot.fetch_add(
+                t.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         };
         SCRATCH.with(|cell| {
             let mut guard = cell.borrow_mut();
@@ -5610,11 +6562,14 @@ mod lem {
         let (u, v) = (x / node_m - 0.5, y / node_m - 0.5);
         let (iu, fu) = (u.floor() as i64, u - u.floor());
         let (iv, fv) = (v.floor() as i64, v - v.floor());
-        let at = |i: i64, j: i64| grid[(j.clamp(0, nw as i64 - 1) as usize) * nw + i.clamp(0, nw as i64 - 1) as usize];
+        let at = |i: i64, j: i64| {
+            grid[(j.clamp(0, nw as i64 - 1) as usize) * nw + i.clamp(0, nw as i64 - 1) as usize]
+        };
         let mut rows = [0.0f64; 4];
         for (r, slot) in rows.iter_mut().enumerate() {
             let j = iv + r as i64 - 1;
-            *slot = super::catmull_rom([at(iu - 1, j), at(iu, j), at(iu + 1, j), at(iu + 2, j)], fu);
+            *slot =
+                super::catmull_rom([at(iu - 1, j), at(iu, j), at(iu + 1, j), at(iu + 2, j)], fu);
         }
         super::catmull_rom(rows, fv)
     }
@@ -5633,8 +6588,14 @@ mod lem {
         // weight of e^(−3.5²/(2·0.7²)) ≈ 4·10⁻⁶ (a window from two nodes behind to three ahead dropped a node at weight
         // 0.017 each time a point crossed a node centre: straight lines along the centres' lines). The Gaussian is
         // separable: one weight a node a direction.
-        let (u0, u1) = ((u - KERNEL_REACH).ceil() as i64, (u + KERNEL_REACH).floor() as i64);
-        let (v0, v1) = ((v - KERNEL_REACH).ceil() as i64, (v + KERNEL_REACH).floor() as i64);
+        let (u0, u1) = (
+            (u - KERNEL_REACH).ceil() as i64,
+            (u + KERNEL_REACH).floor() as i64,
+        );
+        let (v0, v1) = (
+            (v - KERNEL_REACH).ceil() as i64,
+            (v + KERNEL_REACH).floor() as i64,
+        );
         let mut wu = [0.0f64; 8];
         let mut wv = [0.0f64; 8];
         for (t, i) in (u0..=u1).enumerate() {
@@ -5669,7 +6630,10 @@ mod lem {
             let (mut sum, mut norm, mut wave, mut amp) = (0.0f64, 0.0f64, 2.0 * node_m, 1.0f64);
             for octave in 0..2u64 {
                 let lattice = |a: i64, b: i64| -> f64 {
-                    let key = (octave << 52) ^ ((a as u64 & 0x3FF_FFFF) << 26) ^ (b as u64 & 0x3FF_FFFF) ^ salt;
+                    let key = (octave << 52)
+                        ^ ((a as u64 & 0x3FF_FFFF) << 26)
+                        ^ (b as u64 & 0x3FF_FFFF)
+                        ^ salt;
                     2.0 * super::r2::hash01(key) - 1.0
                 };
                 // Each octave turned by its own angle so the field shares no direction with the node lattice.
@@ -5688,7 +6652,10 @@ mod lem {
             }
             sum / norm
         };
-        (x + 0.5 * node_m * field(0xA110_F0E5), y + 0.5 * node_m * field(0xA110_F1E5))
+        (
+            x + 0.5 * node_m * field(0xA110_F0E5),
+            y + 0.5 * node_m * field(0xA110_F1E5),
+        )
     }
     /// The reads of the macro fields go through `warp` (`--l1-warp`).
     pub static WARP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -5697,9 +6664,16 @@ mod lem {
     /// 2.5 cells each way so a cell enters or leaves only at a weight of e^(−2.5²/(2·0.5²)) ≈ 4·10⁻⁶), normalised. `at(i)`
     /// gives the point's place in cells (centres at whole numbers). Returns each point's start in the flat lists, the
     /// cells and the weights.
-    fn hold_kernel(n: usize, at: impl Fn(usize) -> (f64, f64), ncx: usize, ncy: usize, held: &[bool]) -> (Vec<usize>, Vec<u32>, Vec<f32>) {
+    fn hold_kernel(
+        n: usize,
+        at: impl Fn(usize) -> (f64, f64),
+        ncx: usize,
+        ncy: usize,
+        held: &[bool],
+    ) -> (Vec<usize>, Vec<u32>, Vec<f32>) {
         const REACH: f64 = 2.5;
-        let (mut start, mut cells, mut weights) = (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
+        let (mut start, mut cells, mut weights) =
+            (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
         for i in 0..n {
             start.push(cells.len());
             let (u, v) = at(i);
@@ -5707,10 +6681,17 @@ mod lem {
             let mut wsum = 0.0f64;
             for cy in ((v - REACH).ceil() as i64)..=((v + REACH).floor() as i64) {
                 for cx in ((u - REACH).ceil() as i64)..=((u + REACH).floor() as i64) {
-                    if cx < 0 || cy < 0 || cx >= ncx as i64 || cy >= ncy as i64 || !held[cy as usize * ncx + cx as usize] {
+                    if cx < 0
+                        || cy < 0
+                        || cx >= ncx as i64
+                        || cy >= ncy as i64
+                        || !held[cy as usize * ncx + cx as usize]
+                    {
                         continue;
                     }
-                    let wgt = (-((u - cx as f64).powi(2) + (v - cy as f64).powi(2)) / (2.0 * 0.5 * 0.5)).exp();
+                    let wgt = (-((u - cx as f64).powi(2) + (v - cy as f64).powi(2))
+                        / (2.0 * 0.5 * 0.5))
+                        .exp();
                     cells.push((cy as usize * ncx + cx as usize) as u32);
                     weights.push(wgt as f32);
                     wsum += wgt;
@@ -5733,7 +6714,9 @@ mod lem {
         let (u, v) = (x / node_m - 0.5, y / node_m - 0.5);
         let (iu, fu) = (u.floor() as i64, u - u.floor());
         let (iv, fv) = (v.floor() as i64, v - v.floor());
-        let at = |i: i64, j: i64| grid[(j.clamp(0, nw as i64 - 1) as usize) * nw + i.clamp(0, nw as i64 - 1) as usize];
+        let at = |i: i64, j: i64| {
+            grid[(j.clamp(0, nw as i64 - 1) as usize) * nw + i.clamp(0, nw as i64 - 1) as usize]
+        };
         let top = at(iu, iv) * (1.0 - fu) + at(iu + 1, iv) * fu;
         let bottom = at(iu, iv + 1) * (1.0 - fu) + at(iu + 1, iv + 1) * fu;
         top * (1.0 - fv) + bottom * fv
@@ -5743,7 +6726,11 @@ mod lem {
     /// point drains to its steepest LOWER neighbour — on ground with no pit the same receiver the priority flood picks,
     /// since every lower neighbour is reached first — and the order is a walk up the donors from the outlets. Any pit (the
     /// first pass's smooth start) falls back to the flood (`tree`).
-    fn tree_fast(h: &[f64], outlet: &[bool], graph: &terrain_graph::edge_attributed_undirected::EdgeAttributedUndirectedGraph<f64>) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    fn tree_fast(
+        h: &[f64],
+        outlet: &[bool],
+        graph: &terrain_graph::edge_attributed_undirected::EdgeAttributedUndirectedGraph<f64>,
+    ) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
         let mut sc = Scratch::default();
         tree_into(h, outlet, graph, &mut sc);
         (sc.order, sc.recv, sc.len)
@@ -5771,7 +6758,12 @@ mod lem {
     }
 
     /// `tree_fast` into reused lists: `sc.order`, `sc.recv`, `sc.len`.
-    fn tree_into(h: &[f64], outlet: &[bool], graph: &terrain_graph::edge_attributed_undirected::EdgeAttributedUndirectedGraph<f64>, sc: &mut Scratch) {
+    fn tree_into(
+        h: &[f64],
+        outlet: &[bool],
+        graph: &terrain_graph::edge_attributed_undirected::EdgeAttributedUndirectedGraph<f64>,
+        sc: &mut Scratch,
+    ) {
         let flood = |sc: &mut Scratch| {
             let (order, recv, len) = tree(h, outlet, graph);
             (sc.order, sc.recv, sc.len) = (order, recv, len);
@@ -5835,7 +6827,10 @@ mod lem {
             sc.recv[c] = best.1;
             sc.len[c] = best.2;
         }
-        T_SCAN.fetch_add(t_scan.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        T_SCAN.fetch_add(
+            t_scan.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let t_donors = Instant::now();
         // The donors in one flat table, then the order outlets first.
         sc.start.clear();
@@ -5859,7 +6854,10 @@ mod lem {
                 sc.fill[r] += 1;
             }
         }
-        T_DONORS.fetch_add(t_donors.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        T_DONORS.fetch_add(
+            t_donors.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let t_order = Instant::now();
         sc.order.clear();
         for c in 0..n {
@@ -5877,7 +6875,10 @@ mod lem {
             }
             k += 1;
         }
-        T_ORDER.fetch_add(t_order.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        T_ORDER.fetch_add(
+            t_order.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         sc.kept.copy_from_slice(&sc.recv);
         if sc.order.len() < n {
             // A cycle cannot form (each link falls), so a short order means a point reached no outlet: the flood decides.
@@ -5888,12 +6889,15 @@ mod lem {
         FAST_DONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub static FALLBACK_PIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    pub static FALLBACK_SHORT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    pub static FALLBACK_PIT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    pub static FALLBACK_SHORT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
     pub static FAST_DONE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     /// THE TIE TOLERANCE, millionths (`--l1-hysteresis-ppm`; 0: off): a point keeps its receiver unless another lower
     /// neighbour is steeper by more than this share.
-    pub static HYSTERESIS_PPM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    pub static HYSTERESIS_PPM: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
     thread_local! {
         /// The region's 8 km water levels over the sea (NaN where dry), for the floor-bound print.
         pub static FLOOR_BOUND: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -5901,25 +6905,32 @@ mod lem {
     /// The start carved along the coarser level's rivers (`--l1-carve`).
     pub static CARVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     /// The holds keep the domain's outer node ring free (`--l1-hold-inner`).
-    pub static HOLD_INNER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static HOLD_INNER: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     /// The slope hold's sweeps at most (`--l1-slope-sweeps`).
-    pub static SLOPE_SWEEPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(80);
+    pub static SLOPE_SWEEPS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(80);
     /// The 128 m rounds' damped step in place of the ¼–4 clamp (`--l1-damped`).
     pub static DAMPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     /// The 16 m level held per 128 m cell by its slopes (`--l2-hold-cells`).
-    pub static L2_HOLD_CELLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static L2_HOLD_CELLS: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     /// The 16 m level keeps the 128 m level's channels as outlets (`--l2-channels`).
-    pub static L2_CHANNELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static L2_CHANNELS: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     /// The fill loop around the additive hold (`--l1-fill`).
     pub static FILL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     /// The slope hold on the rounds' last tree before the additive one (`--l1-slope-hold`).
-    pub static SLOPE_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static SLOPE_HOLD: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     /// A round stops when its flow tree repeats (`--l1-cycle-stop`).
-    pub static CYCLE_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static CYCLE_STOP: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     /// The rounds after a coarse start (`--l1-rounds`).
     pub static L1_ROUNDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(10);
     /// Whether `steady` hands back its water and receivers (the 128 m tiles read neither; `lem::solve` does).
-    pub static RETURN_LISTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    pub static RETURN_LISTS: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(true);
     /// The last pass's flow tree, hashed (a round watches for a repeat).
     pub static LAST_TREE_HASH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     pub static T_TREE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -5929,7 +6940,8 @@ mod lem {
     pub static T_WATER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     pub static T_HEIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     /// The 128 m level starts from a coarse solve's rises and heights (`--l1-coarse-start`).
-    pub static COARSE_START: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static COARSE_START: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     thread_local! {
         /// The last domain solve's node rises (the coarse start hands them on).
         pub static LAST_U: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -5937,14 +6949,24 @@ mod lem {
     /// How far a node mean may still move between passes when a round stops, metres (`--l1-settle-m`).
     pub static SETTLE_M: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     /// A round's passes stop when the node means settle (`--l1-means-settle`).
-    pub static MEANS_SETTLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pub static MEANS_SETTLE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     /// ★ THE FINE POWER (the design's §5.2 lever, P-COST): `ln` and `exp` under the fence with every division by a
     /// whole number replaced by a multiplication by its reciprocal written once as a constant — add, multiply, ONE
     /// division (`t = (m − 1)/(m + 1)`), a floor and bit patterns, so one answer on every target. `ln x = ln m + e·ln 2`
     /// (`x = m·2^e`, `m` in `[√½, √2)`, `ln m = 2·atanh t` to `t¹⁵`); `e^y = 2^k·e^f` (`|f| ≤ ln2/2`, Taylor to `f¹³`).
     pub fn fine_ln(x: vd_terrain::Gf) -> vd_terrain::Gf {
         use vd_terrain::Gf;
-        const ODD: [f64; 8] = [1.0, 1.0 / 3.0, 1.0 / 5.0, 1.0 / 7.0, 1.0 / 9.0, 1.0 / 11.0, 1.0 / 13.0, 1.0 / 15.0];
+        const ODD: [f64; 8] = [
+            1.0,
+            1.0 / 3.0,
+            1.0 / 5.0,
+            1.0 / 7.0,
+            1.0 / 9.0,
+            1.0 / 11.0,
+            1.0 / 13.0,
+            1.0 / 15.0,
+        ];
         let bits = x.to_bits();
         let mut e = ((bits >> 52) & 0x7ff) as i64 - 1_023;
         let mut m = Gf::from_bits((bits & ((1u64 << 52) - 1)) | (1_023u64 << 52));
@@ -6014,7 +7036,10 @@ mod lem {
     thread_local! {
         static FLAT: std::cell::RefCell<Option<(usize, usize, std::rc::Rc<Flat>)>> = const { std::cell::RefCell::new(None) };
     }
-    fn flat_of(graph: &terrain_graph::edge_attributed_undirected::EdgeAttributedUndirectedGraph<f64>, n: usize) -> std::rc::Rc<Flat> {
+    fn flat_of(
+        graph: &terrain_graph::edge_attributed_undirected::EdgeAttributedUndirectedGraph<f64>,
+        n: usize,
+    ) -> std::rc::Rc<Flat> {
         let key = std::ptr::from_ref(graph) as usize;
         FLAT.with(|cell| {
             if let Some((k, kn, f)) = cell.borrow().as_ref()
@@ -6045,7 +7070,11 @@ mod lem {
     /// The flow tree: a priority flood from the outlets over the point graph; each point drains to the steepest of its
     /// neighbours already reached (on the flooded heights), so the tree has no cycle and every pit spills over its pass.
     /// Returns the outlets-first order, each point's receiver and the length of its link.
-    fn tree(h: &[f64], outlet: &[bool], graph: &terrain_graph::edge_attributed_undirected::EdgeAttributedUndirectedGraph<f64>) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    fn tree(
+        h: &[f64],
+        outlet: &[bool],
+        graph: &terrain_graph::edge_attributed_undirected::EdgeAttributedUndirectedGraph<f64>,
+    ) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
         let n = h.len();
         let key = |z: f64| -> i64 { (z * 4_096.0).round() as i64 };
         let mut zf = h.to_vec();
@@ -6058,7 +7087,8 @@ mod lem {
                 heap.push(Reverse((key(zf[i]), i)));
             }
         }
-        let (mut order, mut recv, mut len) = (Vec::with_capacity(n), vec![usize::MAX; n], vec![0.0f64; n]);
+        let (mut order, mut recv, mut len) =
+            (Vec::with_capacity(n), vec![usize::MAX; n], vec![0.0f64; n]);
         while let Some(Reverse((_, c))) = heap.pop() {
             if done[c] {
                 continue;
@@ -6091,23 +7121,47 @@ mod lem {
 
     /// The fine ground of a square of `nw × nw` nodes of `node_m`, from each node's mean height over the sea (`node_z`)
     /// and rain (`node_rain_m`, m/yr), on points `spacing_m` apart, rastered at `cell_m`.
-    pub fn solve(node_z: &[f64], node_rain_m: &[f64], nw: usize, node_m: f64, spacing_m: f64, cell_m: f64) -> Out {
+    pub fn solve(
+        node_z: &[f64],
+        node_rain_m: &[f64],
+        nw: usize,
+        node_m: f64,
+        spacing_m: f64,
+        cell_m: f64,
+    ) -> Out {
         let side = nw as f64 * node_m;
         let num = ((side / spacing_m) * (side / spacing_m)) as usize;
         let started = Instant::now();
-        let model = TerrainModel2DBulider::from_random_sites(num, Site2D { x: 0.0, y: 0.0 }, Site2D { x: side, y: side })
-            .relaxate_sites(1)
-            .expect("the sites relax")
-            .add_edge_sites(None, None)
-            .expect("the edge sites")
-            .build()
-            .expect("the point graph builds");
-        let (sites, areas, graph) = (model.sites().to_vec(), model.areas().to_vec(), model.graph());
+        let model = TerrainModel2DBulider::from_random_sites(
+            num,
+            Site2D { x: 0.0, y: 0.0 },
+            Site2D { x: side, y: side },
+        )
+        .relaxate_sites(1)
+        .expect("the sites relax")
+        .add_edge_sites(None, None)
+        .expect("the edge sites")
+        .build()
+        .expect("the point graph builds");
+        let (sites, areas, graph) = (
+            model.sites().to_vec(),
+            model.areas().to_vec(),
+            model.graph(),
+        );
         let n = sites.len();
-        println!("  the points: {n} ({spacing_m:.0} m apart), the graph in {:.1} s", started.elapsed().as_secs_f64());
-        let base: Vec<f64> = sites.iter().map(|s| smooth(node_z, nw, node_m, s.x, s.y)).collect();
-        let water: Vec<f64> =
-            sites.iter().zip(&areas).map(|(s, a)| linear(node_rain_m, nw, node_m, s.x, s.y) * a).collect();
+        println!(
+            "  the points: {n} ({spacing_m:.0} m apart), the graph in {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+        let base: Vec<f64> = sites
+            .iter()
+            .map(|s| smooth(node_z, nw, node_m, s.x, s.y))
+            .collect();
+        let water: Vec<f64> = sites
+            .iter()
+            .zip(&areas)
+            .map(|(s, a)| linear(node_rain_m, nw, node_m, s.x, s.y) * a)
+            .collect();
         let mut outlet = vec![false; n];
         for &e in model.default_outlets() {
             outlet[e] = true;
@@ -6118,7 +7172,10 @@ mod lem {
         let node_of = |s: &Site2D| -> usize {
             ((s.y / node_m) as usize).min(nw - 1) * nw + ((s.x / node_m) as usize).min(nw - 1)
         };
-        let mut u_node: Vec<f64> = node_z.iter().map(|&z| if z > 0.0 { 1.0e-3 } else { 0.0 }).collect();
+        let mut u_node: Vec<f64> = node_z
+            .iter()
+            .map(|&z| if z > 0.0 { 1.0e-3 } else { 0.0 })
+            .collect();
         let mut h = base.clone();
         let (mut q, mut recv) = (Vec::new(), Vec::new());
         let mut ln_u = Vec::new();
@@ -6131,12 +7188,17 @@ mod lem {
                 .filter(|(_, z)| **z > 0.0)
                 .map(|(u, _)| *u)
                 .fold(f64::MAX, f64::min);
-            ln_u = u_node.iter().zip(node_z).map(|(u, z)| if *z > 0.0 { u.ln() } else { land_min.ln() }).collect();
+            ln_u = u_node
+                .iter()
+                .zip(node_z)
+                .map(|(u, z)| if *z > 0.0 { u.ln() } else { land_min.ln() })
+                .collect();
             let u: Vec<f64> = sites
                 .iter()
                 .map(|s| radial(&ln_u, nw, node_m, s.x, s.y).exp() / rock(s.x, s.y))
                 .collect();
-            let (passes, still, q_now, recv_now) = steady(graph, &outlet, &base, &water, &u, &mut h, 60);
+            let (passes, still, q_now, recv_now) =
+                steady(graph, &outlet, &base, &water, &u, &mut h, 60);
             (q, recv) = (q_now, recv_now);
             // Each node's area-weighted mean against its own: the uplift follows the ratio to the law's power.
             let (mut sum, mut area) = (vec![0.0f64; nw * nw], vec![0.0f64; nw * nw]);
@@ -6165,9 +7227,22 @@ mod lem {
         }
         let w = (side / cell_m).round() as usize;
         let terrain = model.create_terrain_from_result(&h);
-        let raster = rasterise(&terrain, 0.0, 0.0, w, cell_m, |x, y| smooth(node_z, nw, node_m, x, y));
-        println!("  the raster: {w} × {w} cells of {cell_m:.0} m ({:.1} s)", started.elapsed().as_secs_f64());
-        Out { raster, w, sites, q, recv, ln_u, terrain }
+        let raster = rasterise(&terrain, 0.0, 0.0, w, cell_m, |x, y| {
+            smooth(node_z, nw, node_m, x, y)
+        });
+        println!(
+            "  the raster: {w} × {w} cells of {cell_m:.0} m ({:.1} s)",
+            started.elapsed().as_secs_f64()
+        );
+        Out {
+            raster,
+            w,
+            sites,
+            q,
+            recv,
+            ln_u,
+            terrain,
+        }
     }
 
     /// The point graph's natural-neighbour heights at the centres of `w` × `w` cells of `cell_m` from `(x0, y0)`.
@@ -6188,8 +7263,13 @@ mod lem {
                 scope.spawn(move || {
                     for (k, cell) in chunk.iter_mut().enumerate() {
                         let (x, y) = (k % w, t * rows + k / w);
-                        let s = Site2D { x: x0 + (x as f64 + 0.5) * cell_m, y: y0 + (y as f64 + 0.5) * cell_m };
-                        *cell = terrain.get_elevation(&s).unwrap_or_else(|| fallback(s.x, s.y));
+                        let s = Site2D {
+                            x: x0 + (x as f64 + 0.5) * cell_m,
+                            y: y0 + (y as f64 + 0.5) * cell_m,
+                        };
+                        *cell = terrain
+                            .get_elevation(&s)
+                            .unwrap_or_else(|| fallback(s.x, s.y));
                     }
                 });
             }
@@ -6277,7 +7357,11 @@ mod lem {
                     f64::INFINITY
                 };
                 let ul = u[c] * a[c] / width;
-                let s_creep = if ul > 0.0 { sc * sc * ((d * d + (2.0 * ul / sc).powi(2)).sqrt() - d) / (2.0 * ul) } else { 0.0 };
+                let s_creep = if ul > 0.0 {
+                    sc * sc * ((d * d + (2.0 * ul / sc).powi(2)).sqrt() - d) / (2.0 * ul)
+                } else {
+                    0.0
+                };
                 let s = s_river.min(s_creep).min(sc);
                 h[c] = h[recv[c]] + s * len[c];
             }
@@ -6361,7 +7445,10 @@ mod lem {
         let sc = vd_terrain::surface::SOIL_CRITICAL_SLOPE;
         let cot = cot_weights(sites, graph);
         let total_area: f64 = areas.iter().sum();
-        let floor = (0..n).filter(|&i| outlet[i]).map(|i| base[i]).fold(f64::MAX, f64::min);
+        let floor = (0..n)
+            .filter(|&i| outlet[i])
+            .map(|i| base[i])
+            .fold(f64::MAX, f64::min);
         let mean_of = |h: &[f64]| h.iter().zip(areas).map(|(z, a)| z * a).sum::<f64>() / total_area;
         let mut mean_u = u.iter().zip(areas).map(|(v, a)| v * a).sum::<f64>() / total_area;
         let mut k_rock: Vec<f64> = sites.iter().map(|s| JOINT_K_LP * rock(s.x, s.y)).collect();
@@ -6376,7 +7463,10 @@ mod lem {
             for k in &mut k_rock {
                 *k *= f;
             }
-            println!("  the place's measured rise {:.3} mm/yr: U and the erodibility both × {f:.1} (every height keeps)", rise * 1e3);
+            println!(
+                "  the place's measured rise {:.3} mm/yr: U and the erodibility both × {f:.1} (every height keeps)",
+                rise * 1e3
+            );
             mean_u = rise;
         }
         let tau = ((mean_of(h) - floor).max(1.0) / mean_u.max(1.0e-9)).clamp(1.0e4, 5.0e7);
@@ -6385,12 +7475,17 @@ mod lem {
             None => 4.0 * tau / steps as f64,
         };
         // Perron's length for the joint law (Theodoratos 2018): ℓc = (D^n · U^(1−n) / (K·R))^(1/(n+2)).
-        let mut per_area: Vec<f64> = water.iter().zip(areas).map(|(w, a)| w / a.max(f64::MIN_POSITIVE)).collect();
+        let mut per_area: Vec<f64> = water
+            .iter()
+            .zip(areas)
+            .map(|(w, a)| w / a.max(f64::MIN_POSITIVE))
+            .collect();
         per_area.sort_by(f64::total_cmp);
         let rain_mean = per_area[per_area.len() / 2];
         let k_mean = k_rock.iter().sum::<f64>() / k_rock.len() as f64;
-        let lc = (d_creep.powf(JOINT_N) * mean_u.powf(1.0 - JOINT_N) / (k_mean * rain_mean.max(1e-6)))
-            .powf(1.0 / (JOINT_N + 2.0));
+        let lc = (d_creep.powf(JOINT_N) * mean_u.powf(1.0 - JOINT_N)
+            / (k_mean * rain_mean.max(1e-6)))
+        .powf(1.0 / (JOINT_N + 2.0));
         println!(
             "  the relaxation: {steps} steps of {:.0} years ({:.2} Myr), the window's U {:.3} mm/yr, Perron's length ℓc ≈ \
              {lc:.0} m",
@@ -6448,7 +7543,8 @@ mod lem {
             // the channels. The exact lower envelope, from the lowest point up; the creep's series then stays finite.
             {
                 let key = |z: f64| -> i64 { (z * 4_096.0).round() as i64 };
-                let mut heap: BinaryHeap<Reverse<(i64, usize)>> = (0..n).map(|i| Reverse((key(h[i]), i))).collect();
+                let mut heap: BinaryHeap<Reverse<(i64, usize)>> =
+                    (0..n).map(|i| Reverse((key(h[i]), i))).collect();
                 let mut done = vec![false; n];
                 while let Some(Reverse((_, c))) = heap.pop() {
                     if done[c] {
@@ -6485,7 +7581,13 @@ mod lem {
                     }
                 }
                 let diag: Vec<f64> = (0..n)
-                    .map(|i| if outlet[i] { 1.0 } else { areas[i] / dt + w_edge[i].iter().sum::<f64>() })
+                    .map(|i| {
+                        if outlet[i] {
+                            1.0
+                        } else {
+                            areas[i] / dt + w_edge[i].iter().sum::<f64>()
+                        }
+                    })
                     .collect();
                 let apply = |x: &[f64], y: &mut [f64]| {
                     for i in 0..n {
@@ -6553,7 +7655,12 @@ mod lem {
                 }
                 h.copy_from_slice(&x);
             }
-            moved_last = h.iter().zip(&before).map(|(a, b)| (a - b).abs()).sum::<f64>() / n as f64;
+            moved_last = h
+                .iter()
+                .zip(&before)
+                .map(|(a, b)| (a - b).abs())
+                .sum::<f64>()
+                / n as f64;
             if fixed.is_none() && (step + 1) % 25 == 0 {
                 let mean = mean_of(h);
                 let ratio = ((target - floor).max(1.0) / (mean - floor).max(1.0)).clamp(0.5, 2.0);
@@ -6580,8 +7687,12 @@ mod lem {
     /// place drawn from the cell's own hash, up to 0.45 of a cell from its centre. A point depends only on its cell, so
     /// two domains that both hold a cell hold the same point there (B81's G-SEAM; the design's §3.1).
     pub fn cell_point(cx: i64, cy: i64, spacing: f64) -> Site2D {
-        let key = ((cx as u64 & 0xFFFF_FFFF) << 32) ^ (cy as u64 & 0xFFFF_FFFF) ^ 0x51EA_D0C1_4A11_0000;
-        let (a, b) = (super::r2::hash01(key), super::r2::hash01(key ^ 0x9E37_79B9_7F4A_7C15));
+        let key =
+            ((cx as u64 & 0xFFFF_FFFF) << 32) ^ (cy as u64 & 0xFFFF_FFFF) ^ 0x51EA_D0C1_4A11_0000;
+        let (a, b) = (
+            super::r2::hash01(key),
+            super::r2::hash01(key ^ 0x9E37_79B9_7F4A_7C15),
+        );
         Site2D {
             x: (cx as f64 + 0.5 + 0.9 * (a - 0.5)) * spacing,
             y: (cy as f64 + 0.5 + 0.9 * (b - 0.5)) * spacing,
@@ -6599,9 +7710,16 @@ mod lem {
 
     /// THE FULL JITTER: one hashed point a cell at a uniform place anywhere inside it.
     pub fn cell_point_full(cx: i64, cy: i64, spacing: f64) -> Site2D {
-        let key = ((cx as u64 & 0xFFFF_FFFF) << 32) ^ (cy as u64 & 0xFFFF_FFFF) ^ 0x51EA_D0C1_4A11_0000;
-        let (a, b) = (super::r2::hash01(key), super::r2::hash01(key ^ 0x9E37_79B9_7F4A_7C15));
-        Site2D { x: (cx as f64 + a) * spacing, y: (cy as f64 + b) * spacing }
+        let key =
+            ((cx as u64 & 0xFFFF_FFFF) << 32) ^ (cy as u64 & 0xFFFF_FFFF) ^ 0x51EA_D0C1_4A11_0000;
+        let (a, b) = (
+            super::r2::hash01(key),
+            super::r2::hash01(key ^ 0x9E37_79B9_7F4A_7C15),
+        );
+        Site2D {
+            x: (cx as f64 + a) * spacing,
+            y: (cy as f64 + b) * spacing,
+        }
     }
 
     /// THE HASHED POISSON-DISK (Matérn's hard-core process, type II): four hashed candidates a cell, each with a hashed
@@ -6612,8 +7730,13 @@ mod lem {
         const K: u64 = 4;
         let r2 = spacing * spacing / std::f64::consts::PI;
         let cand = |cx: i64, cy: i64, t: u64| -> (f64, f64, u64) {
-            let key = ((cx as u64 & 0xFFFF_FFFF) << 32) ^ (cy as u64 & 0xFFFF_FFFF) ^ (0x3A7E_4D15_C000_0000 + (t << 56));
-            let (a, b) = (super::r2::hash01(key), super::r2::hash01(key ^ 0x9E37_79B9_7F4A_7C15));
+            let key = ((cx as u64 & 0xFFFF_FFFF) << 32)
+                ^ (cy as u64 & 0xFFFF_FFFF)
+                ^ (0x3A7E_4D15_C000_0000 + (t << 56));
+            let (a, b) = (
+                super::r2::hash01(key),
+                super::r2::hash01(key ^ 0x9E37_79B9_7F4A_7C15),
+            );
             let pri = (super::r2::hash01(key ^ 0xC2B2_AE3D_27D4_EB4F) * (1u64 << 52) as f64) as u64;
             ((cx as f64 + a) * spacing, (cy as f64 + b) * spacing, pri)
         };
@@ -6670,7 +7793,10 @@ mod lem {
                 scope.spawn(move || {
                     for (k, cell) in chunk.iter_mut().enumerate() {
                         let (x, y) = (k % w, t * rows + k / w);
-                        let s = Site2D { x: x0 + (x as f64 + 0.5) * cell_m, y: y0 + (y as f64 + 0.5) * cell_m };
+                        let s = Site2D {
+                            x: x0 + (x as f64 + 0.5) * cell_m,
+                            y: y0 + (y as f64 + 0.5) * cell_m,
+                        };
                         *cell = terrain.get_elevation(&s).unwrap_or(f64::NAN);
                     }
                 });
@@ -6693,7 +7819,13 @@ mod lem {
                 g[r * (p + 1) + p] = (0..m).map(|i| a[i * n + cr] * b[i]).sum();
             }
             for col in 0..p {
-                let piv = (col..p).max_by(|&x, &y| g[x * (p + 1) + col].abs().total_cmp(&g[y * (p + 1) + col].abs())).unwrap_or(col);
+                let piv = (col..p)
+                    .max_by(|&x, &y| {
+                        g[x * (p + 1) + col]
+                            .abs()
+                            .total_cmp(&g[y * (p + 1) + col].abs())
+                    })
+                    .unwrap_or(col);
                 if piv != col {
                     for c in 0..=p {
                         g.swap(col * (p + 1) + c, piv * (p + 1) + c);
@@ -6716,22 +7848,37 @@ mod lem {
             for r in (0..p).rev() {
                 let d = g[r * (p + 1) + r];
                 let acc: f64 = ((r + 1)..p).map(|c| g[r * (p + 1) + c] * z[c]).sum();
-                z[r] = if d.abs() < 1.0e-300 { 0.0 } else { (g[r * (p + 1) + p] - acc) / d };
+                z[r] = if d.abs() < 1.0e-300 {
+                    0.0
+                } else {
+                    (g[r * (p + 1) + p] - acc) / d
+                };
             }
             z
         };
         let grad = |x: &[f64]| -> Vec<f64> {
-            let r: Vec<f64> = (0..m).map(|i| b[i] - (0..n).map(|j| a[i * n + j] * x[j]).sum::<f64>()).collect();
-            (0..n).map(|j| (0..m).map(|i| a[i * n + j] * r[i]).sum()).collect()
+            let r: Vec<f64> = (0..m)
+                .map(|i| b[i] - (0..n).map(|j| a[i * n + j] * x[j]).sum::<f64>())
+                .collect();
+            (0..n)
+                .map(|j| (0..m).map(|i| a[i * n + j] * r[i]).sum())
+                .collect()
         };
         let mut x = vec![0.0f64; n];
         let mut passive: Vec<bool> = warm.to_vec();
         let mut first = passive.iter().any(|&p| p);
-        let tol = 1.0e-12 * (0..m * n).map(|k| a[k].abs()).fold(0.0f64, f64::max).max(1.0e-300) * b.iter().map(|v| v.abs()).fold(0.0f64, f64::max).max(1.0);
+        let tol = 1.0e-12
+            * (0..m * n)
+                .map(|k| a[k].abs())
+                .fold(0.0f64, f64::max)
+                .max(1.0e-300)
+            * b.iter().map(|v| v.abs()).fold(0.0f64, f64::max).max(1.0);
         for _ in 0..3 * n + 10 {
             if !first {
                 let w = grad(&x);
-                let pick = (0..n).filter(|&j| !passive[j] && w[j] > tol).max_by(|&p, &q| w[p].total_cmp(&w[q]).then(q.cmp(&p)));
+                let pick = (0..n)
+                    .filter(|&j| !passive[j] && w[j] > tol)
+                    .max_by(|&p, &q| w[p].total_cmp(&w[q]).then(q.cmp(&p)));
                 let Some(j) = pick else { break };
                 passive[j] = true;
             }
@@ -6750,7 +7897,13 @@ mod lem {
                 let alpha = pass
                     .iter()
                     .filter(|&&j| z[j] <= 0.0)
-                    .map(|&j| if x[j] - z[j] > 0.0 { x[j] / (x[j] - z[j]) } else { 0.0 })
+                    .map(|&j| {
+                        if x[j] - z[j] > 0.0 {
+                            x[j] / (x[j] - z[j])
+                        } else {
+                            0.0
+                        }
+                    })
                     .fold(1.0f64, f64::min);
                 for j in 0..n {
                     x[j] += alpha * (z[j] - x[j]);
@@ -6794,8 +7947,15 @@ mod lem {
         let reach = (3.0 * sigma).ceil() as i64;
         let hn: Vec<usize> = (0..nw * nw).filter(|&k| held[k]).collect();
         let nh = hn.len();
-        let node_of: Vec<usize> = sites.iter().map(|s| ((s.y / node_m) as usize).min(nw - 1) * nw + ((s.x / node_m) as usize).min(nw - 1)).collect();
-        let row_of: Vec<usize> = (0..nw * nw).map(|k| hn.iter().position(|&m| m == k).unwrap_or(usize::MAX)).collect();
+        let node_of: Vec<usize> = sites
+            .iter()
+            .map(|s| {
+                ((s.y / node_m) as usize).min(nw - 1) * nw + ((s.x / node_m) as usize).min(nw - 1)
+            })
+            .collect();
+        let row_of: Vec<usize> = (0..nw * nw)
+            .map(|k| hn.iter().position(|&m| m == k).unwrap_or(usize::MAX))
+            .collect();
         let mut node_area = vec![0.0f64; nw * nw];
         for i in 0..n {
             node_area[node_of[i]] += areas[i];
@@ -6812,26 +7972,40 @@ mod lem {
             let mut out = Vec::new();
             for j in (iv - reach)..=(iv + reach) {
                 for ii in (iu - reach)..=(iu + reach) {
-                    if ii >= 0 && j >= 0 && ii < nw as i64 && j < nw as i64 && held[j as usize * nw + ii as usize] {
+                    if ii >= 0
+                        && j >= 0
+                        && ii < nw as i64
+                        && j < nw as i64
+                        && held[j as usize * nw + ii as usize]
+                    {
                         out.push(j as usize * nw + ii as usize);
                     }
                 }
             }
             out
         };
-        let norm: Vec<f64> = (0..n).map(|i| near(i).iter().map(|&k| weight(i, k)).sum()).collect();
+        let norm: Vec<f64> = (0..n)
+            .map(|i| near(i).iter().map(|&k| weight(i, k)).sum())
+            .collect();
         let v_at = |i: usize, vn: &[f64]| -> f64 {
             if norm[i] <= 0.0 {
                 return 0.0;
             }
-            near(i).iter().map(|&k| weight(i, k) * vn[row_of[k]]).sum::<f64>() / norm[i] * rock(sites[i].x, sites[i].y).powf(-1.0 / JOINT_N)
+            near(i)
+                .iter()
+                .map(|&k| weight(i, k) * vn[row_of[k]])
+                .sum::<f64>()
+                / norm[i]
+                * rock(sites[i].x, sites[i].y).powf(-1.0 / JOINT_N)
         };
         let means = |hh: &[f64]| -> Vec<f64> {
             let mut sum = vec![0.0f64; nw * nw];
             for i in 0..n {
                 sum[node_of[i]] += hh[i] * areas[i];
             }
-            hn.iter().map(|&k| sum[k] / node_area[k].max(f64::MIN_POSITIVE)).collect()
+            hn.iter()
+                .map(|&k| sum[k] / node_area[k].max(f64::MIN_POSITIVE))
+                .collect()
         };
         let mut vn = vec![0.0f64; nh];
         let mut warm = vec![false; nh];
@@ -6849,10 +8023,18 @@ mod lem {
             }
             // The coefficient of `v` on each link: `Q^(−1/n)·L` (zero at an outlet).
             let coef: Vec<f64> = (0..n)
-                .map(|i| if outlet[i] || recv[i] == usize::MAX { 0.0 } else { q[i].max(f64::MIN_POSITIVE).powf(-1.0 / JOINT_N) * len[i] })
+                .map(|i| {
+                    if outlet[i] || recv[i] == usize::MAX {
+                        0.0
+                    } else {
+                        q[i].max(f64::MIN_POSITIVE).powf(-1.0 / JOINT_N) * len[i]
+                    }
+                })
                 .collect();
             // The active set from the heights the last solve left (the first tree: none).
-            let mut active: Vec<bool> = (0..n).map(|i| coef[i] > 0.0 && (h[i] - h[recv[i]]) >= sc * len[i] * (1.0 - 1.0e-9)).collect();
+            let mut active: Vec<bool> = (0..n)
+                .map(|i| coef[i] > 0.0 && (h[i] - h[recv[i]]) >= sc * len[i] * (1.0 - 1.0e-9))
+                .collect();
             if trees == 1 {
                 active.iter_mut().for_each(|a| *a = false);
             }
@@ -6860,7 +8042,11 @@ mod lem {
                 // `c`: the outlets' bases and the threshold links alone.
                 let mut hc = vec![0.0f64; n];
                 for &i in &order {
-                    hc[i] = if coef[i] == 0.0 { base[i] } else { hc[recv[i]] + if active[i] { sc * len[i] } else { 0.0 } };
+                    hc[i] = if coef[i] == 0.0 {
+                        base[i]
+                    } else {
+                        hc[recv[i]] + if active[i] { sc * len[i] } else { 0.0 }
+                    };
                 }
                 let c = means(&hc);
                 // `G`: one column a held node, its `V` alone on the free links.
@@ -6876,8 +8062,12 @@ mod lem {
                         let mut add = 0.0;
                         if !active[i] && norm[i] > 0.0 {
                             let (u, v) = (sites[i].x / node_m - 0.5, sites[i].y / node_m - 0.5);
-                            if (u - ku).abs() <= reach as f64 + 0.5 && (v - kv).abs() <= reach as f64 + 0.5 {
-                                add = weight(i, km) / norm[i] * coef[i] * rock(sites[i].x, sites[i].y).powf(-1.0 / JOINT_N);
+                            if (u - ku).abs() <= reach as f64 + 0.5
+                                && (v - kv).abs() <= reach as f64 + 0.5
+                            {
+                                add = weight(i, km) / norm[i]
+                                    * coef[i]
+                                    * rock(sites[i].x, sites[i].y).powf(-1.0 / JOINT_N);
                             }
                         }
                         col[i] = col[recv[i]] + add;
@@ -6893,7 +8083,9 @@ mod lem {
                     warm[r] = vn[r] > 0.0;
                 }
                 // The threshold links again from the solved `V`.
-                let next: Vec<bool> = (0..n).map(|i| coef[i] > 0.0 && v_at(i, &vn) * coef[i] > sc * len[i]).collect();
+                let next: Vec<bool> = (0..n)
+                    .map(|i| coef[i] > 0.0 && v_at(i, &vn) * coef[i] > sc * len[i])
+                    .collect();
                 if next == active {
                     break;
                 }
@@ -6901,11 +8093,20 @@ mod lem {
             }
             // The heights on this tree.
             for &i in &order {
-                h[i] = if coef[i] == 0.0 { base[i] } else { h[recv[i]] + (v_at(i, &vn) * coef[i]).min(sc * len[i]) };
+                h[i] = if coef[i] == 0.0 {
+                    base[i]
+                } else {
+                    h[recv[i]] + (v_at(i, &vn) * coef[i]).min(sc * len[i])
+                };
             }
             let mm = means(h);
-            worst = (0..nh).map(|r| (mm[r] - node_z[hn[r]]).abs()).fold(0.0f64, f64::max);
-            on_threshold = (0..n).filter(|&i| coef[i] > 0.0 && v_at(i, &vn) * coef[i] >= sc * len[i]).count() as f64 / n as f64;
+            worst = (0..nh)
+                .map(|r| (mm[r] - node_z[hn[r]]).abs())
+                .fold(0.0f64, f64::max);
+            on_threshold = (0..n)
+                .filter(|&i| coef[i] > 0.0 && v_at(i, &vn) * coef[i] >= sc * len[i])
+                .count() as f64
+                / n as f64;
             if recv == last_recv {
                 break;
             }
@@ -6914,7 +8115,10 @@ mod lem {
             std::hash::Hash::hash(&recv, &mut hasher);
             let key = std::hash::Hasher::finish(&hasher);
             if seen.iter().any(|(k2, _, _)| *k2 == key) {
-                if let Some((_, w2, h2)) = seen.iter().filter(|(k2, _, _)| *k2 == key).min_by(|a, b| a.1.total_cmp(&b.1))
+                if let Some((_, w2, h2)) = seen
+                    .iter()
+                    .filter(|(k2, _, _)| *k2 == key)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
                     && *w2 < worst
                 {
                     h.copy_from_slice(h2);
@@ -6946,7 +8150,17 @@ mod lem {
         spacing: f64,
     ) -> DomainSolve {
         let start = COARSE_START.load(std::sync::atomic::Ordering::Relaxed);
-        solve_l1_inner(node_z, node_rain_m, nw, node_m, node_recv, node_q, (x0, y0, wm, hm), spacing, start)
+        solve_l1_inner(
+            node_z,
+            node_rain_m,
+            nw,
+            node_m,
+            node_recv,
+            node_q,
+            (x0, y0, wm, hm),
+            spacing,
+            start,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6965,9 +8179,23 @@ mod lem {
         // fewer), then this level starts from their rises and heights.
         let coarse = if coarse_start {
             let t = Instant::now();
-            let c = solve_l1_inner(node_z, node_rain_m, nw, node_m, node_recv, node_q, (x0, y0, wm, hm), 4.0 * spacing, false);
+            let c = solve_l1_inner(
+                node_z,
+                node_rain_m,
+                nw,
+                node_m,
+                node_recv,
+                node_q,
+                (x0, y0, wm, hm),
+                4.0 * spacing,
+                false,
+            );
             let u = LAST_U.with(|l| l.borrow().clone());
-            println!("  the coarse start at {:.0} m: {:.1} s", 4.0 * spacing, t.elapsed().as_secs_f64());
+            println!(
+                "  the coarse start at {:.0} m: {:.1} s",
+                4.0 * spacing,
+                t.elapsed().as_secs_f64()
+            );
             Some((c, u))
         } else {
             None
@@ -6975,25 +8203,45 @@ mod lem {
         let started = Instant::now();
         let inside = |x: f64, y: f64| x > x0 && y > y0 && x < x0 + wm && y < y0 + hm;
         let (cx0, cy0) = ((x0 / spacing).floor() as i64, (y0 / spacing).floor() as i64);
-        let (cx1, cy1) = (((x0 + wm) / spacing).ceil() as i64, ((y0 + hm) / spacing).ceil() as i64);
+        let (cx1, cy1) = (
+            ((x0 + wm) / spacing).ceil() as i64,
+            ((y0 + hm) / spacing).ceil() as i64,
+        );
         let model = match POINT_SET.load(std::sync::atomic::Ordering::Relaxed) {
             3 => {
                 // THE REFERENCE (B80's set, not tile-safe): random sites relaxed once by Lloyd, as many as the cells.
-                let num = (((cx1 - cx0) * (cy1 - cy0)) as f64 * (wm * hm) / (((cx1 - cx0) * (cy1 - cy0)) as f64 * spacing * spacing)) as usize;
-                TerrainModel2DBulider::from_random_sites(num, Site2D { x: x0, y: y0 }, Site2D { x: x0 + wm, y: y0 + hm })
-                    .relaxate_sites(1)
-                    .expect("the sites relax")
-                    .build()
-                    .expect("the domain's graph builds")
+                let num = (((cx1 - cx0) * (cy1 - cy0)) as f64 * (wm * hm)
+                    / (((cx1 - cx0) * (cy1 - cy0)) as f64 * spacing * spacing))
+                    as usize;
+                TerrainModel2DBulider::from_random_sites(
+                    num,
+                    Site2D { x: x0, y: y0 },
+                    Site2D {
+                        x: x0 + wm,
+                        y: y0 + hm,
+                    },
+                )
+                .relaxate_sites(1)
+                .expect("the sites relax")
+                .build()
+                .expect("the domain's graph builds")
             }
             set => {
                 let mut pts = Vec::new();
                 for cy in cy0..cy1 {
                     for cx in cx0..cx1 {
                         match set {
-                            2 => pts.extend(matern_points(cx, cy, spacing).into_iter().filter(|p| inside(p.x, p.y))),
+                            2 => pts.extend(
+                                matern_points(cx, cy, spacing)
+                                    .into_iter()
+                                    .filter(|p| inside(p.x, p.y)),
+                            ),
                             _ => {
-                                let p = if set == 1 { cell_point_full(cx, cy, spacing) } else { cell_point(cx, cy, spacing) };
+                                let p = if set == 1 {
+                                    cell_point_full(cx, cy, spacing)
+                                } else {
+                                    cell_point(cx, cy, spacing)
+                                };
                                 if inside(p.x, p.y) {
                                     pts.push(p);
                                 }
@@ -7003,28 +8251,53 @@ mod lem {
                 }
                 TerrainModel2DBulider::default()
                     .set_sites(pts)
-                    .set_bounding_box(Some(Site2D { x: x0, y: y0 }), Some(Site2D { x: x0 + wm, y: y0 + hm }))
+                    .set_bounding_box(
+                        Some(Site2D { x: x0, y: y0 }),
+                        Some(Site2D {
+                            x: x0 + wm,
+                            y: y0 + hm,
+                        }),
+                    )
                     .build()
                     .expect("the domain's graph builds")
             }
         };
-        let (sites, areas, graph) = (model.sites().to_vec(), model.areas().to_vec(), model.graph());
+        let (sites, areas, graph) = (
+            model.sites().to_vec(),
+            model.areas().to_vec(),
+            model.graph(),
+        );
         let n = sites.len();
         let warped: Vec<(f64, f64)> = sites.iter().map(|s| warp(s.x, s.y, node_m)).collect();
         if TRACE.load(std::sync::atomic::Ordering::Relaxed) {
-            let d: Vec<f64> = sites.iter().zip(&warped).map(|(s, &(x, y))| ((x - s.x).powi(2) + (y - s.y).powi(2)).sqrt() / node_m).collect();
+            let d: Vec<f64> = sites
+                .iter()
+                .zip(&warped)
+                .map(|(s, &(x, y))| ((x - s.x).powi(2) + (y - s.y).powi(2)).sqrt() / node_m)
+                .collect();
             let mean = d.iter().sum::<f64>() / d.len().max(1) as f64;
             let max = d.iter().copied().fold(0.0f64, f64::max);
             println!("      the displacement: mean {mean:.3} node, max {max:.3} node");
         }
-        let mut base: Vec<f64> = warped.iter().map(|&(x, y)| smooth(node_z, nw, node_m, x, y)).collect();
-        let mut water: Vec<f64> = warped.iter().zip(&areas).map(|(&(x, y), a)| linear(node_rain_m, nw, node_m, x, y) * a).collect();
+        let mut base: Vec<f64> = warped
+            .iter()
+            .map(|&(x, y)| smooth(node_z, nw, node_m, x, y))
+            .collect();
+        let mut water: Vec<f64> = warped
+            .iter()
+            .zip(&areas)
+            .map(|(&(x, y), a)| linear(node_rain_m, nw, node_m, x, y) * a)
+            .collect();
         let mut outlet: Vec<bool> = base.iter().map(|&b| b <= 0.0).collect();
         let bucket = 4.0 * spacing;
-        let (bw, bh) = ((wm / bucket).ceil() as usize + 1, (hm / bucket).ceil() as usize + 1);
+        let (bw, bh) = (
+            (wm / bucket).ceil() as usize + 1,
+            (hm / bucket).ceil() as usize + 1,
+        );
         let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); bw * bh];
         let cell_of = |x: f64, y: f64| {
-            (((x - x0) / bucket).max(0.0) as usize).min(bw - 1) + bw * (((y - y0) / bucket).max(0.0) as usize).min(bh - 1)
+            (((x - x0) / bucket).max(0.0) as usize).min(bw - 1)
+                + bw * (((y - y0) / bucket).max(0.0) as usize).min(bh - 1)
         };
         for (i, st) in sites.iter().enumerate() {
             buckets[cell_of(st.x, st.y)].push(i);
@@ -7045,7 +8318,12 @@ mod lem {
             }
             best.1
         };
-        let centre = |k: usize| (((k % nw) as f64 + 0.5) * node_m, ((k / nw) as f64 + 0.5) * node_m);
+        let centre = |k: usize| {
+            (
+                ((k % nw) as f64 + 0.5) * node_m,
+                ((k / nw) as f64 + 0.5) * node_m,
+            )
+        };
         let (mut outs, mut ins) = (0usize, 0usize);
         for k in 0..nw * nw {
             let r = node_recv[k];
@@ -7057,7 +8335,11 @@ mod lem {
             if a_in == b_in {
                 continue;
             }
-            let ((px, py), (qx, qy)) = if a_in { ((ax, ay), (bx, by)) } else { ((bx, by), (ax, ay)) };
+            let ((px, py), (qx, qy)) = if a_in {
+                ((ax, ay), (bx, by))
+            } else {
+                ((bx, by), (ax, ay))
+            };
             let (mut lo, mut hi) = (0.0f64, 1.0f64);
             for _ in 0..40 {
                 let m = 0.5 * (lo + hi);
@@ -7092,8 +8374,16 @@ mod lem {
             }
         }
         if outs == 0 {
-            let rim = |s: &Site2D| s.x < x0 + spacing || s.y < y0 + spacing || s.x > x0 + wm - spacing || s.y > y0 + hm - spacing;
-            if let Some(k) = (0..n).filter(|&k| rim(&sites[k])).min_by(|&a, &b| base[a].total_cmp(&base[b]).then(a.cmp(&b))) {
+            let rim = |s: &Site2D| {
+                s.x < x0 + spacing
+                    || s.y < y0 + spacing
+                    || s.x > x0 + wm - spacing
+                    || s.y > y0 + hm - spacing
+            };
+            if let Some(k) = (0..n)
+                .filter(|&k| rim(&sites[k]))
+                .min_by(|&a, &b| base[a].total_cmp(&base[b]).then(a.cmp(&b)))
+            {
                 outlet[k] = true;
             }
         }
@@ -7101,7 +8391,11 @@ mod lem {
         // The held nodes: those inside the domain, less its OUTER ring when `--l1-hold-inner` (that ring is scaffolding — the
         // cut keeps at most one node of buffer beyond the tile's edge — and against the rim its rivers may find no lawful
         // way down to its row).
-        let inner = if HOLD_INNER.load(std::sync::atomic::Ordering::Relaxed) { node_m } else { 0.0 };
+        let inner = if HOLD_INNER.load(std::sync::atomic::Ordering::Relaxed) {
+            node_m
+        } else {
+            0.0
+        };
         let held: Vec<bool> = (0..nw * nw)
             .map(|k| {
                 let (nx0, ny0) = ((k % nw) as f64 * node_m, (k / nw) as f64 * node_m);
@@ -7112,8 +8406,13 @@ mod lem {
                     && node_z[k] > 0.0
             })
             .collect();
-        let node_of = |s: &Site2D| -> usize { ((s.y / node_m) as usize).min(nw - 1) * nw + ((s.x / node_m) as usize).min(nw - 1) };
-        let mut u_node: Vec<f64> = node_z.iter().map(|&z| if z > 0.0 { 1.0e-3 } else { 1.0e-9 }).collect();
+        let node_of = |s: &Site2D| -> usize {
+            ((s.y / node_m) as usize).min(nw - 1) * nw + ((s.x / node_m) as usize).min(nw - 1)
+        };
+        let mut u_node: Vec<f64> = node_z
+            .iter()
+            .map(|&z| if z > 0.0 { 1.0e-3 } else { 1.0e-9 })
+            .collect();
         let mut h = base.clone();
         // ★ THE START CARRIES THE COARSER LEVEL'S DRAINAGE (`--l1-carve`; B83's generic rule, here 128 m under 8 km): the
         // smooth 8 km field holds no river, and where an 8 km river crosses a node corner between two high nodes it puts
@@ -7122,7 +8421,12 @@ mod lem {
         // rising); only the first tree reads it — every height after comes from the law.
         if CARVE.load(std::sync::atomic::Ordering::Relaxed) && coarse.is_none() {
             let half = node_m / 3.0;
-            let centre = |k: usize| (((k % nw) as f64 + 0.5) * node_m, ((k / nw) as f64 + 0.5) * node_m);
+            let centre = |k: usize| {
+                (
+                    ((k % nw) as f64 + 0.5) * node_m,
+                    ((k / nw) as f64 + 0.5) * node_m,
+                )
+            };
             let mut carved = 0usize;
             for k in 0..nw * nw {
                 let r = node_recv[k];
@@ -7163,22 +8467,34 @@ mod lem {
                 }
                 // The coarse raster read bilinearly at the point (cells centred).
                 let (fx, fy) = ((st.x - c.x0) / c.cell - 0.5, (st.y - c.y0) / c.cell - 0.5);
-                let (ix, iy) = (fx.floor().clamp(0.0, (c.w - 2) as f64) as usize, fy.floor().clamp(0.0, (c.h - 2) as f64) as usize);
-                let (tx, ty) = ((fx - ix as f64).clamp(0.0, 1.0), (fy - iy as f64).clamp(0.0, 1.0));
+                let (ix, iy) = (
+                    fx.floor().clamp(0.0, (c.w - 2) as f64) as usize,
+                    fy.floor().clamp(0.0, (c.h - 2) as f64) as usize,
+                );
+                let (tx, ty) = (
+                    (fx - ix as f64).clamp(0.0, 1.0),
+                    (fy - iy as f64).clamp(0.0, 1.0),
+                );
                 let at = |x: usize, y: usize| c.raster[y * c.w + x];
-                h[i] = (at(ix, iy) * (1.0 - tx) + at(ix + 1, iy) * tx) * (1.0 - ty) + (at(ix, iy + 1) * (1.0 - tx) + at(ix + 1, iy + 1) * tx) * ty;
+                h[i] = (at(ix, iy) * (1.0 - tx) + at(ix + 1, iy) * tx) * (1.0 - ty)
+                    + (at(ix, iy + 1) * (1.0 - tx) + at(ix + 1, iy + 1) * tx) * ty;
             }
         }
         let mut worst = 0.0f64;
         let mut worst_in = 0.0f64;
         let ring = |k: usize| {
             let (nx0, ny0) = ((k % nw) as f64 * node_m, (k / nw) as f64 * node_m);
-            nx0 >= x0 + node_m - 1.0 && ny0 >= y0 + node_m - 1.0 && nx0 + node_m <= x0 + wm - node_m + 1.0 && ny0 + node_m <= y0 + hm - node_m + 1.0
+            nx0 >= x0 + node_m - 1.0
+                && ny0 >= y0 + node_m - 1.0
+                && nx0 + node_m <= x0 + wm - node_m + 1.0
+                && ny0 + node_m <= y0 + hm - node_m + 1.0
         };
         let t_graph = started.elapsed().as_secs_f64();
         let t_law = Instant::now();
         if L1_LINEAR.load(std::sync::atomic::Ordering::Relaxed) {
-            let (trees, w_lin, share) = linear_hold(graph, &sites, &areas, &outlet, &base, &water, node_z, &held, nw, node_m, &mut h);
+            let (trees, w_lin, share) = linear_hold(
+                graph, &sites, &areas, &outlet, &base, &water, node_z, &held, nw, node_m, &mut h,
+            );
             println!(
                 "  the linear hold: {trees} trees, the worst node {w_lin:.1} m, {:.1} % of the links on the threshold {:.2} ({:.1} s; the graph {t_graph:.1} s)",
                 100.0 * share,
@@ -7195,7 +8511,10 @@ mod lem {
             while passes < 400 && moved > 0.25 {
                 passes += 1;
                 let ln_u: Vec<f64> = u_node.iter().map(|u| u.ln()).collect();
-                let u: Vec<f64> = sites.iter().map(|s| radial(&ln_u, nw, node_m, s.x, s.y).exp() / rock(s.x, s.y)).collect();
+                let u: Vec<f64> = sites
+                    .iter()
+                    .map(|s| radial(&ln_u, nw, node_m, s.x, s.y).exp() / rock(s.x, s.y))
+                    .collect();
                 let _ = steady(graph, &outlet, &base, &water, &u, &mut h, 1);
                 let (mut sum, mut area) = (vec![0.0f64; nw * nw], vec![0.0f64; nw * nw]);
                 for (i, st) in sites.iter().enumerate() {
@@ -7214,12 +8533,24 @@ mod lem {
                     if ring(k) {
                         worst_in = worst_in.max((mean - node_z[k]).abs());
                     }
-                    u_node[k] *= if mean > 1.0 { (node_z[k] / mean).clamp(0.25, 4.0).powf(JOINT_N) } else { 4.0f64.powf(JOINT_N) };
+                    u_node[k] *= if mean > 1.0 {
+                        (node_z[k] / mean).clamp(0.25, 4.0).powf(JOINT_N)
+                    } else {
+                        4.0f64.powf(JOINT_N)
+                    };
                 }
-                moved = h.iter().zip(&prev).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+                moved = h
+                    .iter()
+                    .zip(&prev)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f64, f64::max);
                 prev.copy_from_slice(&h);
-                if TRACE.load(std::sync::atomic::Ordering::Relaxed) && (passes <= 10 || passes.is_multiple_of(10)) {
-                    println!("      pass {passes}: the worst node {worst:.0} m (inside the ring {worst_in:.0} m), heights moved up to {moved:.1} m");
+                if TRACE.load(std::sync::atomic::Ordering::Relaxed)
+                    && (passes <= 10 || passes.is_multiple_of(10))
+                {
+                    println!(
+                        "      pass {passes}: the worst node {worst:.0} m (inside the ring {worst_in:.0} m), heights moved up to {moved:.1} m"
+                    );
                 }
             }
             println!(
@@ -7228,7 +8559,9 @@ mod lem {
             );
         }
         let mut pass_log: Vec<usize> = Vec::new();
-        let rounds = if L1_LINEAR.load(std::sync::atomic::Ordering::Relaxed) || JOINT_LOOP.load(std::sync::atomic::Ordering::Relaxed) {
+        let rounds = if L1_LINEAR.load(std::sync::atomic::Ordering::Relaxed)
+            || JOINT_LOOP.load(std::sync::atomic::Ordering::Relaxed)
+        {
             0
         } else if coarse.is_some() {
             L1_ROUNDS.load(std::sync::atomic::Ordering::Relaxed)
@@ -7237,8 +8570,11 @@ mod lem {
         };
         for _ in 0..rounds {
             let ln_u: Vec<f64> = u_node.iter().map(|u| u.ln()).collect();
-            let u: Vec<f64> =
-                sites.iter().zip(&warped).map(|(s, &(x, y))| radial(&ln_u, nw, node_m, x, y).exp() / rock(s.x, s.y)).collect();
+            let u: Vec<f64> = sites
+                .iter()
+                .zip(&warped)
+                .map(|(s, &(x, y))| radial(&ln_u, nw, node_m, x, y).exp() / rock(s.x, s.y))
+                .collect();
             let node_means = |h: &[f64]| -> (Vec<f64>, Vec<f64>) {
                 let (mut sum, mut area) = (vec![0.0f64; nw * nw], vec![0.0f64; nw * nw]);
                 for (i, st) in sites.iter().enumerate() {
@@ -7265,7 +8601,12 @@ mod lem {
                     let tree_hash = LAST_TREE_HASH.load(std::sync::atomic::Ordering::Relaxed);
                     if let Some(at) = seen.iter().position(|&x| x == tree_hash) {
                         if TRACE.load(std::sync::atomic::Ordering::Relaxed) {
-                            println!("      round {}: pass {passes} repeats the tree of pass {} (a cycle of {}), the means moving {change:.0} m", pass_log.len() + 1, at + 1, passes - 1 - at);
+                            println!(
+                                "      round {}: pass {passes} repeats the tree of pass {} (a cycle of {}), the means moving {change:.0} m",
+                                pass_log.len() + 1,
+                                at + 1,
+                                passes - 1 - at
+                            );
                         }
                         if CYCLE_STOP.load(std::sync::atomic::Ordering::Relaxed) {
                             break;
@@ -7301,11 +8642,18 @@ mod lem {
                         u_node[k] *= (node_z[k] / mean).powf(0.5 * JOINT_N);
                     }
                 } else {
-                    u_node[k] *= if mean > 1.0 { (node_z[k] / mean).clamp(0.25, 4.0).powf(JOINT_N) } else { 4.0f64.powf(JOINT_N) };
+                    u_node[k] *= if mean > 1.0 {
+                        (node_z[k] / mean).clamp(0.25, 4.0).powf(JOINT_N)
+                    } else {
+                        4.0f64.powf(JOINT_N)
+                    };
                 }
             }
             if TRACE.load(std::sync::atomic::Ordering::Relaxed) {
-                let mut r: Vec<f64> = (0..nw * nw).filter(|&k| held[k] && area[k] > 0.0).map(|k| (sum[k] / area[k] - node_z[k]).abs()).collect();
+                let mut r: Vec<f64> = (0..nw * nw)
+                    .filter(|&k| held[k] && area[k] > 0.0)
+                    .map(|k| (sum[k] / area[k] - node_z[k]).abs())
+                    .collect();
                 r.sort_by(f64::total_cmp);
                 println!(
                     "      round {}: {} passes; the residuals' median {:.0} m, 90th {:.0} m, worst {:.0} m ({:.1} s)",
@@ -7320,7 +8668,9 @@ mod lem {
         }
         LAST_U.with(|l| l.borrow_mut().clone_from(&u_node));
         if TRACE.load(std::sync::atomic::Ordering::Relaxed) {
-            println!("      the rise ×1e-3 and the target (m) by node, region columns 2..9, rows 6..12:");
+            println!(
+                "      the rise ×1e-3 and the target (m) by node, region columns 2..9, rows 6..12:"
+            );
             for j in 6..12usize {
                 let mut row = String::new();
                 for i in 2..9usize {
@@ -7333,7 +8683,9 @@ mod lem {
         {
             let mut acc = 0u64;
             for (i, v) in h.iter().enumerate() {
-                acc = acc.wrapping_mul(0x100000001B3).wrapping_add(v.to_bits() ^ i as u64);
+                acc = acc
+                    .wrapping_mul(0x100000001B3)
+                    .wrapping_add(v.to_bits() ^ i as u64);
             }
             println!(
                 "  the heights' digest after the law: {acc:016x}; the fast tree {} times, the flood for a pit {} times, for a point cut off {} times",
@@ -7343,17 +8695,27 @@ mod lem {
             );
         }
         {
-            let (mut sum, mut area, mut low) = (vec![0.0f64; nw * nw], vec![0.0f64; nw * nw], vec![f64::MAX; nw * nw]);
+            let (mut sum, mut area, mut low) = (
+                vec![0.0f64; nw * nw],
+                vec![0.0f64; nw * nw],
+                vec![f64::MAX; nw * nw],
+            );
             for (i, st) in sites.iter().enumerate() {
                 let k = node_of(st);
                 sum[k] += h[i] * areas[i];
                 area[k] += areas[i];
                 low[k] = low[k].min(h[i]);
             }
-            let floor_bound = (0..nw * nw).filter(|&k| held[k] && area[k] > 0.0 && low[k] > node_z[k]).count();
+            let floor_bound = (0..nw * nw)
+                .filter(|&k| held[k] && area[k] > 0.0 && low[k] > node_z[k])
+                .count();
             let held_n = (0..nw * nw).filter(|&k| held[k]).count();
-            let pits_law = (0..n).filter(|&i| !outlet[i] && graph.neighbors_of(i).iter().all(|&(m, _)| h[m] > h[i])).count();
-            println!("  after the law: {floor_bound} of {held_n} held nodes have their lowest point over their row; {pits_law} pits");
+            let pits_law = (0..n)
+                .filter(|&i| !outlet[i] && graph.neighbors_of(i).iter().all(|&(m, _)| h[m] > h[i]))
+                .count();
+            println!(
+                "  after the law: {floor_bound} of {held_n} held nodes have their lowest point over their row; {pits_law} pits"
+            );
             if TRACE.load(std::sync::atomic::Ordering::Relaxed) {
                 FLOOR_BOUND.with(|fb| {
                     let water = fb.borrow();
@@ -7373,7 +8735,9 @@ mod lem {
             }
         }
         if !pass_log.is_empty() {
-            let get = |a: &std::sync::atomic::AtomicU64| a.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1.0e9;
+            let get = |a: &std::sync::atomic::AtomicU64| {
+                a.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1.0e9
+            };
             println!(
                 "  the passes' parts: the tree {:.2} s (the scan {:.2}, the donors {:.2}, the order {:.2}), the water {:.2} s, the heights {:.2} s",
                 get(&T_TREE),
@@ -7395,7 +8759,15 @@ mod lem {
         if SLOPE_HOLD.load(std::sync::atomic::Ordering::Relaxed) {
             let t_sh = Instant::now();
             let (order, recv, len) = tree_fast(&h, &outlet, graph);
-            let slope0: Vec<f64> = (0..n).map(|i| if recv[i] == usize::MAX || outlet[i] { 0.0 } else { (h[i] - h[recv[i]]) / len[i] }).collect();
+            let slope0: Vec<f64> = (0..n)
+                .map(|i| {
+                    if recv[i] == usize::MAX || outlet[i] {
+                        0.0
+                    } else {
+                        (h[i] - h[recv[i]]) / len[i]
+                    }
+                })
+                .collect();
             let inside_node: Vec<bool> = (0..nw * nw)
                 .map(|k| {
                     let (nx0, ny0) = ((k % nw) as f64 * node_m, (k / nw) as f64 * node_m);
@@ -7405,20 +8777,33 @@ mod lem {
                         && ny0 + node_m <= y0 + hm - inner + 1.0
                 })
                 .collect();
-            let (k_start, k_cells, k_w) = hold_kernel(n, |i| (sites[i].x / node_m - 0.5, sites[i].y / node_m - 0.5), nw, nw, &inside_node);
+            let (k_start, k_cells, k_w) = hold_kernel(
+                n,
+                |i| (sites[i].x / node_m - 0.5, sites[i].y / node_m - 0.5),
+                nw,
+                nw,
+                &inside_node,
+            );
             let mut ln_g = vec![0.0f64; nw * nw];
             let (mut iters, mut worst_sh, mut floor_bound) = (0usize, f64::MAX, 0usize);
-            while iters < SLOPE_SWEEPS.load(std::sync::atomic::Ordering::Relaxed) && worst_sh > 0.25 {
+            while iters < SLOPE_SWEEPS.load(std::sync::atomic::Ordering::Relaxed) && worst_sh > 0.25
+            {
                 iters += 1;
                 for &i in &order {
                     if recv[i] == usize::MAX || outlet[i] {
                         h[i] = base[i];
                         continue;
                     }
-                    let lg: f64 = (k_start[i]..k_start[i + 1]).map(|t| f64::from(k_w[t]) * ln_g[k_cells[t] as usize]).sum();
+                    let lg: f64 = (k_start[i]..k_start[i + 1])
+                        .map(|t| f64::from(k_w[t]) * ln_g[k_cells[t] as usize])
+                        .sum();
                     h[i] = h[recv[i]] + slope0[i] * lg.exp() * len[i];
                 }
-                let (mut sum, mut area, mut low) = (vec![0.0f64; nw * nw], vec![0.0f64; nw * nw], vec![f64::MAX; nw * nw]);
+                let (mut sum, mut area, mut low) = (
+                    vec![0.0f64; nw * nw],
+                    vec![0.0f64; nw * nw],
+                    vec![f64::MAX; nw * nw],
+                );
                 for (i, st) in sites.iter().enumerate() {
                     let k = node_of(st);
                     sum[k] += h[i] * areas[i];
@@ -7461,7 +8846,13 @@ mod lem {
                         && ny0 + node_m <= y0 + hm - inner + 1.0
                 })
                 .collect();
-            let (k_start, k_cells, k_w) = hold_kernel(n, |i| (sites[i].x / node_m - 0.5, sites[i].y / node_m - 0.5), nw, nw, &inside_node);
+            let (k_start, k_cells, k_w) = hold_kernel(
+                n,
+                |i| (sites[i].x / node_m - 0.5, sites[i].y / node_m - 0.5),
+                nw,
+                nw,
+                &inside_node,
+            );
             let (mut rounds, mut worst_h) = (0usize, f64::MAX);
             // ★ THE FILL LOOP (`--l1-fill`; the design's G-PIT): after the hold, every pit is filled to its spill height by
             // a priority flood from the outlets (a flat floor falling 1 mm a link, as a valley fills with sediment or
@@ -7476,11 +8867,20 @@ mod lem {
                         sum[k] += h[i] * areas[i];
                         area[k] += areas[i];
                     }
-                    let r: Vec<f64> =
-                        (0..nw * nw).map(|k| if inside_node[k] && area[k] > 0.0 { sum[k] / area[k] - node_z[k] } else { 0.0 }).collect();
+                    let r: Vec<f64> = (0..nw * nw)
+                        .map(|k| {
+                            if inside_node[k] && area[k] > 0.0 {
+                                sum[k] / area[k] - node_z[k]
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
                     worst_h = r.iter().fold(0.0f64, |m, v| m.max(v.abs()));
                     for (i, hi) in h.iter_mut().enumerate() {
-                        let acc: f64 = (k_start[i]..k_start[i + 1]).map(|t| f64::from(k_w[t]) * r[k_cells[t] as usize]).sum();
+                        let acc: f64 = (k_start[i]..k_start[i + 1])
+                            .map(|t| f64::from(k_w[t]) * r[k_cells[t] as usize])
+                            .sum();
                         *hi -= acc;
                     }
                 }
@@ -7535,9 +8935,19 @@ mod lem {
             }
             // What the hold costs: the points steeper than the 35° threshold allows, and the pits it opens.
             let (_, recv, len) = tree(&h, &outlet, graph);
-            let over = (0..n).filter(|&i| recv[i] != usize::MAX && len[i] > 0.0 && (h[i] - h[recv[i]]) / len[i] > 0.8391).count();
-            let steep = (0..n).filter(|&i| recv[i] != usize::MAX && len[i] > 0.0 && (h[i] - h[recv[i]]) / len[i] > 1.0).count();
-            let pits = (0..n).filter(|&i| !outlet[i] && graph.neighbors_of(i).iter().all(|&(m, _)| h[m] > h[i])).count();
+            let over = (0..n)
+                .filter(|&i| {
+                    recv[i] != usize::MAX && len[i] > 0.0 && (h[i] - h[recv[i]]) / len[i] > 0.8391
+                })
+                .count();
+            let steep = (0..n)
+                .filter(|&i| {
+                    recv[i] != usize::MAX && len[i] > 0.0 && (h[i] - h[recv[i]]) / len[i] > 1.0
+                })
+                .count();
+            let pits = (0..n)
+                .filter(|&i| !outlet[i] && graph.neighbors_of(i).iter().all(|&(m, _)| h[m] > h[i]))
+                .count();
             // The hollows' depths: each point's fill to its spill by a priority flood from the outlets.
             let depth = {
                 let key = |z: f64| -> i64 { (z * 4_096.0).round() as i64 };
@@ -7582,13 +8992,21 @@ mod lem {
         {
             let tan = threshold();
             let (_, recv, len) = tree(&h, &outlet, graph);
-            let (mut sum, mut area, mut steep, mut cnt) = (vec![0.0f64; nw * nw], vec![0.0f64; nw * nw], vec![0usize; nw * nw], vec![0usize; nw * nw]);
+            let (mut sum, mut area, mut steep, mut cnt) = (
+                vec![0.0f64; nw * nw],
+                vec![0.0f64; nw * nw],
+                vec![0usize; nw * nw],
+                vec![0usize; nw * nw],
+            );
             for (i, st) in sites.iter().enumerate() {
                 let k = node_of(st);
                 sum[k] += h[i] * areas[i];
                 area[k] += areas[i];
                 cnt[k] += 1;
-                if recv[i] != usize::MAX && len[i] > 0.0 && (h[i] - h[recv[i]]) / len[i] >= 0.999 * tan {
+                if recv[i] != usize::MAX
+                    && len[i] > 0.0
+                    && (h[i] - h[recv[i]]) / len[i] >= 0.999 * tan
+                {
                     steep[k] += 1;
                 }
             }
@@ -7612,7 +9030,8 @@ mod lem {
                         let (i, j) = (ki + di, kj + dj);
                         if i >= 0 && j >= 0 && i < nw as i64 && j < nw as i64 {
                             let m = (j as usize) * nw + i as usize;
-                            grid += &format!(" {:>5.0}/{:>5.0}", node_z[m], sum[m] / area[m].max(1.0));
+                            grid +=
+                                &format!(" {:>5.0}/{:>5.0}", node_z[m], sum[m] / area[m].max(1.0));
                         }
                     }
                     grid += " |";
@@ -7633,12 +9052,18 @@ mod lem {
                     c = recv[c];
                 }
                 println!("    around ({ki}, {kj}) target/mean:{grid}");
-                println!("      its lowest point {:.0} m; the water's path:{path}; the largest climb on it {climb:.0} m", low_pt[k].0);
+                println!(
+                    "      its lowest point {:.0} m; the water's path:{path}; the largest climb on it {climb:.0} m",
+                    low_pt[k].0
+                );
             }
             for &(_, k) in rows.iter().take(6) {
                 let lower = (0..nw * nw)
                     .filter(|&m| {
-                        let (di, dj) = ((m % nw) as i64 - (k % nw) as i64, (m / nw) as i64 - (k / nw) as i64);
+                        let (di, dj) = (
+                            (m % nw) as i64 - (k % nw) as i64,
+                            (m / nw) as i64 - (k / nw) as i64,
+                        );
                         di.abs() <= 1 && dj.abs() <= 1 && m != k && node_z[m] < node_z[k]
                     })
                     .count();
@@ -7650,15 +9075,26 @@ mod lem {
                     sum[k] / area[k],
                     100.0 * steep[k] as f64 / cnt[k].max(1) as f64,
                     u_node[k] / 1.0e-3,
-                    if node_recv[k] == usize::MAX { "none".to_string() } else { format!("({}, {})", node_recv[k] % nw, node_recv[k] / nw) }
+                    if node_recv[k] == usize::MAX {
+                        "none".to_string()
+                    } else {
+                        format!("({}, {})", node_recv[k] % nw, node_recv[k] / nw)
+                    }
                 );
             }
         }
-        let (w, hh) = ((wm / spacing).round() as usize, (hm / spacing).round() as usize);
+        let (w, hh) = (
+            (wm / spacing).round() as usize,
+            (hm / spacing).round() as usize,
+        );
         let t_raster = Instant::now();
         let terrain = model.create_terrain_from_result(&h);
         let raster = rasterise_rect(&terrain, x0, y0, w, hh, spacing);
-        println!("  the raster {:.1} s; the law before it {:.1} s", t_raster.elapsed().as_secs_f64(), t_law.elapsed().as_secs_f64());
+        println!(
+            "  the raster {:.1} s; the law before it {:.1} s",
+            t_raster.elapsed().as_secs_f64(),
+            t_law.elapsed().as_secs_f64()
+        );
         println!(
             "  the 128 m domain ({:.1}, {:.1}) km, {:.1} × {:.1} km: {n} points, {outs} macro rivers leave, {ins} enter, the worst node's mean off by {worst:.0} m, inside the rim ring {worst_in:.0} m ({:.1} s)",
             x0 / 1_000.0,
@@ -7667,7 +9103,14 @@ mod lem {
             hm / 1_000.0,
             started.elapsed().as_secs_f64()
         );
-        DomainSolve { x0, y0, w, h: hh, cell: spacing, raster }
+        DomainSolve {
+            x0,
+            y0,
+            w,
+            h: hh,
+            cell: spacing,
+            raster,
+        }
     }
 
     /// ★ ONE DOMAIN OF THE SEAM TEST (B81, G-SEAM): the rectangle `(x0, y0, width, height)` (metres from the region's
@@ -7691,7 +9134,10 @@ mod lem {
         let started = Instant::now();
         let inside = |s: &Site2D| s.x > x0 && s.y > y0 && s.x < x0 + wm && s.y < y0 + hm;
         let (cx0, cy0) = ((x0 / spacing).floor() as i64, (y0 / spacing).floor() as i64);
-        let (cx1, cy1) = (((x0 + wm) / spacing).ceil() as i64, ((y0 + hm) / spacing).ceil() as i64);
+        let (cx1, cy1) = (
+            ((x0 + wm) / spacing).ceil() as i64,
+            ((y0 + hm) / spacing).ceil() as i64,
+        );
         let mut pts = Vec::new();
         for cy in cy0..cy1 {
             for cx in cx0..cx1 {
@@ -7703,22 +9149,44 @@ mod lem {
         }
         let model = TerrainModel2DBulider::default()
             .set_sites(pts)
-            .set_bounding_box(Some(Site2D { x: x0, y: y0 }), Some(Site2D { x: x0 + wm, y: y0 + hm }))
+            .set_bounding_box(
+                Some(Site2D { x: x0, y: y0 }),
+                Some(Site2D {
+                    x: x0 + wm,
+                    y: y0 + hm,
+                }),
+            )
             .build()
             .expect("the domain's graph builds");
-        let (sites, areas, graph) = (model.sites().to_vec(), model.areas().to_vec(), model.graph());
+        let (sites, areas, graph) = (
+            model.sites().to_vec(),
+            model.areas().to_vec(),
+            model.graph(),
+        );
         let n = sites.len();
-        let coarse_at = |x: f64, y: f64| coarse.terrain.get_elevation(&Site2D { x, y }).unwrap_or(0.0);
+        let coarse_at = |x: f64, y: f64| {
+            coarse
+                .terrain
+                .get_elevation(&Site2D { x, y })
+                .unwrap_or(0.0)
+        };
         let mut base: Vec<f64> = sites.iter().map(|s| coarse_at(s.x, s.y)).collect();
-        let mut water: Vec<f64> =
-            sites.iter().zip(&areas).map(|(s, a)| linear(node_rain_m, nw, node_m, s.x, s.y) * a).collect();
+        let mut water: Vec<f64> = sites
+            .iter()
+            .zip(&areas)
+            .map(|(s, a)| linear(node_rain_m, nw, node_m, s.x, s.y) * a)
+            .collect();
         let mut outlet: Vec<bool> = base.iter().map(|&b| b <= 0.0).collect();
         // The nearest point by a bucket grid four spacings wide.
         let bucket = 4.0 * spacing;
-        let (bw, bh) = ((wm / bucket).ceil() as usize + 1, (hm / bucket).ceil() as usize + 1);
+        let (bw, bh) = (
+            (wm / bucket).ceil() as usize + 1,
+            (hm / bucket).ceil() as usize + 1,
+        );
         let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); bw * bh];
         let cell_of = |x: f64, y: f64| {
-            (((x - x0) / bucket).max(0.0) as usize).min(bw - 1) + bw * (((y - y0) / bucket).max(0.0) as usize).min(bh - 1)
+            (((x - x0) / bucket).max(0.0) as usize).min(bw - 1)
+                + bw * (((y - y0) / bucket).max(0.0) as usize).min(bh - 1)
         };
         for (i, st) in sites.iter().enumerate() {
             buckets[cell_of(st.x, st.y)].push(i);
@@ -7754,14 +9222,20 @@ mod lem {
             let (mut lo, mut hi) = (0.0f64, 1.0f64);
             for _ in 0..40 {
                 let m = 0.5 * (lo + hi);
-                let q = Site2D { x: pin.x + (pout.x - pin.x) * m, y: pin.y + (pout.y - pin.y) * m };
+                let q = Site2D {
+                    x: pin.x + (pout.x - pin.x) * m,
+                    y: pin.y + (pout.y - pin.y) * m,
+                };
                 if inside(&q) {
                     lo = m;
                 } else {
                     hi = m;
                 }
             }
-            let c = Site2D { x: pin.x + (pout.x - pin.x) * lo, y: pin.y + (pout.y - pin.y) * lo };
+            let c = Site2D {
+                x: pin.x + (pout.x - pin.x) * lo,
+                y: pin.y + (pout.y - pin.y) * lo,
+            };
             let k = nearest(c.x, c.y);
             if a_in {
                 outlet[k] = true;
@@ -7774,16 +9248,33 @@ mod lem {
         }
         if outs == 0 {
             // No coarser river leaves: the rim's lowest point drains it (the coarser ground's own low).
-            let rim = |s: &Site2D| s.x < x0 + spacing || s.y < y0 + spacing || s.x > x0 + wm - spacing || s.y > y0 + hm - spacing;
-            let k = (0..n).filter(|&k| rim(&sites[k])).min_by(|&a, &b| base[a].total_cmp(&base[b]).then(a.cmp(&b)));
+            let rim = |s: &Site2D| {
+                s.x < x0 + spacing
+                    || s.y < y0 + spacing
+                    || s.x > x0 + wm - spacing
+                    || s.y > y0 + hm - spacing
+            };
+            let k = (0..n)
+                .filter(|&k| rim(&sites[k]))
+                .min_by(|&a, &b| base[a].total_cmp(&base[b]).then(a.cmp(&b)));
             if let Some(k) = k {
                 outlet[k] = true;
             }
         }
         // The one field: U = the present rise; K so the coarser U/K holds (the coarse solve's own ratio).
-        let u_coarse: Vec<f64> = sites.iter().map(|s| radial(&coarse.ln_u, nw, node_m, s.x, s.y).exp() / rock(s.x, s.y)).collect();
-        let mut u: Vec<f64> = sites.iter().map(|s| radial(rise_nodes, nw, node_m, s.x, s.y).max(0.0)).collect();
-        let k: Vec<f64> = u.iter().zip(&u_coarse).map(|(r, uc)| JOINT_K_LP * r / uc.max(1.0e-30)).collect();
+        let u_coarse: Vec<f64> = sites
+            .iter()
+            .map(|s| radial(&coarse.ln_u, nw, node_m, s.x, s.y).exp() / rock(s.x, s.y))
+            .collect();
+        let mut u: Vec<f64> = sites
+            .iter()
+            .map(|s| radial(rise_nodes, nw, node_m, s.x, s.y).max(0.0))
+            .collect();
+        let k: Vec<f64> = u
+            .iter()
+            .zip(&u_coarse)
+            .map(|(r, uc)| JOINT_K_LP * r / uc.max(1.0e-30))
+            .collect();
         // ★ THE COARSER LEVEL'S CHANNELS (`--l2-channels`; B83 item 5): this level refines the coarser ground, so it keeps
         // the coarser ground's rivers. A coarser link is a channel where THIS level's own law says its water cuts — the
         // river's steady slope `(U/(K·Q))^(1/n)` under the creep's steady slope at `ℓ = A/width` (Roering et al. 2007),
@@ -7794,7 +9285,12 @@ mod lem {
             let d = super::r2::CREEP_K_M2_YR;
             let sc = vd_terrain::surface::SOIL_CRITICAL_SLOPE;
             let reach = 0.75 * spacing;
-            let near_box = |s: &Site2D| s.x > x0 - node_m * 0.25 && s.y > y0 - node_m * 0.25 && s.x < x0 + wm + node_m * 0.25 && s.y < y0 + hm + node_m * 0.25;
+            let near_box = |s: &Site2D| {
+                s.x > x0 - node_m * 0.25
+                    && s.y > y0 - node_m * 0.25
+                    && s.x < x0 + wm + node_m * 0.25
+                    && s.y < y0 + hm + node_m * 0.25
+            };
             let (mut links, mut channels, mut marked) = (0usize, 0usize, 0usize);
             for (c, st) in coarse.sites.iter().enumerate() {
                 let r = coarse.recv[c];
@@ -7832,7 +9328,8 @@ mod lem {
                     for bx in (b0 % bw)..=(b1 % bw) {
                         for &kk in &buckets[by * bw + bx] {
                             let p = &sites[kk];
-                            let tt = (((p.x - st.x) * dx + (p.y - st.y) * dy) / len2).clamp(0.0, 1.0);
+                            let tt =
+                                (((p.x - st.x) * dx + (p.y - st.y) * dy) / len2).clamp(0.0, 1.0);
                             let (px, py) = (st.x + tt * dx, st.y + tt * dy);
                             if (p.x - px).powi(2) + (p.y - py).powi(2) <= reach * reach {
                                 let hz = ha + tt * (hb - ha);
@@ -7857,10 +9354,27 @@ mod lem {
         let _ = steady(graph, &outlet, &base, &water, &u_coarse, &mut h, 40);
         let t_solve = Instant::now();
         if STEADY_FORM.load(std::sync::atomic::Ordering::Relaxed) {
-            let (passes, still) = steady_creep(graph, &outlet, &base, &water, &areas, &u, &k, &mut h, spacing, 60);
-            println!("  the steady form: {passes} tree passes ({still} receivers still changing), {:.1} s", t_solve.elapsed().as_secs_f64());
+            let (passes, still) = steady_creep(
+                graph, &outlet, &base, &water, &areas, &u, &k, &mut h, spacing, 60,
+            );
+            println!(
+                "  the steady form: {passes} tree passes ({still} receivers still changing), {:.1} s",
+                t_solve.elapsed().as_secs_f64()
+            );
         } else {
-            relax(&sites, &areas, graph, &outlet, &base, &water, &mut u, &mut h, steps, 0.0, Some((&k, span_yr)));
+            relax(
+                &sites,
+                &areas,
+                graph,
+                &outlet,
+                &base,
+                &water,
+                &mut u,
+                &mut h,
+                steps,
+                0.0,
+                Some((&k, span_yr)),
+            );
         }
         // ★ THE HOLD PER COARSER CELL, BY THE SLOPES (`--l2-hold-cells`; B83 item 5, B84's rule): this level must refine
         // the coarser ground, so over each coarser point's own Voronoi cell (irregular: no grid can print) its mean is
@@ -7875,11 +9389,15 @@ mod lem {
             // The coarser points near the domain, bucketed.
             let cb = cs;
             let (gx0, gy0) = (x0 - 2.0 * reach, y0 - 2.0 * reach);
-            let (gw, gh) = (((wm + 4.0 * reach) / cb).ceil() as usize + 1, ((hm + 4.0 * reach) / cb).ceil() as usize + 1);
+            let (gw, gh) = (
+                ((wm + 4.0 * reach) / cb).ceil() as usize + 1,
+                ((hm + 4.0 * reach) / cb).ceil() as usize + 1,
+            );
             let mut grid: Vec<Vec<usize>> = vec![Vec::new(); gw * gh];
             let gcell = |x: f64, y: f64| -> Option<usize> {
                 let (a, b) = (((x - gx0) / cb).floor(), ((y - gy0) / cb).floor());
-                (a >= 0.0 && b >= 0.0 && (a as usize) < gw && (b as usize) < gh).then(|| b as usize * gw + a as usize)
+                (a >= 0.0 && b >= 0.0 && (a as usize) < gw && (b as usize) < gh)
+                    .then(|| b as usize * gw + a as usize)
             };
             for (c, st) in coarse.sites.iter().enumerate() {
                 if let Some(g) = gcell(st.x, st.y) {
@@ -7887,8 +9405,14 @@ mod lem {
                 }
             }
             let around = |x: f64, y: f64, r: f64| -> Vec<usize> {
-                let (a0, b0) = (((x - r - gx0) / cb).floor().max(0.0) as usize, ((y - r - gy0) / cb).floor().max(0.0) as usize);
-                let (a1, b1) = ((((x + r - gx0) / cb).floor() as usize).min(gw - 1), (((y + r - gy0) / cb).floor() as usize).min(gh - 1));
+                let (a0, b0) = (
+                    ((x - r - gx0) / cb).floor().max(0.0) as usize,
+                    ((y - r - gy0) / cb).floor().max(0.0) as usize,
+                );
+                let (a1, b1) = (
+                    (((x + r - gx0) / cb).floor() as usize).min(gw - 1),
+                    (((y + r - gy0) / cb).floor() as usize).min(gh - 1),
+                );
                 let mut out = Vec::new();
                 for b in b0..=b1 {
                     for a in a0..=a1 {
@@ -7899,7 +9423,8 @@ mod lem {
             };
             // Each point's cell (its nearest coarser point) and its weights over the cells near it.
             let mut cell_of_pt = vec![usize::MAX; n];
-            let (mut wstart, mut wcell, mut wval) = (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
+            let (mut wstart, mut wcell, mut wval) =
+                (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
             for (i, st) in sites.iter().enumerate() {
                 wstart.push(wcell.len());
                 let cands = around(st.x, st.y, reach);
@@ -7929,7 +9454,8 @@ mod lem {
             let mut cells: Vec<usize> = cell_of_pt.clone();
             cells.sort_unstable();
             cells.dedup();
-            let slot: std::collections::BTreeMap<usize, usize> = cells.iter().enumerate().map(|(s, &c)| (c, s)).collect();
+            let slot: std::collections::BTreeMap<usize, usize> =
+                cells.iter().enumerate().map(|(s, &c)| (c, s)).collect();
             let nc = cells.len();
             let mut target = vec![0.0f64; nc];
             let mut carea = vec![0.0f64; nc];
@@ -7944,14 +9470,26 @@ mod lem {
             let rim_cell: Vec<bool> = {
                 let mut r = vec![false; nc];
                 for (i, st) in sites.iter().enumerate() {
-                    if st.x < x0 + spacing || st.y < y0 + spacing || st.x > x0 + wm - spacing || st.y > y0 + hm - spacing {
+                    if st.x < x0 + spacing
+                        || st.y < y0 + spacing
+                        || st.x > x0 + wm - spacing
+                        || st.y > y0 + hm - spacing
+                    {
                         r[slot[&cell_of_pt[i]]] = true;
                     }
                 }
                 r
             };
             let (order, recv, len) = tree_fast(&h, &outlet, graph);
-            let slope0: Vec<f64> = (0..n).map(|i| if outlet[i] || recv[i] == usize::MAX { 0.0 } else { (h[i] - h[recv[i]]) / len[i] }).collect();
+            let slope0: Vec<f64> = (0..n)
+                .map(|i| {
+                    if outlet[i] || recv[i] == usize::MAX {
+                        0.0
+                    } else {
+                        (h[i] - h[recv[i]]) / len[i]
+                    }
+                })
+                .collect();
             // A cell joins the hold only with free points to move (four or more not outlets); the others keep the law.
             let mut free_pts = vec![0usize; nc];
             for i in 0..n {
@@ -7968,7 +9506,9 @@ mod lem {
                         h[i] = base[i];
                         continue;
                     }
-                    let lg: f64 = (wstart[i]..wstart[i + 1]).map(|t| wval[t] * ln_g[wcell[t]]).sum();
+                    let lg: f64 = (wstart[i]..wstart[i + 1])
+                        .map(|t| wval[t] * ln_g[wcell[t]])
+                        .sum();
                     h[i] = h[recv[i]] + slope0[i] * lg.exp() * len[i];
                 }
                 let (mut sum, mut low) = (vec![0.0f64; nc], vec![f64::MAX; nc]);
@@ -7994,7 +9534,9 @@ mod lem {
                     ln_g[cells[sl]] += 0.5 * (want / relief).ln();
                 }
             }
-            let (gmin, gmax) = ln_g.iter().fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+            let (gmin, gmax) = ln_g
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
             println!(
                 "  the hold per coarser cell: {nc} cells ({left} left to the law), {sweeps} sweeps on one tree, the worst held cell {worst:.2} m; the slope factors {:.2}–{:.2} ({:.1} s)",
                 gmin.exp(),
@@ -8012,13 +9554,25 @@ mod lem {
             let (ncx, ncy) = ((wm / cc).round() as usize, (hm / cc).round() as usize);
             let cell_of = |s: &Site2D| -> Option<usize> {
                 let (cx, cy) = (((s.x - x0) / cc).floor(), ((s.y - y0) / cc).floor());
-                (cx >= 0.0 && cy >= 0.0 && (cx as usize) < ncx && (cy as usize) < ncy).then(|| cy as usize * ncx + cx as usize)
+                (cx >= 0.0 && cy >= 0.0 && (cx as usize) < ncx && (cy as usize) < ncy)
+                    .then(|| cy as usize * ncx + cx as usize)
             };
             let target: Vec<f64> = (0..ncx * ncy)
-                .map(|k| coarse_at(x0 + ((k % ncx) as f64 + 0.5) * cc, y0 + ((k / ncx) as f64 + 0.5) * cc))
+                .map(|k| {
+                    coarse_at(
+                        x0 + ((k % ncx) as f64 + 0.5) * cc,
+                        y0 + ((k / ncx) as f64 + 0.5) * cc,
+                    )
+                })
                 .collect();
             let all_cells = vec![true; ncx * ncy];
-            let (k_start, k_cells, k_w) = hold_kernel(sites.len(), |i| ((sites[i].x - x0) / cc - 0.5, (sites[i].y - y0) / cc - 0.5), ncx, ncy, &all_cells);
+            let (k_start, k_cells, k_w) = hold_kernel(
+                sites.len(),
+                |i| ((sites[i].x - x0) / cc - 0.5, (sites[i].y - y0) / cc - 0.5),
+                ncx,
+                ncy,
+                &all_cells,
+            );
             let (mut rounds, mut worst) = (0usize, f64::MAX);
             while rounds < 60 && worst > 0.25 {
                 rounds += 1;
@@ -8029,16 +9583,26 @@ mod lem {
                         area[k] += areas[i];
                     }
                 }
-                let r: Vec<f64> = (0..ncx * ncy).map(|k| sum[k] / area[k].max(f64::MIN_POSITIVE) - target[k]).collect();
+                let r: Vec<f64> = (0..ncx * ncy)
+                    .map(|k| sum[k] / area[k].max(f64::MIN_POSITIVE) - target[k])
+                    .collect();
                 worst = r.iter().fold(0.0f64, |m, v| m.max(v.abs()));
                 for (i, hi) in h.iter_mut().enumerate() {
-                    let acc: f64 = (k_start[i]..k_start[i + 1]).map(|t| f64::from(k_w[t]) * r[k_cells[t] as usize]).sum();
+                    let acc: f64 = (k_start[i]..k_start[i + 1])
+                        .map(|t| f64::from(k_w[t]) * r[k_cells[t] as usize])
+                        .sum();
                     *hi -= acc;
                 }
             }
-            println!("  the mean hold: {rounds} rounds, the largest cell residual {worst:.2} m ({:.1} s)", t_hold.elapsed().as_secs_f64());
+            println!(
+                "  the mean hold: {rounds} rounds, the largest cell residual {worst:.2} m ({:.1} s)",
+                t_hold.elapsed().as_secs_f64()
+            );
         }
-        let (w, hh) = ((wm / spacing).round() as usize, (hm / spacing).round() as usize);
+        let (w, hh) = (
+            (wm / spacing).round() as usize,
+            (hm / spacing).round() as usize,
+        );
         let terrain = model.create_terrain_from_result(&h);
         let raster = rasterise_rect(&terrain, x0, y0, w, hh, spacing);
         println!(
@@ -8049,7 +9613,14 @@ mod lem {
             hm / 1_000.0,
             started.elapsed().as_secs_f64()
         );
-        DomainSolve { x0, y0, w, h: hh, cell: spacing, raster }
+        DomainSolve {
+            x0,
+            y0,
+            w,
+            h: hh,
+            cell: spacing,
+            raster,
+        }
     }
 
     /// ★ THE FINER WINDOW (B80 step 2): the same law on points `spacing_m` apart inside the square `(x0, y0, side)` of a
@@ -8070,19 +9641,38 @@ mod lem {
     ) -> Window {
         let started = Instant::now();
         let num = ((side / spacing_m) * (side / spacing_m)) as usize;
-        let model = TerrainModel2DBulider::from_random_sites(num, Site2D { x: x0, y: y0 }, Site2D { x: x0 + side, y: y0 + side })
-            .relaxate_sites(1)
-            .expect("the sites relax")
-            .add_edge_sites(None, None)
-            .expect("the edge sites")
-            .build()
-            .expect("the point graph builds");
-        let (sites, areas, graph) = (model.sites().to_vec(), model.areas().to_vec(), model.graph());
+        let model = TerrainModel2DBulider::from_random_sites(
+            num,
+            Site2D { x: x0, y: y0 },
+            Site2D {
+                x: x0 + side,
+                y: y0 + side,
+            },
+        )
+        .relaxate_sites(1)
+        .expect("the sites relax")
+        .add_edge_sites(None, None)
+        .expect("the edge sites")
+        .build()
+        .expect("the point graph builds");
+        let (sites, areas, graph) = (
+            model.sites().to_vec(),
+            model.areas().to_vec(),
+            model.graph(),
+        );
         let n = sites.len();
-        let coarse_at = |x: f64, y: f64| coarse.terrain.get_elevation(&Site2D { x, y }).unwrap_or(0.0);
+        let coarse_at = |x: f64, y: f64| {
+            coarse
+                .terrain
+                .get_elevation(&Site2D { x, y })
+                .unwrap_or(0.0)
+        };
         let base: Vec<f64> = sites.iter().map(|s| coarse_at(s.x, s.y)).collect();
-        let mut water: Vec<f64> =
-            sites.iter().zip(&areas).map(|(s, a)| linear(node_rain_m, nw, node_m, s.x, s.y) * a).collect();
+        let mut water: Vec<f64> = sites
+            .iter()
+            .zip(&areas)
+            .map(|(s, a)| linear(node_rain_m, nw, node_m, s.x, s.y) * a)
+            .collect();
         let mut outlet = vec![false; n];
         for &e in model.default_outlets() {
             outlet[e] = true;
@@ -8095,11 +9685,17 @@ mod lem {
         let bw = (side / bucket).ceil() as usize + 1;
         let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); bw * bw];
         for (i, s) in sites.iter().enumerate() {
-            let (bx, by) = ((((s.x - x0) / bucket) as usize).min(bw - 1), (((s.y - y0) / bucket) as usize).min(bw - 1));
+            let (bx, by) = (
+                (((s.x - x0) / bucket) as usize).min(bw - 1),
+                (((s.y - y0) / bucket) as usize).min(bw - 1),
+            );
             buckets[by * bw + bx].push(i);
         }
         let nearest = |x: f64, y: f64| -> usize {
-            let (bx, by) = ((((x - x0) / bucket).max(0.0) as usize).min(bw - 1), (((y - y0) / bucket).max(0.0) as usize).min(bw - 1));
+            let (bx, by) = (
+                (((x - x0) / bucket).max(0.0) as usize).min(bw - 1),
+                (((y - y0) / bucket).max(0.0) as usize).min(bw - 1),
+            );
             let mut best = (f64::MAX, 0usize);
             for j in by.saturating_sub(1)..=(by + 1).min(bw - 1) {
                 for i in bx.saturating_sub(1)..=(bx + 1).min(bw - 1) {
@@ -8136,10 +9732,16 @@ mod lem {
         let steps = RELAX_STEPS.load(std::sync::atomic::Ordering::Relaxed);
         if steps > 0 {
             // The window's own mean of the coarse ground: the creep's steady state keeps it (one factor on U).
-            let target = sites.iter().zip(&areas).map(|(s, a)| coarse_at(s.x, s.y) * a).sum::<f64>()
+            let target = sites
+                .iter()
+                .zip(&areas)
+                .map(|(s, a)| coarse_at(s.x, s.y) * a)
+                .sum::<f64>()
                 / areas.iter().sum::<f64>();
             let mut u = u;
-            relax(&sites, &areas, graph, &outlet, &base, &water, &mut u, &mut h, steps, target, None);
+            relax(
+                &sites, &areas, graph, &outlet, &base, &water, &mut u, &mut h, steps, target, None,
+            );
         }
         let w = (side / cell_m).round() as usize;
         let terrain = model.create_terrain_from_result(&h);
@@ -8153,13 +9755,27 @@ mod lem {
             inflow,
             started.elapsed().as_secs_f64()
         );
-        Window { raster, w, x0, y0, cell_m }
+        Window {
+            raster,
+            w,
+            x0,
+            y0,
+            cell_m,
+        }
     }
 }
 
 /// The readings and the pictures of a generated raster, beside a reference raster of the same square (Earth's real
 /// ground) when one is given.
-fn lem_report(made: &[f64], reference: &[f64], ref_label: &str, w: usize, cell_m: f64, dir: Option<&str>, label: &str) {
+fn lem_report(
+    made: &[f64],
+    reference: &[f64],
+    ref_label: &str,
+    w: usize,
+    cell_m: f64,
+    dir: Option<&str>,
+    label: &str,
+) {
     let mut views: Vec<(&str, &[f64])> = vec![("generated", made)];
     if !reference.is_empty() {
         views.push((ref_label, reference));
@@ -8231,11 +9847,14 @@ mod view {
         }
         let (iu, iv) = (u.floor() as i64, v.floor() as i64);
         let (fu, fv) = (u - iu as f64, v - iv as f64);
-        let at = |a: i64, b: i64| f[(b.clamp(0, w as i64 - 1) as usize) * w + a.clamp(0, w as i64 - 1) as usize];
+        let at = |a: i64, b: i64| {
+            f[(b.clamp(0, w as i64 - 1) as usize) * w + a.clamp(0, w as i64 - 1) as usize]
+        };
         let mut rows = [0.0f64; 4];
         for (r, slot) in rows.iter_mut().enumerate() {
             let b = iv + r as i64 - 1;
-            *slot = super::catmull_rom([at(iu - 1, b), at(iu, b), at(iu + 1, b), at(iu + 2, b)], fu);
+            *slot =
+                super::catmull_rom([at(iu - 1, b), at(iu, b), at(iu + 1, b), at(iu + 2, b)], fu);
         }
         Some(super::catmull_rom(rows, fv))
     }
@@ -8278,7 +9897,11 @@ mod view {
     ) -> impl Fn(f64, f64) -> f64 + Sync {
         move |x, n| {
             let (dx, dy) = (x - x0, -n - y0);
-            if dx > 250.0 && dy > 250.0 && dx < w_side_m - 250.0 && dy < w_side_m - 250.0 { fcell } else { cell_m }
+            if dx > 250.0 && dy > 250.0 && dx < w_side_m - 250.0 && dy < w_side_m - 250.0 {
+                fcell
+            } else {
+                cell_m
+            }
         }
     }
 
@@ -8298,7 +9921,20 @@ mod view {
         dry: bool,
     ) {
         let mut b: Vec<u8> = Vec::with_capacity(8 * (coarse.len() + fine.len() + 16));
-        for v in [w as f64, cell_m, fw as f64, x0, y0, fcell, cam.x, cam.n, cam.yaw, cam.pitch, cam.over, f64::from(u8::from(dry))] {
+        for v in [
+            w as f64,
+            cell_m,
+            fw as f64,
+            x0,
+            y0,
+            fcell,
+            cam.x,
+            cam.n,
+            cam.yaw,
+            cam.pitch,
+            cam.over,
+            f64::from(u8::from(dry)),
+        ] {
             b.extend_from_slice(&v.to_le_bytes());
         }
         for v in coarse.iter().chain(fine) {
@@ -8324,7 +9960,8 @@ mod view {
 
     pub fn load_scene(path: &str) -> Scene {
         let b = std::fs::read(path).expect("the scene reads");
-        let word = |k: usize| f64::from_le_bytes(b[8 * k..8 * k + 8].try_into().expect("eight bytes"));
+        let word =
+            |k: usize| f64::from_le_bytes(b[8 * k..8 * k + 8].try_into().expect("eight bytes"));
         let (w, fw) = (word(0) as usize, word(2) as usize);
         let coarse: Vec<f64> = (0..w * w).map(|k| word(12 + k)).collect();
         let fine: Vec<f64> = (0..fw * fw).map(|k| word(12 + w * w + k)).collect();
@@ -8337,7 +9974,14 @@ mod view {
             x0: word(3),
             y0: word(4),
             fcell: word(5),
-            cam: Camera { x: word(6), n: word(7), z: 0.0, yaw: word(8), pitch: word(9), over: word(10) },
+            cam: Camera {
+                x: word(6),
+                n: word(7),
+                z: 0.0,
+                yaw: word(8),
+                pitch: word(9),
+                over: word(10),
+            },
             dry: word(11) > 0.5,
         }
     }
@@ -8353,7 +9997,10 @@ mod view {
                 }
             }
         }
-        let (px, pn) = (((best % w) as f64 + 0.5) * cell_m, -(((best / w) as f64 + 0.5) * cell_m));
+        let (px, pn) = (
+            ((best % w) as f64 + 0.5) * cell_m,
+            -(((best / w) as f64 + 0.5) * cell_m),
+        );
         let mut out = Vec::new();
         for (name, dist, over) in [("valley", 12_000.0, 60.0), ("range", 30_000.0, 1_500.0)] {
             // Of sixteen bearings, the lowest ground at that distance (or at 0.8 or 0.6 of it where the raster ends).
@@ -8411,7 +10058,11 @@ mod view {
         let cam = &Camera { z: eye_z, ..*cam };
         let tan_half = (30.0f64).to_radians().tan();
         let aspect = width as f64 / height as f64;
-        let fwd = [cam.pitch.cos() * cam.yaw.cos(), cam.pitch.cos() * cam.yaw.sin(), cam.pitch.sin()];
+        let fwd = [
+            cam.pitch.cos() * cam.yaw.cos(),
+            cam.pitch.cos() * cam.yaw.sin(),
+            cam.pitch.sin(),
+        ];
         let right = [cam.yaw.sin(), -cam.yaw.cos(), 0.0];
         let up = [
             right[1] * fwd[2] - right[2] * fwd[1],
@@ -8420,7 +10071,11 @@ mod view {
         ];
         // The sun from the camera's left, a little behind, 28° up.
         let sun_az = cam.yaw + 1.75;
-        let sun = [22f64.to_radians().cos() * sun_az.cos(), 22f64.to_radians().cos() * sun_az.sin(), 22f64.to_radians().sin()];
+        let sun = [
+            22f64.to_radians().cos() * sun_az.cos(),
+            22f64.to_radians().cos() * sun_az.sin(),
+            22f64.to_radians().sin(),
+        ];
         let visibility = 45_000.0;
         let mut pixels = vec![[0u8; 3]; width * height];
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -8448,14 +10103,19 @@ mod view {
                         let mut t_ray = 1.0;
                         let mut prev = 0.0;
                         while t_ray < far {
-                            let (x, n, z) = (cam.x + d[0] * t_ray, cam.n + d[1] * t_ray, cam.z + d[2] * t_ray);
+                            let (x, n, z) = (
+                                cam.x + d[0] * t_ray,
+                                cam.n + d[1] * t_ray,
+                                cam.z + d[2] * t_ray,
+                            );
                             let Some(g) = sample(x, n) else { break };
                             if z <= g {
                                 // Refine the hit between the last two samples.
                                 let (mut a, mut b) = (prev, t_ray);
                                 for _ in 0..10 {
                                     let m = 0.5 * (a + b);
-                                    let (x, n, z) = (cam.x + d[0] * m, cam.n + d[1] * m, cam.z + d[2] * m);
+                                    let (x, n, z) =
+                                        (cam.x + d[0] * m, cam.n + d[1] * m, cam.z + d[2] * m);
                                     if sample(x, n).is_some_and(|g| z <= g) {
                                         b = m;
                                     } else {
@@ -8464,15 +10124,27 @@ mod view {
                                 }
                                 let (x, n) = (cam.x + d[0] * b, cam.n + d[1] * b);
                                 let h = detail(x, n) * 0.5;
-                                let gx = (sample(x + h, n).unwrap_or(g) - sample(x - h, n).unwrap_or(g)) / (2.0 * h);
-                                let gn = (sample(x, n + h).unwrap_or(g) - sample(x, n - h).unwrap_or(g)) / (2.0 * h);
+                                let gx = (sample(x + h, n).unwrap_or(g)
+                                    - sample(x - h, n).unwrap_or(g))
+                                    / (2.0 * h);
+                                let gn = (sample(x, n + h).unwrap_or(g)
+                                    - sample(x, n - h).unwrap_or(g))
+                                    / (2.0 * h);
                                 let nl = (gx * gx + gn * gn + 1.0).sqrt();
                                 let normal = [-gx / nl, -gn / nl, 1.0 / nl];
                                 let slope = (gx * gx + gn * gn).sqrt();
                                 let gz = sample(x, n).unwrap_or(g);
                                 let rock = ((slope - 0.45) / 0.3).clamp(0.0, 1.0);
-                                let soil = if dry { [0.55, 0.43, 0.30] } else { [0.24, 0.32, 0.16] };
-                                let stone = if dry { [0.50, 0.40, 0.33] } else { [0.36, 0.34, 0.31] };
+                                let soil = if dry {
+                                    [0.55, 0.43, 0.30]
+                                } else {
+                                    [0.24, 0.32, 0.16]
+                                };
+                                let stone = if dry {
+                                    [0.50, 0.40, 0.33]
+                                } else {
+                                    [0.36, 0.34, 0.31]
+                                };
                                 let mut albedo = [
                                     soil[0] + (stone[0] - soil[0]) * rock,
                                     soil[1] + (stone[1] - soil[1]) * rock,
@@ -8485,7 +10157,8 @@ mod view {
                                 let mut lit = 1.0;
                                 let mut s = 4.0;
                                 while s < 20_000.0 {
-                                    let (sx, sn, sz) = (x + sun[0] * s, n + sun[1] * s, gz + 1.0 + sun[2] * s);
+                                    let (sx, sn, sz) =
+                                        (x + sun[0] * s, n + sun[1] * s, gz + 1.0 + sun[2] * s);
                                     match sample(sx, sn) {
                                         Some(sg) if sz < sg => {
                                             lit = 0.0;
@@ -8496,10 +10169,20 @@ mod view {
                                     }
                                     s += (s * 0.03).max(detail(x, n) * 0.5);
                                 }
-                                let ndl = (normal[0] * sun[0] + normal[1] * sun[1] + normal[2] * sun[2]).max(0.0);
+                                let ndl =
+                                    (normal[0] * sun[0] + normal[1] * sun[1] + normal[2] * sun[2])
+                                        .max(0.0);
                                 let ambient = 0.30 * (0.6 + 0.4 * normal[2]);
-                                let light = [1.00 * ndl * lit * 1.1 + ambient * 0.9, 0.95 * ndl * lit * 1.1 + ambient * 0.95, 0.85 * ndl * lit * 1.1 + ambient * 1.1];
-                                let surface = [albedo[0] * light[0], albedo[1] * light[1], albedo[2] * light[2]];
+                                let light = [
+                                    1.00 * ndl * lit * 1.1 + ambient * 0.9,
+                                    0.95 * ndl * lit * 1.1 + ambient * 0.95,
+                                    0.85 * ndl * lit * 1.1 + ambient * 1.1,
+                                ];
+                                let surface = [
+                                    albedo[0] * light[0],
+                                    albedo[1] * light[1],
+                                    albedo[2] * light[2],
+                                ];
                                 let haze = 1.0 - (-b / visibility).exp();
                                 colour = [
                                     surface[0] + (sky[0] - surface[0]) * haze,
@@ -8546,13 +10229,19 @@ fn lem_fine_views(
     node_rise: Option<&[f64]>,
 ) {
     let w = out.w;
-    let Some((_, cam)) = view::cameras(&out.raster, w, cell_m).into_iter().find(|(n, _)| *n == "valley") else {
+    let Some((_, cam)) = view::cameras(&out.raster, w, cell_m)
+        .into_iter()
+        .find(|(n, _)| *n == "valley")
+    else {
         return;
     };
     let side = WINDOW_M.load(std::sync::atomic::Ordering::Relaxed) as f64;
     let region = w as f64 * cell_m;
     let ahead = 0.45 * side;
-    let (cx, cy) = (cam.x + ahead * cam.yaw.cos(), -(cam.n + ahead * cam.yaw.sin()));
+    let (cx, cy) = (
+        cam.x + ahead * cam.yaw.cos(),
+        -(cam.n + ahead * cam.yaw.sin()),
+    );
     let x0 = ((cx - side / 2.0).clamp(0.0, region - side) / 32.0).floor() * 32.0;
     let y0 = ((cy - side / 2.0).clamp(0.0, region - side) / 32.0).floor() * 32.0;
     if let Some(nr) = node_rise {
@@ -8566,13 +10255,28 @@ fn lem_fine_views(
             area += ox * oy;
         }
         let rise = sum / area.max(1.0);
-        println!("  the fine window's present rise from the solve's laws: {:.4} mm/yr", rise * 1_000.0);
-        lem::RISE_NM.store((rise * 1.0e9).round() as usize, std::sync::atomic::Ordering::Relaxed);
+        println!(
+            "  the fine window's present rise from the solve's laws: {:.4} mm/yr",
+            rise * 1_000.0
+        );
+        lem::RISE_NM.store(
+            (rise * 1.0e9).round() as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         lem::RISE_SET.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let win = lem::refine(out, rain, nw, node_m, (x0, y0, side), fine_m, fine_m / 2.0);
     let dry = label.starts_with("home");
-    let made = view::layered(&out.raster, w, cell_m, &win.raster, win.w, win.x0, win.y0, win.cell_m);
+    let made = view::layered(
+        &out.raster,
+        w,
+        cell_m,
+        &win.raster,
+        win.w,
+        win.x0,
+        win.y0,
+        win.cell_m,
+    );
     // The close camera: 40 m over the highest ground inside the window (its outer 15 % left out), looking across the
     // window toward its centre (the valley camera's bearing when the summit stands at the centre), 11° down — a view
     // from a summit over the valleys, as the references frame theirs.
@@ -8584,30 +10288,72 @@ fn lem_fine_views(
             let z = win.raster[y * win.w + x];
             if z > top {
                 top = z;
-                at = (win.x0 + (x as f64 + 0.5) * win.cell_m, win.y0 + (y as f64 + 0.5) * win.cell_m);
+                at = (
+                    win.x0 + (x as f64 + 0.5) * win.cell_m,
+                    win.y0 + (y as f64 + 0.5) * win.cell_m,
+                );
             }
         }
     }
     let (dx, dy) = (wx - at.0, wy - at.1);
-    let yaw = if dx.hypot(dy) < 0.15 * side { cam.yaw } else { (-dy).atan2(dx) };
-    let cam = view::Camera { x: at.0, n: -at.1, z: 0.0, yaw, pitch: -0.19, over: 40.0 };
+    let yaw = if dx.hypot(dy) < 0.15 * side {
+        cam.yaw
+    } else {
+        (-dy).atan2(dx)
+    };
+    let cam = view::Camera {
+        x: at.0,
+        n: -at.1,
+        z: 0.0,
+        yaw,
+        pitch: -0.19,
+        over: 40.0,
+    };
     let path = format!("{dir}/{label}_generated_view_valley_fine.png");
-    let detail = view::layered_cell(win.w as f64 * win.cell_m, win.x0, win.y0, win.cell_m, cell_m);
+    let detail = view::layered_cell(
+        win.w as f64 * win.cell_m,
+        win.x0,
+        win.y0,
+        win.cell_m,
+        cell_m,
+    );
     view::render_with(&made, &detail, 2.0 * region, &cam, dry, &path);
     // THE SCENE STORED (`--view` renders it again with any camera, no new solve).
     let scene = format!("{dir}/{label}_scene.bin");
-    view::store_scene(&scene, &out.raster, w, cell_m, &win.raster, win.w, win.x0, win.y0, win.cell_m, &cam, dry);
+    view::store_scene(
+        &scene,
+        &out.raster,
+        w,
+        cell_m,
+        &win.raster,
+        win.w,
+        win.x0,
+        win.y0,
+        win.cell_m,
+        &cam,
+        dry,
+    );
     println!("  the scene stored: {scene}");
     println!("  the view, generated, the valley through the fine window: {path}");
-    for (what, file) in shade::write_views(&win.raster, win.w, 0, win.cell_m, 0.0, dir, label, "generated_fine") {
+    for (what, file) in shade::write_views(
+        &win.raster,
+        win.w,
+        0,
+        win.cell_m,
+        0.0,
+        dir,
+        label,
+        "generated_fine",
+    ) {
         println!("  the shaded relief, the fine window, generated, {what}: {file}");
     }
     if let Some(p) = earth_path {
         let (real, rw) = earth_cells(p, 32.0);
         let ew = (side / 32.0) as usize;
         let (ex, ey) = ((x0 / 32.0) as usize, (y0 / 32.0) as usize);
-        let crop: Vec<f64> =
-            (0..ew * ew).map(|k| real[(ey + k / ew).min(rw - 1) * rw + (ex + k % ew).min(rw - 1)]).collect();
+        let crop: Vec<f64> = (0..ew * ew)
+            .map(|k| real[(ey + k / ew).min(rw - 1) * rw + (ex + k % ew).min(rw - 1)])
+            .collect();
         let earth = view::layered(reference, w, cell_m, &crop, ew, x0, y0, 32.0);
         let path = format!("{dir}/{label}_earth_view_valley_fine.png");
         let detail = view::layered_cell(side, x0, y0, 32.0, cell_m);
@@ -8628,15 +10374,27 @@ fn present_rise(
     lattice: &MacroLattice,
     words: &vd_terrain::solve::SolveWords,
 ) -> Vec<f64> {
-    let mut land = vd_terrain::land::initial_land_on(body, lattice, &words.land(), vd_terrain::par::Cores::default());
+    let mut land = vd_terrain::land::initial_land_on(
+        body,
+        lattice,
+        &words.land(),
+        vd_terrain::par::Cores::default(),
+    );
     let age = words.age_yr;
     let belts = vd_terrain::belts::belts(body, lattice, words, &land, age);
     let even = vd_terrain::solve::belt_land(&belts, &mut land);
     let steps = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
-    let mut rise: Vec<f64> = even.iter().map(|&e| e as f64 / steps / age.max(1) as f64).collect();
+    let mut rise: Vec<f64> = even
+        .iter()
+        .map(|&e| e as f64 / steps / age.max(1) as f64)
+        .collect();
     let span = 1_000_000u64.min(age);
     for w in &belts.wedge {
-        let h = |t: u64| vd_terrain::belts::wedge_height_m(w, vd_terrain::belts::wedge_area_m2(w, t)).0.to_f64();
+        let h = |t: u64| {
+            vd_terrain::belts::wedge_height_m(w, vd_terrain::belts::wedge_area_m2(w, t))
+                .0
+                .to_f64()
+        };
         rise[w.node as usize] += (h(age) - h(age - span)) / span as f64;
     }
     rise
@@ -8646,10 +10404,14 @@ fn present_rise(
 /// land nodes with their face and place (for `--lem-at`).
 fn rise_map(lattice: &MacroLattice, artifact: &Artifact, rise: &[f64]) {
     let sea = f64::from(artifact.sea_m);
-    let land: Vec<usize> = (0..rise.len()).filter(|&k| f64::from(artifact.rows[k].z_m) > sea).collect();
+    let land: Vec<usize> = (0..rise.len())
+        .filter(|&k| f64::from(artifact.rows[k].z_m) > sea)
+        .collect();
     let mut on_land: Vec<f64> = land.iter().map(|&k| rise[k]).collect();
     on_land.sort_by(f64::total_cmp);
-    let share = |t: f64| 100.0 * on_land.iter().filter(|&&r| r > t).count() as f64 / on_land.len().max(1) as f64;
+    let share = |t: f64| {
+        100.0 * on_land.iter().filter(|&&r| r > t).count() as f64 / on_land.len().max(1) as f64
+    };
     let q = |p: f64| on_land[((on_land.len() - 1) as f64 * p) as usize] * 1_000.0;
     println!(
         "PRESENT RISE over {} land nodes: rising {:.2} %, over 0.01 mm/yr {:.2} %, over 0.1 {:.2} %, over 0.5 {:.2} %; \
@@ -8669,7 +10431,11 @@ fn rise_map(lattice: &MacroLattice, artifact: &Artifact, rise: &[f64]) {
     for &k in fast.iter().take(12) {
         let (face, i, j) = lattice.split(k as u32);
         let d = lattice.direction(k as u32);
-        let v = [d[0].raw() as f64 / one, d[1].raw() as f64 / one, d[2].raw() as f64 / one];
+        let v = [
+            d[0].raw() as f64 / one,
+            d[1].raw() as f64 / one,
+            d[2].raw() as f64 / one,
+        ];
         let r = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         println!(
             "  node {k}: --lem-at {},{i},{j}  rise {:.3} mm/yr, {:.0} m over the sea, rain {:.0} mm/yr, {:.2}° N {:.2}° E",
@@ -8691,8 +10457,13 @@ static CUT_BLEND_CELLS: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 /// A rectangle's shaded relief (a measurement's picture): Horn's slope on the 3 × 3 window, the sun from the north-west
 /// 45° up, a vertical exaggeration of two, a tan tint by height; `w` × `h` cells of `cell` metres.
 fn hillshade_rect(f: &[f64], w: usize, h: usize, cell: f64, path: &str) {
-    let (lo, hi) = f.iter().filter(|v| v.is_finite()).fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
-    let at = |x: i64, y: i64| f[(y.clamp(0, h as i64 - 1) as usize) * w + x.clamp(0, w as i64 - 1) as usize];
+    let (lo, hi) = f
+        .iter()
+        .filter(|v| v.is_finite())
+        .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+    let at = |x: i64, y: i64| {
+        f[(y.clamp(0, h as i64 - 1) as usize) * w + x.clamp(0, w as i64 - 1) as usize]
+    };
     let sun = {
         let (az, el) = (315f64.to_radians(), 45f64.to_radians());
         [el.cos() * az.sin(), el.cos() * az.cos(), el.sin()]
@@ -8713,7 +10484,11 @@ fn hillshade_rect(f: &[f64], w: usize, h: usize, cell: f64, path: &str) {
             let t = ((at(x, y) - lo) / (hi - lo).max(1.0)).clamp(0.0, 1.0);
             let base = [0.55 + 0.35 * t, 0.45 + 0.30 * t, 0.32 + 0.25 * t];
             let px = |c: f64| ((c * (0.25 + 0.85 * shade)).clamp(0.0, 1.0) * 255.0) as u8;
-            img.put_pixel(x as u32, y as u32, image::Rgb([px(base[0]), px(base[1]), px(base[2])]));
+            img.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgb([px(base[0]), px(base[1]), px(base[2])]),
+            );
         }
     }
     img.save(path).expect("the relief writes");
@@ -8873,7 +10648,11 @@ fn rice_decode(bytes: &[u8], w: usize, h: usize) -> Vec<i64> {
         while quot < RICE_ESCAPE && get(1) == 1 {
             quot += 1;
         }
-        let z = if quot == RICE_ESCAPE { get(24) } else { (quot << kk) | get(kk) };
+        let z = if quot == RICE_ESCAPE {
+            get(24)
+        } else {
+            (quot << kk) | get(kk)
+        };
         let r = ((z >> 1) as i64) ^ -((z & 1) as i64);
         q[k] = loco_predict(&q, w, k) + r;
         a += z;
@@ -8915,7 +10694,10 @@ fn coder_bounds(q: &[i64], w: usize, h: usize) -> (f64, f64) {
         *counts.entry(r).or_insert(0) += 1;
     }
     let n = res.len() as f64;
-    let entropy_bits: f64 = counts.values().map(|&c| -(c as f64) * (c as f64 / n).log2()).sum();
+    let entropy_bits: f64 = counts
+        .values()
+        .map(|&c| -(c as f64) * (c as f64 / n).log2())
+        .sum();
     let (mut a, mut cnt, mut bits) = (4u64, 1u64, 0u64);
     for &r in &res {
         let z = ((r << 1) ^ (r >> 63)) as u64;
@@ -8990,7 +10772,15 @@ fn tile_decode(bytes: &[u8], w: usize, h: usize) -> Vec<i64> {
 /// ★ P-SIZE on a solved domain: the near tile (the tile and half its buffer, `keep` cells each side of the tile) and the
 /// far levels (the tile's 2 × 2 and 4 × 4 means), each coded and decoded back exactly; the bytes a sample and the parts
 /// of 32 KB.
-fn p_size(raster: &[f64], w: usize, tile_x0: usize, tile_y0: usize, tile: usize, keep: usize, label: &str) {
+fn p_size(
+    raster: &[f64],
+    w: usize,
+    tile_x0: usize,
+    tile_y0: usize,
+    tile: usize,
+    keep: usize,
+    label: &str,
+) {
     let crop = |x0: usize, y0: usize, side: usize| -> Vec<i64> {
         let mut q = Vec::with_capacity(side * side);
         for y in y0..y0 + side {
@@ -9003,7 +10793,11 @@ fn p_size(raster: &[f64], w: usize, tile_x0: usize, tile_y0: usize, tile: usize,
     let near_side = tile + 2 * keep;
     let near = crop(tile_x0 - keep, tile_y0 - keep, near_side);
     let near_bytes = tile_encode(&near, near_side, near_side);
-    assert_eq!(tile_decode(&near_bytes, near_side, near_side), near, "the near tile decodes exactly");
+    assert_eq!(
+        tile_decode(&near_bytes, near_side, near_side),
+        near,
+        "the near tile decodes exactly"
+    );
     let means = |f: usize| -> Vec<i64> {
         let side = tile / f;
         let mut q = Vec::with_capacity(side * side);
@@ -9021,15 +10815,41 @@ fn p_size(raster: &[f64], w: usize, tile_x0: usize, tile_y0: usize, tile: usize,
         q
     };
     let (m2, m4) = (means(2), means(4));
-    let (b2, b4) = (tile_encode(&m2, tile / 2, tile / 2), tile_encode(&m4, tile / 4, tile / 4));
-    assert_eq!(tile_decode(&b2, tile / 2, tile / 2), m2, "the 2 × 2 level decodes exactly");
-    assert_eq!(tile_decode(&b4, tile / 4, tile / 4), m4, "the 4 × 4 level decodes exactly");
+    let (b2, b4) = (
+        tile_encode(&m2, tile / 2, tile / 2),
+        tile_encode(&m4, tile / 4, tile / 4),
+    );
+    assert_eq!(
+        tile_decode(&b2, tile / 2, tile / 2),
+        m2,
+        "the 2 × 2 level decodes exactly"
+    );
+    assert_eq!(
+        tile_decode(&b4, tile / 4, tile / 4),
+        m4,
+        "the 4 × 4 level decodes exactly"
+    );
     let far = b2.len() + b4.len();
     let rn = rice_encode(&near, near_side, near_side);
-    assert_eq!(rice_decode(&rn, near_side, near_side), near, "the Rice near tile decodes exactly");
-    let (r2e, r4e) = (rice_encode(&m2, tile / 2, tile / 2), rice_encode(&m4, tile / 4, tile / 4));
-    assert_eq!(rice_decode(&r2e, tile / 2, tile / 2), m2, "the Rice 2 × 2 level decodes exactly");
-    assert_eq!(rice_decode(&r4e, tile / 4, tile / 4), m4, "the Rice 4 × 4 level decodes exactly");
+    assert_eq!(
+        rice_decode(&rn, near_side, near_side),
+        near,
+        "the Rice near tile decodes exactly"
+    );
+    let (r2e, r4e) = (
+        rice_encode(&m2, tile / 2, tile / 2),
+        rice_encode(&m4, tile / 4, tile / 4),
+    );
+    assert_eq!(
+        rice_decode(&r2e, tile / 2, tile / 2),
+        m2,
+        "the Rice 2 × 2 level decodes exactly"
+    );
+    assert_eq!(
+        rice_decode(&r4e, tile / 4, tile / 4),
+        m4,
+        "the Rice 4 × 4 level decodes exactly"
+    );
     println!(
         "  P-SIZE {label}, THE ADAPTIVE RICE CODER (written and decoded back exactly): the near tile {:.0} KB ({:.2} bytes a sample, {} parts of 32 KB); the far levels {:.0} KB",
         rn.len() as f64 / 1024.0,
@@ -9089,20 +10909,32 @@ fn p_switch_band(
         let mut next = vec![0.0f64; nw2 * nw2];
         for y in 0..nw2 {
             for x in 0..nw2 {
-                next[y * nw2 + x] =
-                    0.25 * (lv[2 * y * lw + 2 * x] + lv[2 * y * lw + 2 * x + 1] + lv[(2 * y + 1) * lw + 2 * x] + lv[(2 * y + 1) * lw + 2 * x + 1]);
+                next[y * nw2 + x] = 0.25
+                    * (lv[2 * y * lw + 2 * x]
+                        + lv[2 * y * lw + 2 * x + 1]
+                        + lv[(2 * y + 1) * lw + 2 * x]
+                        + lv[(2 * y + 1) * lw + 2 * x + 1]);
             }
         }
         levels.push((nw2, next));
     }
     let bilinear = |lw: usize, lv: &[f64], c: f64, x: f64, y: f64| -> f64 {
         let (u, v) = (x / c - 0.5, y / c - 0.5);
-        let (i, j) = (u.floor().clamp(0.0, (lw - 2) as f64) as usize, v.floor().clamp(0.0, (lw - 2) as f64) as usize);
-        let (fu, fv) = ((u - i as f64).clamp(0.0, 1.0), (v - j as f64).clamp(0.0, 1.0));
+        let (i, j) = (
+            u.floor().clamp(0.0, (lw - 2) as f64) as usize,
+            v.floor().clamp(0.0, (lw - 2) as f64) as usize,
+        );
+        let (fu, fv) = (
+            (u - i as f64).clamp(0.0, 1.0),
+            (v - j as f64).clamp(0.0, 1.0),
+        );
         let at = |a: usize, b: usize| lv[b * lw + a];
-        (at(i, j) * (1.0 - fu) + at(i + 1, j) * fu) * (1.0 - fv) + (at(i, j + 1) * (1.0 - fu) + at(i + 1, j + 1) * fu) * fv
+        (at(i, j) * (1.0 - fu) + at(i + 1, j) * fu) * (1.0 - fv)
+            + (at(i, j + 1) * (1.0 - fu) + at(i + 1, j + 1) * fu) * fv
     };
-    println!("  P-SWITCH {label}: the step between a rung and the next coarser one over the tile (S_c {s_c:.2})");
+    println!(
+        "  P-SWITCH {label}: the step between a rung and the next coarser one over the tile (S_c {s_c:.2})"
+    );
     for r in 0..levels.len() - 1 {
         let (fw, fv) = (&levels[r].0, &levels[r].1);
         let (cw, cv) = (&levels[r + 1].0, &levels[r + 1].1);
@@ -9154,7 +10986,10 @@ fn p_switch_band(
             under = under.min(d);
         }
     }
-    println!("  P-BAND {label}: the fine ground over its node's mean up to {over:.0} m, under it down to {:.0} m", -under);
+    println!(
+        "  P-BAND {label}: the fine ground over its node's mean up to {over:.0} m, under it down to {:.0} m",
+        -under
+    );
 }
 
 fn seam_report(
@@ -9169,7 +11004,10 @@ fn seam_report(
 ) {
     let c = a.cell;
     let g = |ds: &lem::DomainSolve, gx: i64, gy: i64| -> f64 {
-        let (lx, ly) = (gx - (ds.x0 / c).round() as i64, gy - (ds.y0 / c).round() as i64);
+        let (lx, ly) = (
+            gx - (ds.x0 / c).round() as i64,
+            gy - (ds.y0 / c).round() as i64,
+        );
         if lx < 0 || ly < 0 || lx >= ds.w as i64 || ly >= ds.h as i64 {
             f64::NAN
         } else {
@@ -9177,7 +11015,10 @@ fn seam_report(
         }
     };
     let (gx0, gy0) = ((ax0 / c).round() as i64, (ay0 / c).round() as i64);
-    let (wc, hc) = ((2.0 * node_m / c).round() as usize, (node_m / c).round() as usize);
+    let (wc, hc) = (
+        (2.0 * node_m / c).round() as usize,
+        (node_m / c).round() as usize,
+    );
     let ge = gx0 + (node_m / c).round() as i64;
     let band = (CUT_BAND_M.load(std::sync::atomic::Ordering::Relaxed) as f64 / c).round() as i64;
     let cols: Vec<i64> = (ge - band..=ge + band).collect();
@@ -9217,17 +11058,29 @@ fn seam_report(
             let t = (((gx - cut[y]) as f64 / blend).clamp(-1.0, 1.0) * 0.5) + 0.5;
             let t = t * t * (3.0 - 2.0 * t);
             let (va, vb) = (g(a, gx, gy), g(b, gx, gy));
-            st[y * wc + x] = if !va.is_finite() { vb } else if !vb.is_finite() { va } else { va * (1.0 - t) + vb * t };
+            st[y * wc + x] = if !va.is_finite() {
+                vb
+            } else if !vb.is_finite() {
+                va
+            } else {
+                va * (1.0 - t) + vb * t
+            };
             jo[y * wc + x] = g(j, gx, gy);
         }
     }
     let pct = |mut v: Vec<f64>, p: f64| -> f64 {
         v.retain(|x| x.is_finite());
         v.sort_by(f64::total_cmp);
-        if v.is_empty() { f64::NAN } else { v[((v.len() - 1) as f64 * p) as usize] }
+        if v.is_empty() {
+            f64::NAN
+        } else {
+            v[((v.len() - 1) as f64 * p) as usize]
+        }
     };
     // The step the cut hides, and the slope break across it, beside the joint surface at the same places and inside A.
-    let steps: Vec<f64> = (0..hc).map(|y| (g(a, cut[y], gy0 + y as i64) - g(b, cut[y], gy0 + y as i64)).abs()).collect();
+    let steps: Vec<f64> = (0..hc)
+        .map(|y| (g(a, cut[y], gy0 + y as i64) - g(b, cut[y], gy0 + y as i64)).abs())
+        .collect();
     let brk = |f: &[f64], col: &dyn Fn(usize) -> i64| -> Vec<f64> {
         (0..hc)
             .map(|y| {
@@ -9256,7 +11109,16 @@ fn seam_report(
                 cells += 1;
                 let v = f[y * wc + x];
                 let mut low = true;
-                for (dx, dy) in [(-1i64, -1i64), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                for (dx, dy) in [
+                    (-1i64, -1i64),
+                    (0, -1),
+                    (1, -1),
+                    (-1, 0),
+                    (1, 0),
+                    (-1, 1),
+                    (0, 1),
+                    (1, 1),
+                ] {
                     let w2 = f[((y as i64 + dy) as usize) * wc + (x as i64 + dx) as usize];
                     if w2 <= v {
                         low = false;
@@ -9269,7 +11131,10 @@ fn seam_report(
         n as f64 / (cells as f64 * c * c / 1.0e6).max(1.0e-9)
     };
     let diff: Vec<f64> = st.iter().zip(&jo).map(|(p, q)| (p - q).abs()).collect();
-    println!("SEAM TEST — two tiles of {:.1} km stitched by the cut, against one joint solve", node_m / 1_000.0);
+    println!(
+        "SEAM TEST — two tiles of {:.1} km stitched by the cut, against one joint solve",
+        node_m / 1_000.0
+    );
     println!(
         "  the step the cut hides |A − B|: median {:.2} m, 99th {:.2} m; the cut wanders {} to {} columns from the edge",
         pct(steps.clone(), 0.5),
@@ -9299,11 +11164,14 @@ fn seam_report(
     hillshade_rect(&st, wc, hc, c, &format!("{dir}/{label}_stitched.png"));
     hillshade_rect(&jo, wc, hc, c, &format!("{dir}/{label}_joint.png"));
     // The cut drawn on the stitched relief (a diagnosis only).
-    let mut over = image::open(format!("{dir}/{label}_stitched.png")).expect("the relief reads").to_rgb8();
+    let mut over = image::open(format!("{dir}/{label}_stitched.png"))
+        .expect("the relief reads")
+        .to_rgb8();
     for (y, &x) in cut.iter().enumerate() {
         over.put_pixel((x - gx0) as u32, y as u32, image::Rgb([220, 30, 30]));
     }
-    over.save(format!("{dir}/{label}_stitched_cut.png")).expect("the cut writes");
+    over.save(format!("{dir}/{label}_stitched_cut.png"))
+        .expect("the cut writes");
     // Two views across the seam, the same camera over both surfaces.
     let sample = |f: &[f64]| {
         let f = f.to_vec();
@@ -9326,8 +11194,28 @@ fn seam_report(
     let detail = |_: f64, _: f64| c;
     let edge_x = ax0 + node_m;
     for (name, cam) in [
-        ("from_west", view::Camera { x: edge_x - 3_000.0, n: -(ay0 + 0.8 * node_m), z: 0.0, yaw: 0.6, pitch: -0.2, over: 250.0 }),
-        ("from_east", view::Camera { x: edge_x + 3_000.0, n: -(ay0 + 0.8 * node_m), z: 0.0, yaw: std::f64::consts::PI - 0.6, pitch: -0.2, over: 250.0 }),
+        (
+            "from_west",
+            view::Camera {
+                x: edge_x - 3_000.0,
+                n: -(ay0 + 0.8 * node_m),
+                z: 0.0,
+                yaw: 0.6,
+                pitch: -0.2,
+                over: 250.0,
+            },
+        ),
+        (
+            "from_east",
+            view::Camera {
+                x: edge_x + 3_000.0,
+                n: -(ay0 + 0.8 * node_m),
+                z: 0.0,
+                yaw: std::f64::consts::PI - 0.6,
+                pitch: -0.2,
+                over: 250.0,
+            },
+        ),
     ] {
         for (who, f) in [("stitched", &st), ("joint", &jo)] {
             let s = sample(f);
@@ -9377,7 +11265,14 @@ impl Field {
                 v[x * self.h + y] = self.v[y * self.w + x];
             }
         }
-        Field { gx0: self.gy0, gy0: self.gx0, w: self.h, h: self.w, cell: self.cell, v }
+        Field {
+            gx0: self.gy0,
+            gy0: self.gx0,
+            w: self.h,
+            h: self.w,
+            cell: self.cell,
+            v,
+        }
     }
 }
 
@@ -9431,10 +11326,26 @@ fn stitch_v(a: &Field, b: &Field, ge: i64, band: i64, blend: f64) -> (Field, Vec
             let t = (((gx - cut[y]) as f64 / blend).clamp(-1.0, 1.0) * 0.5) + 0.5;
             let t = t * t * (3.0 - 2.0 * t);
             let (va, vb) = (a.at(gx, gy), b.at(gx, gy));
-            v[y * w + x] = if !va.is_finite() { vb } else if !vb.is_finite() { va } else { va * (1.0 - t) + vb * t };
+            v[y * w + x] = if !va.is_finite() {
+                vb
+            } else if !vb.is_finite() {
+                va
+            } else {
+                va * (1.0 - t) + vb * t
+            };
         }
     }
-    (Field { gx0, gy0, w, h, cell: a.cell, v }, cut)
+    (
+        Field {
+            gx0,
+            gy0,
+            w,
+            h,
+            cell: a.cell,
+            v,
+        },
+        cut,
+    )
 }
 
 /// The same stitch across a horizontal edge at the global row `ge` (`a` north, `b` south).
@@ -9447,11 +11358,22 @@ fn stitch_h(a: &Field, b: &Field, ge: i64, band: i64, blend: f64) -> (Field, Vec
 /// vertical cut, then the rows along the horizontal cut) against ONE joint solve of all four: the slope break along both
 /// cuts against the joint at the same places, the pits within a kilometre of the corner, the difference, the maps.
 #[allow(clippy::too_many_arguments)]
-fn corner_report(tiles: [&lem::DomainSolve; 4], joint: &lem::DomainSolve, ax0: f64, ay0: f64, node_m: f64, dir: &str, label: &str) {
+fn corner_report(
+    tiles: [&lem::DomainSolve; 4],
+    joint: &lem::DomainSolve,
+    ax0: f64,
+    ay0: f64,
+    node_m: f64,
+    dir: &str,
+    label: &str,
+) {
     let c = tiles[0].cell;
     let band = (CUT_BAND_M.load(std::sync::atomic::Ordering::Relaxed) as f64 / c).round() as i64;
     let blend = CUT_BLEND_CELLS.load(std::sync::atomic::Ordering::Relaxed) as f64;
-    let (ge_x, ge_y) = (((ax0 + node_m) / c).round() as i64, ((ay0 + node_m) / c).round() as i64);
+    let (ge_x, ge_y) = (
+        ((ax0 + node_m) / c).round() as i64,
+        ((ay0 + node_m) / c).round() as i64,
+    );
     let f: Vec<Field> = tiles.iter().map(|t| Field::of(t)).collect();
     let (north, cut_n) = stitch_v(&f[0], &f[1], ge_x, band, blend);
     let (south, cut_s) = stitch_v(&f[2], &f[3], ge_x, band, blend);
@@ -9471,7 +11393,11 @@ fn corner_report(tiles: [&lem::DomainSolve; 4], joint: &lem::DomainSolve, ax0: f
     let pct = |mut v: Vec<f64>, p: f64| -> f64 {
         v.retain(|x| x.is_finite());
         v.sort_by(f64::total_cmp);
-        if v.is_empty() { f64::NAN } else { v[((v.len() - 1) as f64 * p) as usize] }
+        if v.is_empty() {
+            f64::NAN
+        } else {
+            v[((v.len() - 1) as f64 * p) as usize]
+        }
     };
     // The slope break across a vertical cut at row y (column x) and across the horizontal cut at column x (row y).
     let brk_v = |g: &[f64], x: i64, y: i64| -> f64 {
@@ -9487,7 +11413,9 @@ fn corner_report(tiles: [&lem::DomainSolve; 4], joint: &lem::DomainSolve, ax0: f
         if y < 3 || y + 3 >= n || x >= n {
             return f64::NAN;
         }
-        (((g[(y + 3) * n + x] - g[(y + 1) * n + x]) - (g[(y - 1) * n + x] - g[(y - 3) * n + x])) / (2.0 * c)).abs()
+        (((g[(y + 3) * n + x] - g[(y + 1) * n + x]) - (g[(y - 1) * n + x] - g[(y - 3) * n + x]))
+            / (2.0 * c))
+            .abs()
     };
     let mut on_cuts = (Vec::new(), Vec::new());
     for (k, &x) in cut_n.iter().enumerate() {
@@ -9515,7 +11443,16 @@ fn corner_report(tiles: [&lem::DomainSolve; 4], joint: &lem::DomainSolve, ax0: f
                 let v = g[ly * n + lx];
                 cells += 1;
                 let mut low = true;
-                for (dx, dy) in [(-1i64, -1i64), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                for (dx, dy) in [
+                    (-1i64, -1i64),
+                    (0, -1),
+                    (1, -1),
+                    (-1, 0),
+                    (1, 0),
+                    (-1, 1),
+                    (0, 1),
+                    (1, 1),
+                ] {
                     if g[((ly as i64 + dy) as usize) * n + (lx as i64 + dx) as usize] <= v {
                         low = false;
                         break;
@@ -9527,7 +11464,10 @@ fn corner_report(tiles: [&lem::DomainSolve; 4], joint: &lem::DomainSolve, ax0: f
         count as f64 / (cells as f64 * c * c / 1.0e6).max(1.0e-9)
     };
     let diff: Vec<f64> = st.iter().zip(&jo).map(|(p, q)| (p - q).abs()).collect();
-    println!("CORNER TEST — four tiles of {:.1} km stitched by the one rule, against one joint solve", node_m / 1_000.0);
+    println!(
+        "CORNER TEST — four tiles of {:.1} km stitched by the one rule, against one joint solve",
+        node_m / 1_000.0
+    );
     println!(
         "  the slope break along the three cuts, 99th: stitched {:.3}, joint at the same places {:.3}",
         pct(on_cuts.0, 0.99),
@@ -9548,7 +11488,9 @@ fn corner_report(tiles: [&lem::DomainSolve; 4], joint: &lem::DomainSolve, ax0: f
     let _ = std::fs::create_dir_all(dir);
     hillshade_rect(&st, n, n, c, &format!("{dir}/{label}_corner_stitched.png"));
     hillshade_rect(&jo, n, n, c, &format!("{dir}/{label}_corner_joint.png"));
-    let mut over = image::open(format!("{dir}/{label}_corner_stitched.png")).expect("the relief reads").to_rgb8();
+    let mut over = image::open(format!("{dir}/{label}_corner_stitched.png"))
+        .expect("the relief reads")
+        .to_rgb8();
     let mut mark = |x: i64, y: i64| {
         let (lx, ly) = (x - cx0, y - cy0);
         if lx >= 0 && ly >= 0 && (lx as usize) < n && (ly as usize) < n {
@@ -9564,6 +11506,9 @@ fn corner_report(tiles: [&lem::DomainSolve; 4], joint: &lem::DomainSolve, ax0: f
     for (k, &y) in cut_h.iter().enumerate() {
         mark(all.gx0 + k as i64, y);
     }
-    over.save(format!("{dir}/{label}_corner_stitched_cut.png")).expect("the cut writes");
-    println!("  the maps: {dir}/{label}_corner_stitched.png, …_corner_joint.png, …_corner_stitched_cut.png");
+    over.save(format!("{dir}/{label}_corner_stitched_cut.png"))
+        .expect("the cut writes");
+    println!(
+        "  the maps: {dir}/{label}_corner_stitched.png, …_corner_joint.png, …_corner_stitched_cut.png"
+    );
 }

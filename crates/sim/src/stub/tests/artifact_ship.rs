@@ -311,7 +311,14 @@ fn twenty_tiles_under_one_view_ship_four_a_tick_each_once() {
     let rest: usize = (0..5)
         .map(|_| bulks(&rig.tick(vec![]), &audience).len())
         .sum();
-    assert_eq!((first, first + rest), (4, 20), "four a tick, every one of the twenty");
-    assert_eq!(rig.world.resource::<ArtifactWants>().1[&GATEWAY].sent.len(), 20);
+    assert_eq!(
+        (first, first + rest),
+        (4, 20),
+        "four a tick, every one of the twenty"
+    );
+    assert_eq!(
+        rig.world.resource::<ArtifactWants>().1[&GATEWAY].sent.len(),
+        20
+    );
     assert_eq!(rig.world.resource::<StubStats>().artifact_tiles_sent, 20);
 }

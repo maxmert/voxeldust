@@ -22,8 +22,8 @@
 use super::l1::{TILE_NODES, TileKey};
 use super::points::{chart_cell, chart_of};
 use super::stitch::{
-    BLEND, CutLine, Field, MISSING, Meet, TileCuts, col_cut_half, corner_point, draw, joined, mid_across_columns, mid_across_rows,
-    row_cut_half,
+    BLEND, CutLine, Field, MISSING, Meet, TileCuts, col_cut_half, corner_point, draw, joined,
+    mid_across_columns, mid_across_rows, row_cut_half,
 };
 use std::borrow::Cow;
 use vd_seed::bend::Face;
@@ -58,7 +58,12 @@ fn square_in(lv: Level, key: TileKey, chart: Face) -> Option<[i64; 4]> {
     let [x0, y0, x1, y1] = own_square(lv, key);
     let a = to_chart(lv, key.face, chart, x0, y0)?;
     let b = to_chart(lv, key.face, chart, x1 - 1, y1 - 1)?;
-    Some([a.0.min(b.0), a.1.min(b.1), a.0.max(b.0) + 1, a.1.max(b.1) + 1])
+    Some([
+        a.0.min(b.0),
+        a.1.min(b.1),
+        a.0.max(b.0) + 1,
+        a.1.max(b.1) + 1,
+    ])
 }
 
 /// `src` (a raster in `from`'s chart) read over the rectangle `[x0, x1) × [y0, y1)` of `to`'s chart.
@@ -70,7 +75,13 @@ fn pull(lv: Level, src: &Field, from: Face, to: Face, [x0, y0, x1, y1]: [i64; 4]
             v.push(to_chart(lv, to, from, x, y).map_or(MISSING, |(a, b)| src.at(a, b)));
         }
     }
-    Field { gx0: x0, gy0: y0, w, h, v }
+    Field {
+        gx0: x0,
+        gy0: y0,
+        w,
+        h,
+        v,
+    }
 }
 
 /// A tile corner's place (between cells) in `c`'s chart, from the cells around it in `t`'s chart.
@@ -100,7 +111,15 @@ struct Side {
 fn shared_side(a: [i64; 4], b: [i64; 4]) -> Option<Side> {
     let (ylo, yhi) = (a[1].max(b[1]), a[3].min(b[3]));
     let (xlo, xhi) = (a[0].max(b[0]), a[2].min(b[2]));
-    let side = |cols: bool, ge: i64, lo: i64, hi: i64, first_west: bool| (lo < hi).then_some(Side { cols, ge, lo, hi, first_west });
+    let side = |cols: bool, ge: i64, lo: i64, hi: i64, first_west: bool| {
+        (lo < hi).then_some(Side {
+            cols,
+            ge,
+            lo,
+            hi,
+            first_west,
+        })
+    };
     if a[2] == b[0] {
         side(true, a[2], ylo, yhi, true)
     } else if b[2] == a[0] {
@@ -149,7 +168,11 @@ impl Work<'_> {
     }
 
     fn raster(&self, key: TileKey) -> Option<&Field> {
-        self.slots.iter().flatten().find(|(k, _)| *k == key).map(|(_, f)| *f)
+        self.slots
+            .iter()
+            .flatten()
+            .find(|(k, _)| *k == key)
+            .map(|(_, f)| *f)
     }
 
     fn pulled(&self, key: TileKey, c: Face, rect: [i64; 4]) -> Option<Field> {
@@ -168,7 +191,10 @@ impl Work<'_> {
         let (cx, cy) = corner_in(self.lv, self.face, (vx, vy), c)?;
         let b = self.lv.band;
         let rect = [cx - b, cy - b, cx + b + 1, cy + b + 1];
-        let f: Vec<Field> = keys.iter().map(|&k| self.pulled(k, c, rect)).collect::<Option<_>>()?;
+        let f: Vec<Field> = keys
+            .iter()
+            .map(|&k| self.pulled(k, c, rect))
+            .collect::<Option<_>>()?;
         let (kx, ky) = corner_point([&f[0], &f[1], &f[2], &f[3]], cx, cy, b);
         to_chart(self.lv, c, self.face, kx, ky)
     }
@@ -184,7 +210,9 @@ impl Work<'_> {
         let (cx, cy) = corner_in(self.lv, self.face, self.corners[ci], c)?;
         let a = to_chart(self.lv, c, self.face, cx - 1, cy)?;
         let b = to_chart(self.lv, c, self.face, cx, cy)?;
-        Some(Meet::Four { rows_first: a.1 != b.1 })
+        Some(Meet::Four {
+            rows_first: a.1 != b.1,
+        })
     }
 
     /// ★ AN EDGE'S MIDPOINT, in the tile's chart: where the pair `(p, q)` agree best on their side's middle line, searched
@@ -194,10 +222,28 @@ impl Work<'_> {
         let (band, mid) = (self.lv.band, (side.lo + side.hi) >> 1);
         let (x, y) = if side.cols {
             let rect = [side.ge - band, mid, side.ge + band + 1, mid + 1];
-            (mid_across_columns(&self.pulled(a, c, rect)?, &self.pulled(b, c, rect)?, side.ge, mid, band), mid)
+            (
+                mid_across_columns(
+                    &self.pulled(a, c, rect)?,
+                    &self.pulled(b, c, rect)?,
+                    side.ge,
+                    mid,
+                    band,
+                ),
+                mid,
+            )
         } else {
             let rect = [mid, side.ge - band, mid + 1, side.ge + band + 1];
-            (mid, mid_across_rows(&self.pulled(a, c, rect)?, &self.pulled(b, c, rect)?, side.ge, mid, band))
+            (
+                mid,
+                mid_across_rows(
+                    &self.pulled(a, c, rect)?,
+                    &self.pulled(b, c, rect)?,
+                    side.ge,
+                    mid,
+                    band,
+                ),
+            )
         };
         to_chart(self.lv, c, self.face, x, y)
     }
@@ -210,8 +256,16 @@ impl Work<'_> {
             End::Corner(ci) => {
                 let (vx, vy) = corner_in(self.lv, self.face, self.corners[ci], c)?;
                 let along = if side.cols { vy } else { vx };
-                let a = if along == side.lo { side.lo } else { side.hi - 1 };
-                Some(if side.cols { (side.ge, a) } else { (a, side.ge) })
+                let a = if along == side.lo {
+                    side.lo
+                } else {
+                    side.hi - 1
+                };
+                Some(if side.cols {
+                    (side.ge, a)
+                } else {
+                    (a, side.ge)
+                })
             }
         }
     }
@@ -223,16 +277,38 @@ impl Work<'_> {
         let band = self.lv.band;
         let (e0, e1) = (self.end_in(from, c, side)?, self.end_in(to, c, side)?);
         let along = |e: (i64, i64)| if side.cols { e.1 } else { e.0 };
-        let (e0, e1) = if along(e0) <= along(e1) { (e0, e1) } else { (e1, e0) };
+        let (e0, e1) = if along(e0) <= along(e1) {
+            (e0, e1)
+        } else {
+            (e1, e0)
+        };
         let line = if side.cols {
             let rect = [side.ge - band, e0.1, side.ge + band + 1, e1.1 + 1];
-            col_cut_half(&self.pulled(a, c, rect)?, &self.pulled(b, c, rect)?, side.ge, band, e0, e1)?
+            col_cut_half(
+                &self.pulled(a, c, rect)?,
+                &self.pulled(b, c, rect)?,
+                side.ge,
+                band,
+                e0,
+                e1,
+            )?
         } else {
             let rect = [e0.0, side.ge - band, e1.0 + 1, side.ge + band + 1];
-            row_cut_half(&self.pulled(a, c, rect)?, &self.pulled(b, c, rect)?, side.ge, band, e0, e1)?
+            row_cut_half(
+                &self.pulled(a, c, rect)?,
+                &self.pulled(b, c, rect)?,
+                side.ge,
+                band,
+                e0,
+                e1,
+            )?
         };
         // The line in the tile's chart: along the side as the tile's chart runs it.
-        let t_cols = shared_side(square_in(self.lv, self.key(p)?, self.face)?, square_in(self.lv, self.key(q)?, self.face)?)?.cols;
+        let t_cols = shared_side(
+            square_in(self.lv, self.key(p)?, self.face)?,
+            square_in(self.lv, self.key(q)?, self.face)?,
+        )?
+        .cols;
         let mut pts: Vec<(i64, i64)> = Vec::with_capacity(line.path.len());
         for (k, &across) in line.path.iter().enumerate() {
             let a = line.a0 + k as i64;
@@ -242,31 +318,55 @@ impl Work<'_> {
         }
         pts.sort_unstable();
         let a0 = pts.first()?.0;
-        Some(CutLine { a0, path: pts.into_iter().map(|(_, across)| across).collect() })
+        Some(CutLine {
+            a0,
+            path: pts.into_iter().map(|(_, across)| across).collect(),
+        })
     }
 }
 
 /// A cut that no corner reads (a pair with a slot the cube does not hold).
 fn unread() -> CutLine {
-    CutLine { a0: 0, path: vec![0] }
+    CutLine {
+        a0: 0,
+        path: vec![0],
+    }
 }
 
 /// The slots' offsets from the tile, row by row NW … SE (a column and a row step each).
-const SLOT_STEP: [(i64, i64); 9] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
+const SLOT_STEP: [(i64, i64); 9] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (0, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
 
 /// ★ THE NINE TILES AROUND `key` on any face (row by row NW … SE, `2^shift` cells a node, `n` cells along a face's
 /// edge): each slot the tile that holds the cell just past the tile's side or corner in its chart; `None` past a cube
 /// corner, where no face holds that cell.
 #[must_use]
 pub fn block_keys(key: TileKey, shift: u32, n: i32) -> [Option<TileKey>; 9] {
-    let lv = Level { side: i64::from(TILE_NODES) << shift, band: 0, n };
+    let lv = Level {
+        side: i64::from(TILE_NODES) << shift,
+        band: 0,
+        n,
+    };
     let ts = shift + TILE_NODES.trailing_zeros();
     let [x0, y0, x1, y1] = own_square(lv, key);
     SLOT_STEP.map(|(dx, dy)| {
         let x = [x0 - 1, x0, x1][(dx + 1) as usize];
         let y = [y0 - 1, y0, y1][(dy + 1) as usize];
         let c = chart_cell(key.face, x as i32, y as i32, n)?;
-        Some(TileKey { face: Face::from_index(c.face)?, tx: c.i >> ts, ty: c.j >> ts })
+        Some(TileKey {
+            face: Face::from_index(c.face)?,
+            tx: c.i >> ts,
+            ty: c.j >> ts,
+        })
     })
 }
 
@@ -286,12 +386,25 @@ impl Prepared<'_> {
 }
 
 /// Everything the tile in slot 4 of `block` draws from (see [`finished_square`]).
-fn prepare<'a>(block: [Option<(TileKey, &'a Field)>; 9], shift: u32, n: i32) -> Option<Prepared<'a>> {
-    let lv = Level { side: i64::from(TILE_NODES) << shift, band: (1i64 << shift) - BLEND, n };
+fn prepare<'a>(
+    block: [Option<(TileKey, &'a Field)>; 9],
+    shift: u32,
+    n: i32,
+) -> Option<Prepared<'a>> {
+    let lv = Level {
+        side: i64::from(TILE_NODES) << shift,
+        band: (1i64 << shift) - BLEND,
+        n,
+    };
     let (key, _) = block[4]?;
     let square = own_square(lv, key);
     let [x0, y0, x1, y1] = square;
-    let work = Work { lv, face: key.face, slots: block, corners: [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] };
+    let work = Work {
+        lv,
+        face: key.face,
+        slots: block,
+        corners: [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
+    };
     // The rasters in the tile's chart, each over its own square and one node beyond.
     let node = 1i64 << shift;
     let mut here: Vec<Cow<'a, Field>> = Vec::with_capacity(9);
@@ -300,15 +413,35 @@ fn prepare<'a>(block: [Option<(TileKey, &'a Field)>; 9], shift: u32, n: i32) -> 
             Some((k, f)) if k.face == key.face => Cow::Borrowed(f),
             Some((k, f)) => {
                 let [a, b, c, d] = square_in(lv, k, key.face)?;
-                Cow::Owned(pull(lv, f, k.face, key.face, [a - node, b - node, c + node, d + node]))
+                Cow::Owned(pull(
+                    lv,
+                    f,
+                    k.face,
+                    key.face,
+                    [a - node, b - node, c + node, d + node],
+                ))
             }
-            None => Cow::Owned(Field { gx0: 0, gy0: 0, w: 0, h: 0, v: Vec::new() }),
+            None => Cow::Owned(Field {
+                gx0: 0,
+                gy0: 0,
+                w: 0,
+                h: 0,
+                v: Vec::new(),
+            }),
         });
     }
-    let points: Vec<(i64, i64)> = (0..4).map(|ci| work.corner_point(ci)).collect::<Option<_>>()?;
+    let points: Vec<(i64, i64)> = (0..4)
+        .map(|ci| work.corner_point(ci))
+        .collect::<Option<_>>()?;
     let meets: Vec<Meet> = (0..4).map(|ci| work.meet(ci)).collect::<Option<_>>()?;
     // A corner's end of a half: its point, or the corner itself where three tiles meet.
-    let end = |ci: usize| if meets[ci] == Meet::Three { End::Corner(ci) } else { End::At(points[ci]) };
+    let end = |ci: usize| {
+        if meets[ci] == Meet::Three {
+            End::Corner(ci)
+        } else {
+            End::At(points[ci])
+        }
+    };
     let mid = |p: usize, q: usize| work.midpoint(p, q).map(End::At);
     // An outer half (a neighbour pair's, from its midpoint to the tile's corner), or none where a slot is missing.
     let outer = |p: usize, q: usize, ci: usize| -> Option<CutLine> {
@@ -320,7 +453,10 @@ fn prepare<'a>(block: [Option<(TileKey, &'a Field)>; 9], shift: u32, n: i32) -> 
     // The tile's own edge: its two halves joined at the midpoint, in the tile's chart's order along it.
     let whole = |p: usize, q: usize, c0: usize, c1: usize| -> Option<CutLine> {
         let m = mid(p, q)?;
-        Some(joined(work.half(p, q, end(c0), m)?, &work.half(p, q, m, end(c1))?))
+        Some(joined(
+            work.half(p, q, end(c0), m)?,
+            &work.half(p, q, m, end(c1))?,
+        ))
     };
     let cuts = TileCuts {
         corners: [points[0], points[1], points[2], points[3]],
@@ -329,9 +465,18 @@ fn prepare<'a>(block: [Option<(TileKey, &'a Field)>; 9], shift: u32, n: i32) -> 
             [whole(3, 4, 0, 2)?, whole(4, 5, 1, 3)?],
             [outer(6, 7, 2)?, outer(7, 8, 3)?],
         ],
-        rows: [[outer(0, 3, 0)?, whole(1, 4, 0, 1)?, outer(2, 5, 1)?], [outer(3, 6, 2)?, whole(4, 7, 2, 3)?, outer(5, 8, 3)?]],
+        rows: [
+            [outer(0, 3, 0)?, whole(1, 4, 0, 1)?, outer(2, 5, 1)?],
+            [outer(3, 6, 2)?, whole(4, 7, 2, 3)?, outer(5, 8, 3)?],
+        ],
     };
-    Some(Prepared { here, cuts, meets: [meets[0], meets[1], meets[2], meets[3]], square, side: lv.side })
+    Some(Prepared {
+        here,
+        cuts,
+        meets: [meets[0], meets[1], meets[2], meets[3]],
+        square,
+        side: lv.side,
+    })
 }
 
 /// ★ THE FINISHED SQUARE of the tile in slot 4 of `block` (row by row NW … SE, as [`block_keys`] names them; each slot

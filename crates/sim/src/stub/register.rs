@@ -123,6 +123,8 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(ParentRealmNode::default());
     world.insert_resource(ChildRealmNodes::default());
     world.insert_resource(WasOccupied::default());
+    // Ruling B91 — the host's word that a first solve has not landed; `false` until the host writes it.
+    world.insert_resource(crate::stub::aoi::WorkInHand::default());
     world.insert_resource(ChildLiveness::default());
     world.insert_resource(OpenWindows::default());
     world.insert_resource(RelayShip::default());

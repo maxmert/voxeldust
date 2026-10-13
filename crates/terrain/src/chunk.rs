@@ -365,7 +365,10 @@ impl ColumnRead<'_> {
                             zi,
                             zj,
                         )?;
-                        (crate::artifact::sample_z(l, f, zf, rung, zi, zj)?, self.first)
+                        (
+                            crate::artifact::sample_z(l, f, zf, rung, zi, zj)?,
+                            self.first,
+                        )
                     }
                 }
             }

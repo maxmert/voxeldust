@@ -141,6 +141,8 @@ impl ArtifactWorker for ThreadedWorker {
         std::thread::Builder::new()
             .name("artifact-solve".to_owned())
             .spawn(move || {
+                // ★ BELOW THE TICK AND THE WINDOW (ruling B91): this thread and every helper of the solve's steps.
+                vd_terrain::par::adopt_start_step(crate::thread_class::lower_to_solve_class);
                 let started = std::time::Instant::now();
                 let answer = run_solve_on(&job, cores).map(|artifact| SolveDone {
                     artifact,
@@ -155,7 +157,14 @@ impl ArtifactWorker for ThreadedWorker {
     }
 
     fn poll(&mut self) -> Option<Option<SolveDone>> {
-        let answer = self.receiver.as_ref()?.try_recv().ok()?;
+        let answer = match self.receiver.as_ref()?.try_recv() {
+            Ok(answer) => answer,
+            Err(crossbeam_channel::TryRecvError::Empty) => return None,
+            // ★ A SOLVE THREAD THAT DIED (a panic in a step) dropped its sender: the solve ENDED with nothing, once.
+            // Before ruling B91 this read "still running" for ever, which since B91 would keep the realm alive for
+            // ever (a first solve that has not landed keeps its realm).
+            Err(crossbeam_channel::TryRecvError::Disconnected) => None,
+        };
         self.receiver = None;
         Some(answer)
     }
@@ -205,5 +214,21 @@ mod tests {
         assert_eq!(second.artifact, first.artifact);
         assert!(!threaded.busy());
         assert_eq!(threaded.poll(), None);
+    }
+
+    /// ★ A SOLVE THREAD THAT DIED ENDS ITS SOLVE (ruling B91): its sender is gone, so the worker answers "nothing" once
+    /// and is free — never "still running" for ever, which would keep the realm alive for ever.
+    #[test]
+    fn a_dead_solve_thread_ends_the_solve_with_nothing() {
+        let (sender, receiver) = crossbeam_channel::bounded::<Option<SolveDone>>(1);
+        drop(sender);
+        let mut worker = ThreadedWorker {
+            receiver: Some(receiver),
+            cores: Cores::default(),
+        };
+        assert!(worker.busy());
+        assert_eq!(worker.poll(), Some(None));
+        assert!(!worker.busy());
+        assert_eq!(worker.poll(), None);
     }
 }

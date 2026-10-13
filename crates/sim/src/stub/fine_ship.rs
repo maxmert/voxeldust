@@ -80,7 +80,9 @@ pub struct FineSource(pub Option<Box<dyn FineTiles>>);
 
 impl std::fmt::Debug for FineSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FineSource").field("present", &self.0.is_some()).finish()
+        f.debug_struct("FineSource")
+            .field("present", &self.0.is_some())
+            .finish()
     }
 }
 
@@ -122,7 +124,10 @@ fn answer(
     let mut budget = FINE_BYTES_PER_TICK;
     let mut finished = 0u64;
     while budget > 0 {
-        let Some((tile, level, from)) = current.take().or_else(|| next_record(source, named, sent, levels)) else {
+        let Some((tile, level, from)) = current
+            .take()
+            .or_else(|| next_record(source, named, sent, levels))
+        else {
             break;
         };
         let Some(parts) = source.parts(tile, level, level + 1) else {
@@ -214,7 +219,13 @@ pub(crate) fn emit_fine(
     // ★ THE ANSWERS: each gateway's named tiles to its cache for this realm, one level a record, the coarsest first.
     for (gateway, g) in &mut wants.2 {
         let mut send = |part: Bytes| {
-            super::artifact_ship::push_bulk(&mut outbox, *gateway, realm_fence, BulkAudience::Realm(config.realm), part);
+            super::artifact_ship::push_bulk(
+                &mut outbox,
+                *gateway,
+                realm_fence,
+                BulkAudience::Realm(config.realm),
+                part,
+            );
             stats.fine_parts_sent += 1;
         };
         stats.fine_tiles_sent += answer(source, &g.named, &mut g.sent, &mut g.current, &mut send);

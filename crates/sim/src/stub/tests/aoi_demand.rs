@@ -1601,6 +1601,41 @@ fn a_live_child_bit_keeps_the_parent_non_empty() {
     );
 }
 
+/// ★ A FIRST SOLVE THAT HAS NOT LANDED KEEPS ITS REALM (ruling B91, SL7 amended). With work in hand an empty realm
+/// withholds its Empty self-report — the reconciler keeps a live realm that is not confirmed empty — and ships no
+/// occupancy bit, because a solve is no occupant. When the work ends, the next pass reports Empty again.
+#[test]
+fn work_in_hand_withholds_the_empty_report_and_never_beats_the_bit() {
+    const PARENT_NODE: NodeId = NodeId(55);
+    let mut rig = parented_aoi_rig(4);
+    resolve_parent_head(
+        &mut rig,
+        StubConfig::root_coord(OWN_REALM).lowered(),
+        PARENT_NODE,
+    );
+    rig.world.resource_mut::<WorkInHand>().0 = true;
+    rig.set_local_tick(8);
+    let sent = rig.tick(vec![]);
+    assert!(
+        !demands(&sent).iter().any(|d| d.verb == DemandVerb::Empty),
+        "a realm whose first solve runs never reports itself empty"
+    );
+    assert!(
+        child_live_bits(&sent).is_empty(),
+        "and never claims an occupant to its parent"
+    );
+    rig.world.resource_mut::<WorkInHand>().0 = false;
+    rig.set_local_tick(12);
+    let sent = rig.tick(vec![]);
+    assert!(
+        demands(&sent)
+            .iter()
+            .any(|d| (d.child.lowered() == OTHER_REALM) & (d.verb == DemandVerb::Empty)),
+        "the solve landed: the realm reports Empty again"
+    );
+    assert!(child_live_bits(&sent).is_empty());
+}
+
 #[test]
 fn a_child_observer_never_lands_in_an_occupants_verdict_but_a_dot_does() {
     // The `Occupants` verdict is folded ONLY over DOT observers — an occupied CHILD runs the

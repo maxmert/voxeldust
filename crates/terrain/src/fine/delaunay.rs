@@ -39,7 +39,11 @@ const NEXT: [usize; 3] = [1, 2, 0];
 const PREV: [usize; 3] = [2, 0, 1];
 
 fn raw(d: &Dir) -> [i128; 3] {
-    [i128::from(d[0].raw()), i128::from(d[1].raw()), i128::from(d[2].raw())]
+    [
+        i128::from(d[0].raw()),
+        i128::from(d[1].raw()),
+        i128::from(d[2].raw()),
+    ]
 }
 
 /// The squared chord between two directions at 80 fraction bits (exact).
@@ -54,7 +58,8 @@ pub fn chord2(a: &Dir, b: &Dir) -> i128 {
 #[must_use]
 pub fn orient(a: &Dir, b: &Dir, c: &Dir) -> i128 {
     let (a, b, c) = (raw(a), raw(b), raw(c));
-    a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0])
+    a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0])
 }
 
 /// `det[b − a, c − a, d − a]`: positive when `d` lies inside the circle through `a`, `b`, `c` (counter-clockwise from
@@ -65,7 +70,8 @@ pub fn in_circle(a: &Dir, b: &Dir, c: &Dir, d: &Dir) -> i128 {
     let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
     let w = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
-    w[0] * (u[1] * v[2] - u[2] * v[1]) - w[1] * (u[0] * v[2] - u[2] * v[0]) + w[2] * (u[0] * v[1] - u[1] * v[0])
+    w[0] * (u[1] * v[2] - u[2] * v[1]) - w[1] * (u[0] * v[2] - u[2] * v[0])
+        + w[2] * (u[0] * v[1] - u[1] * v[0])
 }
 
 /// A triangle: its three vertices counter-clockwise from outside, and across each vertex's opposite edge the
@@ -122,7 +128,11 @@ fn unit(v: [i128; 3]) -> Dir {
     let len2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     let bits = (128 - len2.leading_zeros()) >> 1;
     let shift = bits.saturating_sub(DIR_BITS - 1);
-    normalise([Gi::new((v[0] >> shift) as i64), Gi::new((v[1] >> shift) as i64), Gi::new((v[2] >> shift) as i64)])
+    normalise([
+        Gi::new((v[0] >> shift) as i64),
+        Gi::new((v[1] >> shift) as i64),
+        Gi::new((v[2] >> shift) as i64),
+    ])
 }
 
 /// ★ THE TRIANGULATION of `pts` (each a direction): `None` for fewer than three points.
@@ -149,7 +159,11 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
     let mut axis = [0i128; 3];
     axis[least] = 1i128 << DIR_BITS;
     let cross = |a: [i128; 3], b: [i128; 3]| {
-        [(a[1] * b[2] - a[2] * b[1]) >> DIR_BITS, (a[2] * b[0] - a[0] * b[2]) >> DIR_BITS, (a[0] * b[1] - a[1] * b[0]) >> DIR_BITS]
+        [
+            (a[1] * b[2] - a[2] * b[1]) >> DIR_BITS,
+            (a[2] * b[0] - a[0] * b[2]) >> DIR_BITS,
+            (a[0] * b[1] - a[1] * b[0]) >> DIR_BITS,
+        ]
     };
     let e1 = raw(&unit(cross(c0, axis)));
     let e2 = raw(&unit(cross(c0, e1)));
@@ -176,8 +190,15 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
     let s2 = far(-half, -q);
     all.extend([s0, s1, s2]);
     let (a, b, c) = (n as u32, n as u32 + 1, n as u32 + 2);
-    let first = if orient(&all[a as usize], &all[b as usize], &all[c as usize]) > 0 { [a, b, c] } else { [a, c, b] };
-    let mut tris = vec![Tri { v: first, n: [NONE; 3] }];
+    let first = if orient(&all[a as usize], &all[b as usize], &all[c as usize]) > 0 {
+        [a, b, c]
+    } else {
+        [a, c, b]
+    };
+    let mut tris = vec![Tri {
+        v: first,
+        n: [NONE; 3],
+    }];
     // The insertion order: the Hilbert index of each point's two least-aligned coordinates over the set's box.
     let (ka, kb) = match least {
         0 => (1usize, 2usize),
@@ -196,8 +217,16 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
     let span = (hi_a - lo_a).max(hi_b - lo_b).max(1) as u64;
     let shift = (64 - span.leading_zeros()).saturating_sub(16);
     let grid = |v: i64, lo: i64| (((v - lo) as u64) >> shift) as u32;
-    let mut order: Vec<(u64, u32)> =
-        pts.iter().enumerate().map(|(i, p)| (hilbert(grid(key(p, ka), lo_a), grid(key(p, kb), lo_b)), i as u32)).collect();
+    let mut order: Vec<(u64, u32)> = pts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            (
+                hilbert(grid(key(p, ka), lo_a), grid(key(p, kb), lo_b)),
+                i as u32,
+            )
+        })
+        .collect();
     order.sort_unstable();
     let mut last = 0u32;
     let mut stack: Vec<(u32, usize)> = Vec::new();
@@ -234,9 +263,18 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
             let [x, y, z] = tv;
             let [nx, ny, nz] = tris[t as usize].n;
             let (t1, t2) = (tris.len() as u32, tris.len() as u32 + 1);
-            tris[t as usize] = Tri { v: [p, y, z], n: [nx, t1, t2] };
-            tris.push(Tri { v: [x, p, z], n: [t, ny, t2] });
-            tris.push(Tri { v: [x, y, p], n: [t, t1, nz] });
+            tris[t as usize] = Tri {
+                v: [p, y, z],
+                n: [nx, t1, t2],
+            };
+            tris.push(Tri {
+                v: [x, p, z],
+                n: [t, ny, t2],
+            });
+            tris.push(Tri {
+                v: [x, y, p],
+                n: [t, t1, nz],
+            });
             relink(&mut tris, ny, t, t1);
             relink(&mut tris, nz, t, t2);
             stack.extend([(t, 0usize), (t1, 1), (t2, 2)]);
@@ -250,14 +288,22 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
             let (n_y, n_z) = (tn[NEXT[e]], tn[PREV[e]]);
             let t_new = tris.len() as u32;
             // t: (x, y, p) and t_new: (x, p, z).
-            tris[t as usize] = Tri { v: [x, y, p], n: [NONE, t_new, n_z] };
-            tris.push(Tri { v: [x, p, z], n: [NONE, n_y, t] });
+            tris[t as usize] = Tri {
+                v: [x, y, p],
+                n: [NONE, t_new, n_z],
+            };
+            tris.push(Tri {
+                v: [x, p, z],
+                n: [NONE, n_y, t],
+            });
             relink(&mut tris, n_y, t, t_new);
             if u == NONE {
                 stack.extend([(t, 2usize), (t_new, 1)]);
             } else {
                 let uv = tris[u as usize].v;
-                let f = (0..3).find(|&k| uv[k] != y && uv[k] != z).expect("the far vertex of the edge's other triangle");
+                let f = (0..3)
+                    .find(|&k| uv[k] != y && uv[k] != z)
+                    .expect("the far vertex of the edge's other triangle");
                 let w = uv[f];
                 let un = tris[u as usize].n;
                 // In `u` the edge runs z → y; its other two neighbours sit opposite y and opposite z.
@@ -266,8 +312,14 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
                 let (n_uy, n_uz) = (un[ky], un[kz]);
                 let u_new = tris.len() as u32;
                 // u: (w, z, p) and u_new: (w, p, y).
-                tris[u as usize] = Tri { v: [w, z, p], n: [t_new, u_new, n_uy] };
-                tris.push(Tri { v: [w, p, y], n: [t, n_uz, u] });
+                tris[u as usize] = Tri {
+                    v: [w, z, p],
+                    n: [t_new, u_new, n_uy],
+                };
+                tris.push(Tri {
+                    v: [w, p, y],
+                    n: [t, n_uz, u],
+                });
                 relink(&mut tris, n_uz, u, u_new);
                 tris[t as usize].n[0] = u_new;
                 tris[t_new as usize].n[0] = u;
@@ -284,9 +336,17 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
             }
             let (pv, x, y) = (tv[k], tv[NEXT[k]], tv[PREV[k]]);
             let nv = tris[nb as usize].v;
-            let m = (0..3).find(|&j| nv[j] != x && nv[j] != y).expect("the opposite vertex");
+            let m = (0..3)
+                .find(|&j| nv[j] != x && nv[j] != y)
+                .expect("the opposite vertex");
             let d = nv[m];
-            if in_circle(&all[pv as usize], &all[x as usize], &all[y as usize], &all[d as usize]) <= 0 {
+            if in_circle(
+                &all[pv as usize],
+                &all[x as usize],
+                &all[y as usize],
+                &all[d as usize],
+            ) <= 0
+            {
                 continue;
             }
             // Flip x–y to p–d: ti = (p, x, d), nb = (p, d, y).
@@ -298,8 +358,14 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
             let ky = (0..3).find(|&j| nv[j] == y).expect("y in nb");
             let a_dy = nn[kx]; // across d–y (opposite x)
             let a_xd = nn[ky]; // across x–d (opposite y)
-            tris[ti as usize] = Tri { v: [pv, x, d], n: [a_xd, nb, a_px] };
-            tris[nb as usize] = Tri { v: [pv, d, y], n: [a_dy, a_py, ti] };
+            tris[ti as usize] = Tri {
+                v: [pv, x, d],
+                n: [a_xd, nb, a_px],
+            };
+            tris[nb as usize] = Tri {
+                v: [pv, d, y],
+                n: [a_dy, a_py, ti],
+            };
             relink(&mut tris, a_xd, nb, ti);
             relink(&mut tris, a_py, ti, nb);
             stack.extend([(ti, 0usize), (nb, 0usize)]);
@@ -318,7 +384,9 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
     let tri_n: Vec<[u32; 3]> = tris
         .iter()
         .filter(|t| t.v.iter().all(|&v| (v as usize) < n))
-        .map(|t| t.n.map(|k| if k == NONE { NONE } else { renum[k as usize] }))
+        .map(|t| {
+            t.n.map(|k| if k == NONE { NONE } else { renum[k as usize] })
+        })
         .collect();
     let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(real.len() * 6);
     for t in &real {
@@ -338,7 +406,12 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
         start[i + 1] += start[i];
     }
     let adj = pairs.into_iter().map(|(_, y)| y).collect();
-    Some(Graph { tris: real, tri_n, start, adj })
+    Some(Graph {
+        tris: real,
+        tri_n,
+        start,
+        adj,
+    })
 }
 
 /// In triangle `t`, the neighbour link that pointed at `from` now points at `to`.

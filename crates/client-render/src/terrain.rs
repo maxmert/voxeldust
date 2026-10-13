@@ -2471,7 +2471,9 @@ impl Terrain {
         }
         if let Some(drawn) = self.entities.get_mut(&(realm, ckey)) {
             if let Some(entity) = drawn.entity {
-                commands.entity(entity).remove::<bevy::light::NotShadowCaster>();
+                commands
+                    .entity(entity)
+                    .remove::<bevy::light::NotShadowCaster>();
                 // ★ A chunk that casts for a finer one is drawn, hidden or not (ruling B89): its shadow falls on the picture.
                 if std::mem::replace(&mut drawn.hidden, false) {
                     commands.entity(entity).insert(Visibility::Inherited);
@@ -2537,7 +2539,11 @@ impl Terrain {
                 continue;
             }
             drawn.hidden = hide;
-            let visibility = if hide { Visibility::Hidden } else { Visibility::Inherited };
+            let visibility = if hide {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
             for entity in drawn.entity.into_iter().chain(drawn.twin) {
                 commands.entity(entity).insert(visibility);
             }
@@ -3590,7 +3596,9 @@ pub(crate) fn sync_terrain(
             if settled & !covered & arrived {
                 drawn.tag = vd_client::arrival::covered_stamp(now_ticks);
                 if let Some(entity) = drawn.entity {
-                    commands.entity(entity).insert(bevy::mesh::MeshTag(drawn.tag));
+                    commands
+                        .entity(entity)
+                        .insert(bevy::mesh::MeshTag(drawn.tag));
                 }
                 if let Some(twin) = drawn.twin {
                     commands.entity(twin).insert(bevy::mesh::MeshTag(drawn.tag));
@@ -3730,7 +3738,12 @@ pub(crate) fn sync_terrain(
                 continue;
             };
             wanted += ladder.wanted.keys.len() as u64;
-            resident += ladder.wanted.keys.iter().filter(|k| terrain.lane.is_resident(eb.realm, **k)).count() as u64;
+            resident += ladder
+                .wanted
+                .keys
+                .iter()
+                .filter(|k| terrain.lane.is_resident(eb.realm, **k))
+                .count() as u64;
             whole &= ladder.landed
                 & (terrain.lane.rough_resident(eb.realm) == 0)
                 & !terrain.drawn_stand_ins.iter().any(|(r, _)| *r == eb.realm);
@@ -3738,7 +3751,11 @@ pub(crate) fn sync_terrain(
         terrain.ground_progress = (resident, wanted);
         terrain.ground_ready = whole;
         if whole {
-            tracing::info!(frame = terrain.frames, wanted, "the ground in view is complete: the loading screen goes");
+            tracing::info!(
+                frame = terrain.frames,
+                wanted,
+                "the ground in view is complete: the loading screen goes"
+            );
         }
     }
     // ★ THE BOARDING INSTRUMENT (2026-09-14): a frame that released a WHOLESALE count of one
@@ -3956,7 +3973,8 @@ pub(crate) fn sync_terrain(
         let own_height = upgrade
             || parents.iter().any(|p| {
                 terrain.entities.get(&(realm, *p)).is_some_and(|d| {
-                    vd_client::arrival::tag_stand_in(d.tag) & !vd_client::arrival::tag_covered(d.tag)
+                    vd_client::arrival::tag_stand_in(d.tag)
+                        & !vd_client::arrival::tag_covered(d.tag)
                 })
             });
         let next_drawn = parents
@@ -3982,64 +4000,18 @@ pub(crate) fn sync_terrain(
         }
         // ★ BORN HIDDEN (ruling B89): a chunk the set calls hidden and that casts no shadow of its own lands left out.
         let born_hidden = hide_rung.is_none_or(|r| key.rung < r)
-            & terrain.ladders.get(&realm).is_some_and(|l| l.wanted.is_hidden(key))
+            & terrain
+                .ladders
+                .get(&realm)
+                .is_some_and(|l| l.wanted.is_hidden(key))
             & !casts_itself;
         let (entity, twin) = match mesh {
             None => (None, None),
             Some(mesh) => {
-            let entity = commands
-                .spawn((
-                    Mesh3d(mesh.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::default(),
-                    TerrainChunk {
-                        realm,
-                        rung: key.rung,
-                    },
-                    ChunkOrigin(ready.geometry.origin_m),
-                    bounds,
-                    bevy::mesh::MeshTag(stamp),
-                ))
-                .id();
-            if born_hidden || hide_rung.is_some_and(|r| key.rung >= r) {
-                commands.entity(entity).insert(Visibility::Hidden);
-            }
-            if no_cull {
-                commands
-                    .entity(entity)
-                    .insert(bevy::camera::visibility::NoFrustumCulling);
-            }
-            if !shadow_cast
-                || shadow_cast_rung.is_some_and(|r| key.rung >= r)
-                || (caster.is_some() && !casts_itself)
-            {
-                commands.entity(entity).insert(bevy::light::NotShadowCaster);
-            }
-            if !shadow_receive {
-                commands
-                    .entity(entity)
-                    .insert(bevy::light::NotShadowReceiver);
-            }
-            // The other parts of a split chunk ride on it as children: placed with it, despawned with it.
-            if ablate {
-                for part in 1..split_draws {
-                    commands.spawn((
-                        Mesh3d(meshes.add(part_of(part))),
-                        MeshMaterial3d(part_material.clone()),
-                        Transform::default(),
-                        bounds,
-                        bevy::mesh::MeshTag(stamp),
-                        ChildOf(entity),
-                    ));
-                }
-            }
-            let twin = probe_materials.as_mut().map(|pm| {
-                let probe =
-                    terrain.probe_material(pm, realm, PROBE_KIND_TERRAIN, key.rung, &body, &gpu);
-                let twin = commands
+                let entity = commands
                     .spawn((
                         Mesh3d(mesh.clone()),
-                        MeshMaterial3d(probe),
+                        MeshMaterial3d(material.clone()),
                         Transform::default(),
                         TerrainChunk {
                             realm,
@@ -4047,23 +4019,78 @@ pub(crate) fn sync_terrain(
                         },
                         ChunkOrigin(ready.geometry.origin_m),
                         bounds,
-                        ProbeTwin,
-                        RenderLayers::layer(PROBE_LAYER),
-                        bevy::light::NotShadowCaster,
-                        // The twin rises with the picture's chunk, so the probe reads what it shows.
                         bevy::mesh::MeshTag(stamp),
                     ))
                     .id();
+                if born_hidden || hide_rung.is_some_and(|r| key.rung >= r) {
+                    commands.entity(entity).insert(Visibility::Hidden);
+                }
                 if no_cull {
                     commands
-                        .entity(twin)
+                        .entity(entity)
                         .insert(bevy::camera::visibility::NoFrustumCulling);
                 }
-                if born_hidden {
-                    commands.entity(twin).insert(Visibility::Hidden);
+                if !shadow_cast
+                    || shadow_cast_rung.is_some_and(|r| key.rung >= r)
+                    || (caster.is_some() && !casts_itself)
+                {
+                    commands.entity(entity).insert(bevy::light::NotShadowCaster);
                 }
-                twin
-            });
+                if !shadow_receive {
+                    commands
+                        .entity(entity)
+                        .insert(bevy::light::NotShadowReceiver);
+                }
+                // The other parts of a split chunk ride on it as children: placed with it, despawned with it.
+                if ablate {
+                    for part in 1..split_draws {
+                        commands.spawn((
+                            Mesh3d(meshes.add(part_of(part))),
+                            MeshMaterial3d(part_material.clone()),
+                            Transform::default(),
+                            bounds,
+                            bevy::mesh::MeshTag(stamp),
+                            ChildOf(entity),
+                        ));
+                    }
+                }
+                let twin = probe_materials.as_mut().map(|pm| {
+                    let probe = terrain.probe_material(
+                        pm,
+                        realm,
+                        PROBE_KIND_TERRAIN,
+                        key.rung,
+                        &body,
+                        &gpu,
+                    );
+                    let twin = commands
+                        .spawn((
+                            Mesh3d(mesh.clone()),
+                            MeshMaterial3d(probe),
+                            Transform::default(),
+                            TerrainChunk {
+                                realm,
+                                rung: key.rung,
+                            },
+                            ChunkOrigin(ready.geometry.origin_m),
+                            bounds,
+                            ProbeTwin,
+                            RenderLayers::layer(PROBE_LAYER),
+                            bevy::light::NotShadowCaster,
+                            // The twin rises with the picture's chunk, so the probe reads what it shows.
+                            bevy::mesh::MeshTag(stamp),
+                        ))
+                        .id();
+                    if no_cull {
+                        commands
+                            .entity(twin)
+                            .insert(bevy::camera::visibility::NoFrustumCulling);
+                    }
+                    if born_hidden {
+                        commands.entity(twin).insert(Visibility::Hidden);
+                    }
+                    twin
+                });
                 (Some(entity), twin)
             }
         };
@@ -4974,7 +5001,13 @@ fn band_table_bytes(
         out.extend_from_slice(&word.to_le_bytes());
     }
     let frame = [[0.0f32; 4]; 2];
-    for row in step.iter().chain(&frame).chain(rows).chain(last).chain([&snow]) {
+    for row in step
+        .iter()
+        .chain(&frame)
+        .chain(rows)
+        .chain(last)
+        .chain([&snow])
+    {
         for value in row {
             out.extend_from_slice(&value.to_le_bytes());
         }
@@ -5267,7 +5300,11 @@ mod band_table_tests {
         table.fill([117, 512, 0, 0], second.clone());
         let b = &table.bytes;
         assert_eq!([0, 4, 8, 12].map(|at| word(b, at)), [117, 512, 100, 2]);
-        assert_eq!(row(b, 4), [4_000.0, -1_500.0, 900.0, 1.0], "the snow line rides last");
+        assert_eq!(
+            row(b, 4),
+            [4_000.0, -1_500.0, 900.0, 1.0],
+            "the snow line rides last"
+        );
         assert_eq!(step(b), RealmStep::IDENTITY.rows());
         assert_eq!(
             [0, 1, 2, 3].map(|i| row(b, i)),

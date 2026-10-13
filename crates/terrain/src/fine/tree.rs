@@ -77,7 +77,12 @@ pub fn tree(h: &[Gf], outlet: &[bool], graph: &Graph, len: &[Gf]) -> Tree {
         order.extend_from_slice(&donors[start[c] as usize..start[c + 1] as usize]);
         k += 1;
     }
-    Tree { order, recv, link, flooded: false }
+    Tree {
+        order,
+        recv,
+        link,
+        flooded: false,
+    }
 }
 
 /// The priority flood (see the module's head).
@@ -123,7 +128,12 @@ fn flood(h: &[Gf], outlet: &[bool], graph: &Graph, len: &[Gf]) -> Tree {
             }
         }
     }
-    Tree { order, recv, link, flooded: true }
+    Tree {
+        order,
+        recv,
+        link,
+        flooded: true,
+    }
 }
 
 /// The water through each point: its own `water` and every donor's, summed down the tree (the order reversed).
@@ -152,7 +162,12 @@ mod tests {
             adj.extend_from_slice(l);
             start.push(adj.len() as u32);
         }
-        Graph { tris: Vec::new(), tri_n: Vec::new(), start, adj }
+        Graph {
+            tris: Vec::new(),
+            tri_n: Vec::new(),
+            start,
+            adj,
+        }
     }
 
     fn gf(v: &[f64]) -> Vec<Gf> {
@@ -164,14 +179,24 @@ mod tests {
         // 0 — 1 — 2 — 3, and 3 also touches 1 by a long link: 3 drains to 2 (slope 1) over 1 (slope 2/4).
         let g = graph(&[&[1], &[0, 2, 3], &[1, 3], &[1, 2]]);
         let len = gf(&[1.0, 1.0, 1.0, 4.0, 1.0, 1.0, 4.0, 1.0]);
-        let t = tree(&gf(&[0.0, 1.0, 2.0, 3.0]), &[true, false, false, false], &g, &len);
+        let t = tree(
+            &gf(&[0.0, 1.0, 2.0, 3.0]),
+            &[true, false, false, false],
+            &g,
+            &len,
+        );
         assert_eq!(t.recv, vec![NONE, 0, 1, 2]);
         assert_eq!(t.order, vec![0, 1, 2, 3]);
         assert_eq!(t.link, gf(&[0.0, 1.0, 1.0, 1.0]));
         assert!(!t.flooded);
         // Equal slopes: the smaller index. Point 2 sees 0 and 1 at one height and one length.
         let g = graph(&[&[2], &[2], &[0, 1]]);
-        let t = tree(&gf(&[0.0, 0.0, 1.0]), &[true, true, false], &g, &gf(&[1.0, 1.0, 1.0, 1.0]));
+        let t = tree(
+            &gf(&[0.0, 0.0, 1.0]),
+            &[true, true, false],
+            &g,
+            &gf(&[1.0, 1.0, 1.0, 1.0]),
+        );
         assert_eq!(t.recv, vec![NONE, NONE, 0]);
         // The water down the tree: each point's own and every donor's.
         assert_eq!(accumulate(&t, &gf(&[1.0, 1.0, 1.0])), gf(&[2.0, 1.0, 1.0]));
@@ -182,16 +207,25 @@ mod tests {
         // 0 — 1 — 2 — 3 with a pit at 2 (under both neighbours); point 4 touches nothing.
         let g = graph(&[&[1], &[0, 2], &[1, 3], &[2], &[]]);
         let len = gf(&[1.0; 6]);
-        let t = tree(&gf(&[0.0, 2.0, 1.0, 3.0, 5.0]), &[true, false, false, false, false], &g, &len);
+        let t = tree(
+            &gf(&[0.0, 2.0, 1.0, 3.0, 5.0]),
+            &[true, false, false, false, false],
+            &g,
+            &len,
+        );
         assert!(t.flooded);
         // The pit drains over its pass at 1, and 3 drains through the pit's flooded level.
         assert_eq!(t.recv, vec![NONE, 0, 1, 2, NONE]);
         assert_eq!(t.order, vec![0, 1, 2, 3]);
         // A point reached after both its outlets takes the steeper of the two (point 3, a pit, calls the flood).
         let g = graph(&[&[2], &[2], &[0, 1, 3], &[2]]);
-        let t = tree(&gf(&[0.0, 0.5, 2.0, -1.0]), &[true, true, false, false], &g, &gf(&[1.0; 6]));
+        let t = tree(
+            &gf(&[0.0, 0.5, 2.0, -1.0]),
+            &[true, true, false, false],
+            &g,
+            &gf(&[1.0; 6]),
+        );
         assert!(t.flooded);
         assert_eq!(t.recv, vec![NONE, NONE, 0, 2]);
     }
 }
-

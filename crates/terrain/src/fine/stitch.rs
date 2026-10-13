@@ -66,7 +66,13 @@ impl Field {
                 v[x * self.h + y] = self.v[y * self.w + x];
             }
         }
-        Field { gx0: self.gy0, gy0: self.gx0, w: self.h, h: self.w, v }
+        Field {
+            gx0: self.gy0,
+            gy0: self.gx0,
+            w: self.h,
+            h: self.w,
+            v,
+        }
     }
 }
 
@@ -126,7 +132,13 @@ pub fn cut(west: &Field, east: &Field, ge: i64, band: i64) -> (i64, Vec<i64>) {
     }
     let mut path = vec![ge; h];
     if h > 0 {
-        let mut k = (0..cols).min_by(|&p, &q| cost[(h - 1) * cols + p].cmp(&cost[(h - 1) * cols + q]).then(p.cmp(&q))).unwrap_or(0);
+        let mut k = (0..cols)
+            .min_by(|&p, &q| {
+                cost[(h - 1) * cols + p]
+                    .cmp(&cost[(h - 1) * cols + q])
+                    .then(p.cmp(&q))
+            })
+            .unwrap_or(0);
         for y in (0..h).rev() {
             path[y] = ge - band + k as i64;
             k = from[y * cols + k];
@@ -224,7 +236,13 @@ fn diff2(a: i32, b: i32) -> i64 {
 /// `[lo, hi]`), one step across at most per step along, `cost(a, c)` each cell; ties to the lower `c`. `None` where the
 /// ends cannot be joined so.
 #[must_use]
-pub fn half_path(cost: &dyn Fn(i64, i64) -> i64, (a0, c0): (i64, i64), (a1, c1): (i64, i64), lo: i64, hi: i64) -> Option<CutLine> {
+pub fn half_path(
+    cost: &dyn Fn(i64, i64) -> i64,
+    (a0, c0): (i64, i64),
+    (a1, c1): (i64, i64),
+    lo: i64,
+    hi: i64,
+) -> Option<CutLine> {
     if (a1 < a0) | ((c1 - c0).abs() > a1 - a0) | (c0 < lo) | (c0 > hi) | (c1 < lo) | (c1 > hi) {
         return None;
     }
@@ -290,25 +308,43 @@ pub fn corner_point(four: [&Field; 4], gx: i64, gy: i64, band: i64) -> (i64, i64
 /// agree best, ties west.
 #[must_use]
 pub fn mid_across_columns(west: &Field, east: &Field, ge: i64, gy: i64, band: i64) -> i64 {
-    (ge - band..=ge + band).min_by_key(|&x| (diff2(west.at(x, gy), east.at(x, gy)), x)).unwrap_or(ge)
+    (ge - band..=ge + band)
+        .min_by_key(|&x| (diff2(west.at(x, gy), east.at(x, gy)), x))
+        .unwrap_or(ge)
 }
 
 /// The same across a row edge `ge` (`north`, `south`) on the column `gx`: the row where the two agree best, ties north.
 #[must_use]
 pub fn mid_across_rows(north: &Field, south: &Field, ge: i64, gx: i64, band: i64) -> i64 {
-    (ge - band..=ge + band).min_by_key(|&y| (diff2(north.at(gx, y), south.at(gx, y)), y)).unwrap_or(ge)
+    (ge - band..=ge + band)
+        .min_by_key(|&y| (diff2(north.at(gx, y), south.at(gx, y)), y))
+        .unwrap_or(ge)
 }
 
 /// One half of a column edge's cut between `west` and `east` at the column `ge`, from the cell `from` to the cell `to`
 /// (each `(x, y)`, `from` the upper).
-pub(crate) fn col_cut_half(west: &Field, east: &Field, ge: i64, band: i64, from: (i64, i64), to: (i64, i64)) -> Option<CutLine> {
+pub(crate) fn col_cut_half(
+    west: &Field,
+    east: &Field,
+    ge: i64,
+    band: i64,
+    from: (i64, i64),
+    to: (i64, i64),
+) -> Option<CutLine> {
     let cost = |y: i64, x: i64| diff2(west.at(x, y), east.at(x, y));
     half_path(&cost, (from.1, from.0), (to.1, to.0), ge - band, ge + band)
 }
 
 /// One half of a row edge's cut between `north` and `south` at the row `ge`, from the cell `from` to the cell `to`
 /// (each `(x, y)`, `from` the western).
-pub(crate) fn row_cut_half(north: &Field, south: &Field, ge: i64, band: i64, from: (i64, i64), to: (i64, i64)) -> Option<CutLine> {
+pub(crate) fn row_cut_half(
+    north: &Field,
+    south: &Field,
+    ge: i64,
+    band: i64,
+    from: (i64, i64),
+    to: (i64, i64),
+) -> Option<CutLine> {
     let cost = |x: i64, y: i64| diff2(north.at(x, y), south.at(x, y));
     half_path(&cost, from, to, ge - band, ge + band)
 }
@@ -371,13 +407,26 @@ pub fn tile_cuts(block: [&Field; 9], tx: i64, ty: i64, side: i64, band: i64) -> 
     ];
     let l: Vec<CutLine> = halves
         .iter()
-        .map(|&(a, b, ge, from, to, cols)| if cols { col_cut_half(a, b, ge, band, from, to) } else { row_cut_half(a, b, ge, band, from, to) })
+        .map(|&(a, b, ge, from, to, cols)| {
+            if cols {
+                col_cut_half(a, b, ge, band, from, to)
+            } else {
+                row_cut_half(a, b, ge, band, from, to)
+            }
+        })
         .collect::<Option<_>>()?;
     let h = |k: usize| l[k].clone();
     Some(TileCuts {
         corners,
-        cols: [[h(0), h(1)], [joined(h(2), &l[3]), joined(h(4), &l[5])], [h(6), h(7)]],
-        rows: [[h(8), joined(h(9), &l[10]), h(11)], [h(12), joined(h(13), &l[14]), h(15)]],
+        cols: [
+            [h(0), h(1)],
+            [joined(h(2), &l[3]), joined(h(4), &l[5])],
+            [h(6), h(7)],
+        ],
+        rows: [
+            [h(8), joined(h(9), &l[10]), h(11)],
+            [h(12), joined(h(13), &l[14]), h(15)],
+        ],
     })
 }
 
@@ -389,7 +438,13 @@ pub fn tile_cuts(block: [&Field; 9], tx: i64, ty: i64, side: i64, band: i64) -> 
 pub fn finished_tile(block: [&Field; 9], tx: i64, ty: i64, side: i64, band: i64) -> Option<Field> {
     let cuts = tile_cuts(block, tx, ty, side, band)?;
     let square = [tx * side, ty * side, (tx + 1) * side, (ty + 1) * side];
-    Some(draw(block, &cuts, square, side, [Meet::Four { rows_first: false }; 4]))
+    Some(draw(
+        block,
+        &cuts,
+        square,
+        side,
+        [Meet::Four { rows_first: false }; 4],
+    ))
 }
 
 /// ★ HOW THE CUTS MEET AT ONE OF A TILE'S CORNERS (B2's face-edge cut, ruling B86 item 9 (1)).
@@ -426,11 +481,19 @@ impl Quarter<'_> {
         match self.meet {
             Meet::Four { rows_first: false } => {
                 let row = if x < self.point.0 { wr.at(x) } else { er.at(x) };
-                blend(blend(a, b, x - nc.at(y)), blend(c, d, x - sc.at(y)), y - row)
+                blend(
+                    blend(a, b, x - nc.at(y)),
+                    blend(c, d, x - sc.at(y)),
+                    y - row,
+                )
             }
             Meet::Four { rows_first: true } => {
                 let col = if y < self.point.1 { nc.at(y) } else { sc.at(y) };
-                blend(blend(a, c, y - wr.at(x)), blend(b, d, y - er.at(x)), x - col)
+                blend(
+                    blend(a, c, y - wr.at(x)),
+                    blend(b, d, y - er.at(x)),
+                    x - col,
+                )
             }
             Meet::Three => self.three([a, b, c, d], x, y),
         }
@@ -448,8 +511,16 @@ impl Quarter<'_> {
         // The tile's weight across each of its cuts, and its depths from the two sides that meet at the corner.
         let over_col = side(x - col_cut.at(y), east);
         let over_row = side(y - row_cut.at(x), south);
-        let u = if east { x - self.corner.0 } else { self.corner.0 - 1 - x };
-        let v = if south { y - self.corner.1 } else { self.corner.1 - 1 - y };
+        let u = if east {
+            x - self.corner.0
+        } else {
+            self.corner.0 - 1 - x
+        };
+        let v = if south {
+            y - self.corner.1
+        } else {
+            self.corner.1 - 1 - y
+        };
         // The column neighbour's against the row neighbour's: the row neighbour's side is the one nearer its edge.
         let row_over_col = blend_weight(u - v);
         let w = [
@@ -477,14 +548,32 @@ impl Quarter<'_> {
 /// corner joined across the corner's four cuts as `meets` says (NW, NE, SW, SE). Where the face ends inside the tile the
 /// cells past it are drawn by the same rule (they are never read: the face's partner holds those cells).
 #[must_use]
-pub fn draw(block: [&Field; 9], cuts: &TileCuts, square: [i64; 4], side: i64, meets: [Meet; 4]) -> Field {
-    draw_over(block, cuts, square, [square[0], square[1], square[0] + side, square[1] + side], meets)
+pub fn draw(
+    block: [&Field; 9],
+    cuts: &TileCuts,
+    square: [i64; 4],
+    side: i64,
+    meets: [Meet; 4],
+) -> Field {
+    draw_over(
+        block,
+        cuts,
+        square,
+        [square[0], square[1], square[0] + side, square[1] + side],
+        meets,
+    )
 }
 
 /// [`draw`] over any rectangle `[x0, y0, x1, y1)` of the chart (a cell outside the tile's square by the quarter its
 /// place falls in — the tests read a tile's rule across its own sides).
 #[must_use]
-pub fn draw_over(block: [&Field; 9], cuts: &TileCuts, square: [i64; 4], rect: [i64; 4], meets: [Meet; 4]) -> Field {
+pub fn draw_over(
+    block: [&Field; 9],
+    cuts: &TileCuts,
+    square: [i64; 4],
+    rect: [i64; 4],
+    meets: [Meet; 4],
+) -> Field {
     let [x0, y0, x1, y1] = square;
     let (mx, my) = ((x0 + x1) >> 1, (y0 + y1) >> 1);
     let [nw, n, ne, w, t, e, sw, s, se] = block;
@@ -493,10 +582,38 @@ pub fn draw_over(block: [&Field; 9], cuts: &TileCuts, square: [i64; 4], rect: [i
     let [c_nw, c_ne, c_sw, c_se] = cuts.corners;
     let [m_nw, m_ne, m_sw, m_se] = meets;
     let quarters = [
-        Quarter { slots: [nw, n, w, t], point: c_nw, cuts: [v_nwn, v_wt, h_nww, h_nt], corner: (x0, y0), meet: m_nw, me: 3 },
-        Quarter { slots: [n, ne, t, e], point: c_ne, cuts: [v_nne, v_te, h_nt, h_nee], corner: (x1, y0), meet: m_ne, me: 2 },
-        Quarter { slots: [w, t, sw, s], point: c_sw, cuts: [v_wt, v_sws, h_wsw, h_ts], corner: (x0, y1), meet: m_sw, me: 1 },
-        Quarter { slots: [t, e, s, se], point: c_se, cuts: [v_te, v_sse, h_ts, h_ese], corner: (x1, y1), meet: m_se, me: 0 },
+        Quarter {
+            slots: [nw, n, w, t],
+            point: c_nw,
+            cuts: [v_nwn, v_wt, h_nww, h_nt],
+            corner: (x0, y0),
+            meet: m_nw,
+            me: 3,
+        },
+        Quarter {
+            slots: [n, ne, t, e],
+            point: c_ne,
+            cuts: [v_nne, v_te, h_nt, h_nee],
+            corner: (x1, y0),
+            meet: m_ne,
+            me: 2,
+        },
+        Quarter {
+            slots: [w, t, sw, s],
+            point: c_sw,
+            cuts: [v_wt, v_sws, h_wsw, h_ts],
+            corner: (x0, y1),
+            meet: m_sw,
+            me: 1,
+        },
+        Quarter {
+            slots: [t, e, s, se],
+            point: c_se,
+            cuts: [v_te, v_sse, h_ts, h_ese],
+            corner: (x1, y1),
+            meet: m_se,
+            me: 0,
+        },
     ];
     let [rx0, ry0, rx1, ry1] = rect;
     let (w, h) = ((rx1 - rx0).max(0) as usize, (ry1 - ry0).max(0) as usize);
@@ -506,7 +623,13 @@ pub fn draw_over(block: [&Field; 9], cuts: &TileCuts, square: [i64; 4], rect: [i
             v.push(quarters[usize::from(y >= my) * 2 + usize::from(x >= mx)].value(x, y));
         }
     }
-    Field { gx0: rx0, gy0: ry0, w, h, v }
+    Field {
+        gx0: rx0,
+        gy0: ry0,
+        w,
+        h,
+        v,
+    }
 }
 
 #[cfg(test)]
@@ -548,13 +671,20 @@ mod tests {
             }
         }
         // Where the two differ by a step except along column 30, the cut follows column 30.
-        let east2 = field(24, 0, 40, 20, |x, y| if x == 30 { surface(x, y) } else { surface(x, y) + 400 });
+        let east2 = field(24, 0, 40, 20, |x, y| {
+            if x == 30 {
+                surface(x, y)
+            } else {
+                surface(x, y) + 400
+            }
+        });
         let (_, path2) = cut(&west, &east2, 32, 8);
         assert!(path2.iter().all(|&c| c == 30), "{path2:?}");
     }
 
     #[test]
-    fn a_cut_across_rows_is_the_column_cut_of_the_swapped_fields_and_disjoint_fields_share_no_row() {
+    fn a_cut_across_rows_is_the_column_cut_of_the_swapped_fields_and_disjoint_fields_share_no_row()
+    {
         let surface = |x: i64, y: i64| (x * x - y) as i32;
         let north = field(0, 0, 10, 30, surface);
         let south = field(0, 20, 10, 30, surface);
@@ -584,31 +714,58 @@ mod tests {
     fn a_half_cut_joins_its_ends_along_the_cheapest_cells_and_refuses_ends_it_cannot_join() {
         // Column 3 is free: the path walks to it, stays, and leaves it only to reach its end.
         let groove = |_: i64, c: i64| if c == 3 { 0 } else { 10 };
-        assert_eq!(half_path(&groove, (0, 3), (10, 3), 0, 6).expect("joins").path, vec![3; 11]);
-        assert_eq!(half_path(&groove, (0, 0), (6, 5), 0, 6).expect("joins").path, vec![0, 1, 2, 3, 3, 4, 5]);
+        assert_eq!(
+            half_path(&groove, (0, 3), (10, 3), 0, 6)
+                .expect("joins")
+                .path,
+            vec![3; 11]
+        );
+        assert_eq!(
+            half_path(&groove, (0, 0), (6, 5), 0, 6)
+                .expect("joins")
+                .path,
+            vec![0, 1, 2, 3, 3, 4, 5]
+        );
         // Equal costs: every tie goes to the lower column.
         let flat = |_: i64, _: i64| 0;
-        assert_eq!(half_path(&flat, (0, 2), (4, 2), 0, 4).expect("joins").path, vec![2, 1, 0, 1, 2]);
+        assert_eq!(
+            half_path(&flat, (0, 2), (4, 2), 0, 4).expect("joins").path,
+            vec![2, 1, 0, 1, 2]
+        );
         // Ends it cannot join: backwards, too far across, outside the band.
         assert_eq!(half_path(&flat, (5, 0), (4, 0), 0, 4), None);
         assert_eq!(half_path(&flat, (0, 0), (2, 3), 0, 4), None);
         assert_eq!(half_path(&flat, (0, -1), (3, 0), 0, 4), None);
         assert_eq!(half_path(&flat, (0, 0), (5, 5), 0, 4), None);
         // A line holds its ends beyond them.
-        let line = CutLine { a0: 5, path: vec![1, 2, 3] };
+        let line = CutLine {
+            a0: 5,
+            path: vec![1, 2, 3],
+        };
         assert_eq!([line.at(0), line.at(6), line.at(99)], [1, 2, 3]);
     }
 
     #[test]
     fn the_corner_point_is_where_the_four_agree_and_a_midpoint_where_the_two_agree() {
         let d = |x: i64, y: i64| ((x - 7) * (x - 7) + (y - 9) * (y - 9)) as i32;
-        let four: Vec<Field> = (1..=4).map(|k| field(0, 0, 20, 20, move |x, y| k * d(x, y))).collect();
-        assert_eq!(corner_point([&four[0], &four[1], &four[2], &four[3]], 10, 10, 4), (7, 9));
+        let four: Vec<Field> = (1..=4)
+            .map(|k| field(0, 0, 20, 20, move |x, y| k * d(x, y)))
+            .collect();
+        assert_eq!(
+            corner_point([&four[0], &four[1], &four[2], &four[3]], 10, 10, 4),
+            (7, 9)
+        );
         // Everywhere equal: the lowest row, then the lowest column.
-        assert_eq!(corner_point([&four[0], &four[0], &four[0], &four[0]], 10, 10, 4), (6, 6));
+        assert_eq!(
+            corner_point([&four[0], &four[0], &four[0], &four[0]], 10, 10, 4),
+            (6, 6)
+        );
         // A tile that holds no cell west of column 8: the best of the cells all four hold.
         let east_only = field(8, 0, 12, 20, |x, y| 5 * d(x, y));
-        assert_eq!(corner_point([&four[0], &four[1], &four[2], &east_only], 10, 10, 4), (8, 9));
+        assert_eq!(
+            corner_point([&four[0], &four[1], &four[2], &east_only], 10, 10, 4),
+            (8, 9)
+        );
         // The midpoints: on row 9 the two agree at column 7; on column 7 at row 9; equal fields tie west and north.
         assert_eq!(mid_across_columns(&four[0], &four[1], 10, 9, 4), 7);
         assert_eq!(mid_across_rows(&four[0], &four[1], 10, 7, 4), 9);
@@ -625,7 +782,11 @@ mod tests {
 
     /// The squared distance to the nearest of `agree`.
     fn near2(x: i64, y: i64, agree: &[(i64, i64)]) -> i32 {
-        agree.iter().map(|&(ax, ay)| (x - ax) * (x - ax) + (y - ay) * (y - ay)).min().unwrap_or(0) as i32
+        agree
+            .iter()
+            .map(|&(ax, ay)| (x - ax) * (x - ax) + (y - ay) * (y - ay))
+            .min()
+            .unwrap_or(0) as i32
     }
 
     /// The raw raster of tile `(i, j)` (a `side` grid, `margin` cells beyond the tile): the shared ground plus the tile's
@@ -633,19 +794,33 @@ mod tests {
     fn raw(i: i64, j: i64, side: i64, margin: i64, agree: &[(i64, i64)]) -> Field {
         let off = (i + 3 * j + 1) as i32;
         let w = (side + 2 * margin) as usize;
-        field(i * side - margin, j * side - margin, w, w, |x, y| ground(x, y) + off * near2(x, y, agree))
+        field(i * side - margin, j * side - margin, w, w, |x, y| {
+            ground(x, y) + off * near2(x, y, agree)
+        })
     }
 
     /// The nine rasters around tile `(tx, ty)` of a grid `n` tiles wide, row by row.
     fn block(grid: &[Field], n: i64, tx: i64, ty: i64) -> [&Field; 9] {
         let at = |dx: i64, dy: i64| &grid[((ty + dy) * n + tx + dx) as usize];
-        [at(-1, -1), at(0, -1), at(1, -1), at(-1, 0), at(0, 0), at(1, 0), at(-1, 1), at(0, 1), at(1, 1)]
+        [
+            at(-1, -1),
+            at(0, -1),
+            at(1, -1),
+            at(-1, 0),
+            at(0, 0),
+            at(1, 0),
+            at(-1, 1),
+            at(0, 1),
+            at(1, 1),
+        ]
     }
 
     #[test]
     fn a_tile_drawn_from_nine_equal_rasters_is_their_own_ground() {
         let (side, band) = (48, 6);
-        let grid: Vec<Field> = (0..3).flat_map(|j| (0..3).map(move |i| raw(i, j, side, 16, &[]))).collect();
+        let grid: Vec<Field> = (0..3)
+            .flat_map(|j| (0..3).map(move |i| raw(i, j, side, 16, &[])))
+            .collect();
         let tile = finished_tile(block(&grid, 3, 1, 1), 1, 1, side, band).expect("joins");
         assert_eq!(tile, field(side, side, 48, 48, ground));
         // Every tie went to the lowest row and column: the corner points sit `band` cells north-west of the corners.
@@ -665,37 +840,81 @@ mod tests {
                 (ci * side + mx, cj * side + my)
             })
             .collect();
-        let grid: Vec<Field> = (0..n).flat_map(|j| (0..n).map(move |i| (i, j))).map(|(i, j)| raw(i, j, side, 16, &agree)).collect();
-        let cuts = |tx: i64, ty: i64| tile_cuts(block(&grid, n, tx, ty), tx, ty, side, band).expect("joins");
-        let (t, east, south, north, west) = (cuts(2, 2), cuts(3, 2), cuts(2, 3), cuts(2, 1), cuts(1, 2));
+        let grid: Vec<Field> = (0..n)
+            .flat_map(|j| (0..n).map(move |i| (i, j)))
+            .map(|(i, j)| raw(i, j, side, 16, &agree))
+            .collect();
+        let cuts = |tx: i64, ty: i64| {
+            tile_cuts(block(&grid, n, tx, ty), tx, ty, side, band).expect("joins")
+        };
+        let (t, east, south, north, west) =
+            (cuts(2, 2), cuts(3, 2), cuts(2, 3), cuts(2, 1), cuts(1, 2));
         // The corner points are the agreement points, and each is the same from every tile that meets there.
         assert_eq!(t.corners, [(98, 100), (143, 93), (99, 142), (140, 145)]);
-        assert_eq!([east.corners[0], east.corners[2]], [t.corners[1], t.corners[3]]);
-        assert_eq!([south.corners[0], south.corners[1]], [t.corners[2], t.corners[3]]);
-        assert_eq!([north.corners[2], north.corners[3]], [t.corners[0], t.corners[1]]);
+        assert_eq!(
+            [east.corners[0], east.corners[2]],
+            [t.corners[1], t.corners[3]]
+        );
+        assert_eq!(
+            [south.corners[0], south.corners[1]],
+            [t.corners[2], t.corners[3]]
+        );
+        assert_eq!(
+            [north.corners[2], north.corners[3]],
+            [t.corners[0], t.corners[1]]
+        );
         // A shared edge's whole cut is the same line from both sides.
         assert_eq!(t.cols[1][1], east.cols[1][0]);
         assert_eq!(t.rows[1][1], south.rows[0][1]);
         assert_eq!(t.rows[0][1], north.rows[1][1]);
         assert_eq!(t.cols[1][0], west.cols[1][1]);
         // A neighbour's half is the matching part of that neighbour's own whole cut.
-        let starts = |half: &CutLine, whole: &CutLine| (half.a0, half.path.as_slice()) == (whole.a0, &whole.path[..half.path.len()]);
+        let starts = |half: &CutLine, whole: &CutLine| {
+            (half.a0, half.path.as_slice()) == (whole.a0, &whole.path[..half.path.len()])
+        };
         let ends = |half: &CutLine, whole: &CutLine| {
             let k = whole.path.len() - half.path.len();
             (half.a0, half.path.as_slice()) == (whole.a0 + k as i64, &whole.path[k..])
         };
         assert_eq!(
-            [starts(&t.cols[2][0], &south.cols[1][0]), starts(&t.cols[2][1], &south.cols[1][1])],
+            [
+                starts(&t.cols[2][0], &south.cols[1][0]),
+                starts(&t.cols[2][1], &south.cols[1][1])
+            ],
             [true, true],
             "the row below's column cuts"
         );
-        assert_eq!([ends(&t.cols[0][0], &north.cols[1][0]), ends(&t.cols[0][1], &north.cols[1][1])], [true, true], "the row above's");
-        assert_eq!([starts(&t.rows[0][2], &east.rows[0][1]), starts(&t.rows[1][2], &east.rows[1][1])], [true, true], "the east column's");
-        assert_eq!([ends(&t.rows[0][0], &west.rows[0][1]), ends(&t.rows[1][0], &west.rows[1][1])], [true, true], "the west column's");
+        assert_eq!(
+            [
+                ends(&t.cols[0][0], &north.cols[1][0]),
+                ends(&t.cols[0][1], &north.cols[1][1])
+            ],
+            [true, true],
+            "the row above's"
+        );
+        assert_eq!(
+            [
+                starts(&t.rows[0][2], &east.rows[0][1]),
+                starts(&t.rows[1][2], &east.rows[1][1])
+            ],
+            [true, true],
+            "the east column's"
+        );
+        assert_eq!(
+            [
+                ends(&t.rows[0][0], &west.rows[0][1]),
+                ends(&t.rows[1][0], &west.rows[1][1])
+            ],
+            [true, true],
+            "the west column's"
+        );
         // The drawn tile: its own raster far from every cut, the shared ground at the agreement points.
         let tile = finished_tile(block(&grid, n, 2, 2), 2, 2, side, band).expect("joins");
         assert_eq!(tile.at(120, 120), grid[12].at(120, 120));
-        assert_eq!([tile.at(98, 100), tile.at(99, 142)], [ground(98, 100), ground(99, 142)]);
+        assert_eq!(
+            [tile.at(98, 100), tile.at(99, 142)],
+            [ground(98, 100), ground(99, 142)]
+        );
     }
 
     /// THE B85 DRAWING (rows of tiles joined across their nearer column cut, then the nearer row cut), kept as the
@@ -713,20 +932,45 @@ mod tests {
         let [c_nw, c_ne, c_sw, c_se] = cuts.corners;
         let [[v_nwn, v_nne], [v_wt, v_te], [v_sws, v_sse]] = &cuts.cols;
         let [[h_nww, h_nt, h_nee], [h_wsw, h_ts, h_ese]] = &cuts.rows;
-        let north_at = |x: i64| if x < c_nw.0 { h_nww.at(x) } else if x > c_ne.0 { h_nee.at(x) } else { h_nt.at(x) };
-        let south_at = |x: i64| if x < c_sw.0 { h_wsw.at(x) } else if x > c_se.0 { h_ese.at(x) } else { h_ts.at(x) };
-        // A row of tiles joined across its column cuts at `(x, y)`: west, middle and east rasters and the two cuts.
-        let row_join = |wf: &Field, mf: &Field, ef: &Field, vw: &CutLine, ve: &CutLine, x: i64, y: i64| {
-            let (cw, ce) = (vw.at(y), ve.at(y));
-            if x - cw < ce - x { blend(wf.at(x, y), mf.at(x, y), x - cw) } else { blend(mf.at(x, y), ef.at(x, y), x - ce) }
+        let north_at = |x: i64| {
+            if x < c_nw.0 {
+                h_nww.at(x)
+            } else if x > c_ne.0 {
+                h_nee.at(x)
+            } else {
+                h_nt.at(x)
+            }
         };
+        let south_at = |x: i64| {
+            if x < c_sw.0 {
+                h_wsw.at(x)
+            } else if x > c_se.0 {
+                h_ese.at(x)
+            } else {
+                h_ts.at(x)
+            }
+        };
+        // A row of tiles joined across its column cuts at `(x, y)`: west, middle and east rasters and the two cuts.
+        let row_join =
+            |wf: &Field, mf: &Field, ef: &Field, vw: &CutLine, ve: &CutLine, x: i64, y: i64| {
+                let (cw, ce) = (vw.at(y), ve.at(y));
+                if x - cw < ce - x {
+                    blend(wf.at(x, y), mf.at(x, y), x - cw)
+                } else {
+                    blend(mf.at(x, y), ef.at(x, y), x - ce)
+                }
+            };
         let mut v = Vec::with_capacity((side * side) as usize);
         for y in y0..y1 {
             for x in x0..x1 {
                 let (hn, hs) = (north_at(x), south_at(x));
                 let mid = row_join(w, t, e, v_wt, v_te, x, y);
                 let z = if y - hn < hs - y {
-                    if y - hn > BLEND { mid } else { blend(row_join(nw, n, ne, v_nwn, v_nne, x, y), mid, y - hn) }
+                    if y - hn > BLEND {
+                        mid
+                    } else {
+                        blend(row_join(nw, n, ne, v_nwn, v_nne, x, y), mid, y - hn)
+                    }
                 } else if hs - y > BLEND {
                     mid
                 } else {
@@ -735,7 +979,13 @@ mod tests {
                 v.push(z);
             }
         }
-        Some(Field { gx0: x0, gy0: y0, w: side as usize, h: side as usize, v })
+        Some(Field {
+            gx0: x0,
+            gy0: y0,
+            w: side as usize,
+            h: side as usize,
+            v,
+        })
     }
 
     #[test]
@@ -750,11 +1000,18 @@ mod tests {
                 (ci * side + mx, cj * side + my)
             })
             .collect();
-        let grid: Vec<Field> = (0..n).flat_map(|j| (0..n).map(move |i| (i, j))).map(|(i, j)| raw(i, j, side, 16, &agree)).collect();
+        let grid: Vec<Field> = (0..n)
+            .flat_map(|j| (0..n).map(move |i| (i, j)))
+            .map(|(i, j)| raw(i, j, side, 16, &agree))
+            .collect();
         for ty in 1..n - 1 {
             for tx in 1..n - 1 {
                 let b = block(&grid, n, tx, ty);
-                assert_eq!(finished_tile(b, tx, ty, side, band), by_rows(b, tx, ty, side, band), "tile ({tx}, {ty})");
+                assert_eq!(
+                    finished_tile(b, tx, ty, side, band),
+                    by_rows(b, tx, ty, side, band),
+                    "tile ({tx}, {ty})"
+                );
             }
         }
         // Rows first is columns first on the swapped rasters and cuts.
@@ -771,7 +1028,10 @@ mod tests {
             cols: [[h_nww, h_wsw], [h_nt, h_ts], [h_nee, h_ese]],
             rows: [[v_nwn, v_wt, v_sws], [v_nne, v_te, v_sse]],
         };
-        let sc = TileCuts { corners: [sc.corners[0], sc.corners[2], sc.corners[1], sc.corners[3]], ..sc };
+        let sc = TileCuts {
+            corners: [sc.corners[0], sc.corners[2], sc.corners[1], sc.corners[3]],
+            ..sc
+        };
         let columns_first = draw(sb, &sc, square, side, [Meet::Four { rows_first: false }; 4]);
         assert_eq!(rows_first, columns_first.swapped());
     }
@@ -781,15 +1041,40 @@ mod tests {
         // The north-west tile of the block does not exist: the corner where the tile meets its west and north neighbours
         // joins three tiles.
         let (side, band) = (48, 6);
-        let grid: Vec<Field> =
-            (0..3).flat_map(|j| (0..3).map(move |i| (i, j))).map(|(i, j)| raw(i, j, side, 16, &[(50, 47), (93, 95)])).collect();
-        let empty = Field { gx0: 0, gy0: 0, w: 0, h: 0, v: Vec::new() };
+        let grid: Vec<Field> = (0..3)
+            .flat_map(|j| (0..3).map(move |i| (i, j)))
+            .map(|(i, j)| raw(i, j, side, 16, &[(50, 47), (93, 95)]))
+            .collect();
+        let empty = Field {
+            gx0: 0,
+            gy0: 0,
+            w: 0,
+            h: 0,
+            v: Vec::new(),
+        };
         let mut b = block(&grid, 3, 1, 1);
         let cuts = tile_cuts(b, 1, 1, side, band).expect("joins");
         b[0] = &empty;
         let square = [48, 48, 96, 96];
-        let four = draw(b, &cuts, square, side, [Meet::Four { rows_first: false }; 4]);
-        let three = draw(b, &cuts, square, side, [Meet::Three, Meet::Four { rows_first: false }, Meet::Four { rows_first: false }, Meet::Four { rows_first: false }]);
+        let four = draw(
+            b,
+            &cuts,
+            square,
+            side,
+            [Meet::Four { rows_first: false }; 4],
+        );
+        let three = draw(
+            b,
+            &cuts,
+            square,
+            side,
+            [
+                Meet::Three,
+                Meet::Four { rows_first: false },
+                Meet::Four { rows_first: false },
+                Meet::Four { rows_first: false },
+            ],
+        );
         let (mut far, mut near) = (0, 0);
         let clear = band + BLEND;
         for y in 48..96 {
@@ -800,15 +1085,34 @@ mod tests {
                     assert_eq!(three.at(x, y), four.at(x, y), "({x}, {y})");
                 } else if v - u >= BLEND && v >= clear {
                     // The west cut alone within the blend: the two-tile blend, to the integer.
-                    assert_eq!(three.at(x, y), blend(grid[3].at(x, y), grid[4].at(x, y), x - cuts.cols[1][0].at(y)), "({x}, {y})");
+                    assert_eq!(
+                        three.at(x, y),
+                        blend(
+                            grid[3].at(x, y),
+                            grid[4].at(x, y),
+                            x - cuts.cols[1][0].at(y)
+                        ),
+                        "({x}, {y})"
+                    );
                     far += 1;
                 } else if u - v >= BLEND && u >= clear {
                     // The north cut alone.
-                    assert_eq!(three.at(x, y), blend(grid[1].at(x, y), grid[4].at(x, y), y - cuts.rows[0][1].at(x)), "({x}, {y})");
+                    assert_eq!(
+                        three.at(x, y),
+                        blend(
+                            grid[1].at(x, y),
+                            grid[4].at(x, y),
+                            y - cuts.rows[0][1].at(x)
+                        ),
+                        "({x}, {y})"
+                    );
                     far += 1;
                 } else {
                     let z = [grid[1].at(x, y), grid[3].at(x, y), grid[4].at(x, y)];
-                    let (lo, hi) = (z.iter().min().copied().unwrap_or(0), z.iter().max().copied().unwrap_or(0));
+                    let (lo, hi) = (
+                        z.iter().min().copied().unwrap_or(0),
+                        z.iter().max().copied().unwrap_or(0),
+                    );
                     assert!((lo..=hi).contains(&three.at(x, y)), "({x}, {y})");
                     near += 1;
                 }
@@ -822,7 +1126,10 @@ mod tests {
         // The north-west corner point lies 5 cells in, the west edge's midpoint 5 cells out: one row apart, ten columns.
         let (side, band) = (12, 6);
         let agree = [(17, 17), (7, 19)];
-        let grid: Vec<Field> = (0..3).flat_map(|j| (0..3).map(move |i| (i, j))).map(|(i, j)| raw(i, j, side, 16, &agree)).collect();
+        let grid: Vec<Field> = (0..3)
+            .flat_map(|j| (0..3).map(move |i| (i, j)))
+            .map(|(i, j)| raw(i, j, side, 16, &agree))
+            .collect();
         assert_eq!(tile_cuts(block(&grid, 3, 1, 1), 1, 1, side, band), None);
         assert_eq!(finished_tile(block(&grid, 3, 1, 1), 1, 1, side, band), None);
     }

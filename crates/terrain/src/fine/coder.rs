@@ -28,7 +28,11 @@ pub fn predict(q: &[i32], w: usize, x: usize, y: usize) -> i64 {
         (_, 0) => i64::from(q[k - 1]),
         (0, _) => i64::from(q[k - w]),
         _ => {
-            let (a, b, c) = (i64::from(q[k - 1]), i64::from(q[k - w]), i64::from(q[k - w - 1]));
+            let (a, b, c) = (
+                i64::from(q[k - 1]),
+                i64::from(q[k - w]),
+                i64::from(q[k - w - 1]),
+            );
             let (lo, hi) = if a < b { (a, b) } else { (b, a) };
             if c >= hi {
                 lo
@@ -85,7 +89,11 @@ impl Bits {
 /// [`RAW_BITS`] cannot be written: `None` (a height step of 2 000 km is no ground).
 #[must_use]
 pub fn encode(q: &[i32], w: usize, h: usize) -> Option<Vec<u8>> {
-    let mut bits = Bits { out: Vec::new(), acc: 0, count: 0 };
+    let mut bits = Bits {
+        out: Vec::new(),
+        acc: 0,
+        count: 0,
+    };
     let (mut a, mut n) = (4u64, 1u64);
     for y in 0..h {
         for x in 0..w {
@@ -132,7 +140,11 @@ pub fn decode(bytes: &[u8], w: usize, h: usize) -> Option<Vec<i32>> {
             while quot < ESCAPE && get(1)? == 1 {
                 quot += 1;
             }
-            let z = if quot == ESCAPE { get(RAW_BITS)? } else { (quot << kk) | get(kk)? };
+            let z = if quot == ESCAPE {
+                get(RAW_BITS)?
+            } else {
+                (quot << kk) | get(kk)?
+            };
             let r = ((z >> 1) as i64) ^ -((z & 1) as i64);
             q[y * w + x] = (predict(&q, w, x, y) + r) as i32;
             rice_update(&mut a, &mut n, z);
@@ -145,7 +157,10 @@ pub fn decode(bytes: &[u8], w: usize, h: usize) -> Option<Vec<i32>> {
 mod tests {
     //! A test may divide (ruling F7's rule is about the shipped path): a fixture's pattern picks its cells with a
     //! remainder.
-    #![allow(clippy::modulo_arithmetic, reason = "a fixture's pattern; never a kernel's path")]
+    #![allow(
+        clippy::modulo_arithmetic,
+        reason = "a fixture's pattern; never a kernel's path"
+    )]
     use super::*;
 
     #[test]

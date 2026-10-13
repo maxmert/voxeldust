@@ -90,7 +90,9 @@ impl ArtifactTiles {
         // builds from the same head. A range the ladder refuses keeps the recipe's band.
         let drawn = artifact.drawn_range_m(&lattice);
         // ★ AND THE FINE GROUND'S BAND (B2; ruling B83 item 3) where the 128 m level applies — the client's own rule.
-        let body = body.with_fine_band_m(drawn.0, drawn.1, artifact.sea_m).unwrap_or(body);
+        let body = body
+            .with_fine_band_m(drawn.0, drawn.1, artifact.sea_m)
+            .unwrap_or(body);
         ArtifactTiles {
             realm,
             world_tag,
@@ -400,12 +402,7 @@ mod tests {
             source.tiles_under(pole, r + 20_000.0),
             source.tiles_within(pole, reach)
         );
-        assert_eq!(
-            source
-                .tiles_under([0.0, 0.0, 1.0], r + 20_000.0)
-                .len(),
-            1
-        );
+        assert_eq!(source.tiles_under([0.0, 0.0, 1.0], r + 20_000.0).len(), 1);
         // ★ Past the face's edges the reach names the partner faces' tiles too (2026-09-21): the
         // four tiles of +Z are all there, and the reach is bounded by the ladder's outer edge, so
         // the count is more than four and less than the whole cube.

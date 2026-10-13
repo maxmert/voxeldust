@@ -16,10 +16,10 @@
 //! shipped as one record.
 
 use super::coder;
+use super::finish::finished_square;
 use super::l1::{BUFFER_NODES, L1Tile, TILE_NODES, TileKey};
 use super::points::chart_cell;
 use super::read::MEAN_LEVELS;
-use super::finish::finished_square;
 use super::stitch::{Field, MISSING, mean_levels};
 
 /// The finished record's form; a change of the form is a new number.
@@ -40,7 +40,13 @@ pub const FINE_VERSION: u32 = 1;
 #[must_use]
 pub fn input_word(artifact_digest: [u64; 2]) -> u64 {
     use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
-    fnv1a_u64(fnv1a_u64(fnv1a_u64(FNV_OFFSET, artifact_digest[0]), artifact_digest[1]), u64::from(FINE_VERSION))
+    fnv1a_u64(
+        fnv1a_u64(
+            fnv1a_u64(FNV_OFFSET, artifact_digest[0]),
+            artifact_digest[1],
+        ),
+        u64::from(FINE_VERSION),
+    )
 }
 
 /// ★ THE RAW RECORD (what the shard keeps of a solve, for a neighbour finished later): the form, the node's cells as a
@@ -77,7 +83,10 @@ pub fn decode_raw(bytes: &[u8], key: TileKey, n7: i32) -> Option<Field> {
     let shift = u32::from(shift);
     let side = ((TILE_NODES + BUFFER_NODES) << shift) as usize;
     let mut v = coder::decode(code, side, side)?;
-    let (i0, j0) = ((key.tx * TILE_NODES - 1) << shift, (key.ty * TILE_NODES - 1) << shift);
+    let (i0, j0) = (
+        (key.tx * TILE_NODES - 1) << shift,
+        (key.ty * TILE_NODES - 1) << shift,
+    );
     for (b, row) in v.chunks_mut(side).enumerate() {
         for (a, q) in row.iter_mut().enumerate() {
             if chart_cell(key.face, i0 + a as i32, j0 + b as i32, n7).is_none() {
@@ -85,7 +94,13 @@ pub fn decode_raw(bytes: &[u8], key: TileKey, n7: i32) -> Option<Field> {
             }
         }
     }
-    Some(Field { gx0: i64::from(i0), gy0: i64::from(j0), w: side, h: side, v })
+    Some(Field {
+        gx0: i64::from(i0),
+        gy0: i64::from(j0),
+        w: side,
+        h: side,
+        v,
+    })
 }
 
 /// The raw solve's raster as a field on the level's global cells: the tile and one node beyond each edge, `shift` the
@@ -143,10 +158,17 @@ pub fn decode_levels(bytes: &[u8]) -> Option<(u32, Vec<Vec<i32>>)> {
     let (&form, rest) = bytes.split_first()?;
     let (&count, rest) = rest.split_first()?;
     let (&ts, rest) = rest.split_first()?;
-    if (form != TILE_FORM) | (u32::from(count) != MEAN_LEVELS + 1) | (u32::from(ts) < MEAN_LEVELS) | (ts > 16) {
+    if (form != TILE_FORM)
+        | (u32::from(count) != MEAN_LEVELS + 1)
+        | (u32::from(ts) < MEAN_LEVELS)
+        | (ts > 16)
+    {
         return None;
     }
-    Some((u32::from(ts), decode_codes(rest, 1usize << ts, 0, usize::from(count))?))
+    Some((
+        u32::from(ts),
+        decode_codes(rest, 1usize << ts, 0, usize::from(count))?,
+    ))
 }
 
 /// The levels `lo .. lo + count` of a tile `side` cells wide, each a length and a code, from `rest`.
@@ -209,10 +231,18 @@ pub fn decode_range(bytes: &[u8]) -> Option<(u32, u32, Vec<Vec<i32>>)> {
         return None;
     };
     let (lo, count, ts) = (u32::from(*lo), u32::from(*count), u32::from(*ts));
-    if (*form != RANGE_FORM) | (count == 0) | (lo + count > MEAN_LEVELS + 1) | !(MEAN_LEVELS..=16).contains(&ts) {
+    if (*form != RANGE_FORM)
+        | (count == 0)
+        | (lo + count > MEAN_LEVELS + 1)
+        | !(MEAN_LEVELS..=16).contains(&ts)
+    {
         return None;
     }
-    Some((ts, lo, decode_codes(rest, 1usize << ts, lo as usize, count as usize)?))
+    Some((
+        ts,
+        lo,
+        decode_codes(rest, 1usize << ts, lo as usize, count as usize)?,
+    ))
 }
 
 #[cfg(test)]
@@ -230,8 +260,16 @@ mod tests {
     #[test]
     fn a_record_carries_every_level_back_exactly_and_refuses_what_is_not_one() {
         // A 32-cell tile's square and its five means over a slope with a ridge.
-        let square: Vec<i32> = (0..32 * 32).map(|c| 3 * (c & 31) - 2 * (c >> 5) + if (c & 7) == 3 { 40 } else { 0 }).collect();
-        let f = Field { gx0: 0, gy0: 0, w: 32, h: 32, v: square.clone() };
+        let square: Vec<i32> = (0..32 * 32)
+            .map(|c| 3 * (c & 31) - 2 * (c >> 5) + if (c & 7) == 3 { 40 } else { 0 })
+            .collect();
+        let f = Field {
+            gx0: 0,
+            gy0: 0,
+            w: 32,
+            h: 32,
+            v: square.clone(),
+        };
         let mut levels = vec![square];
         levels.extend(mean_levels(&f, 0, 0, 32, MEAN_LEVELS).expect("the means"));
         let bytes = encode_levels(&levels, 5).expect("codes");
@@ -255,7 +293,10 @@ mod tests {
         // range past the coarsest, an empty one, or a record that is not a finished one is refused.
         for (lo, hi) in [(3u32, 6u32), (0, 2), (5, 6), (0, 6)] {
             let cut = range_record(&bytes, lo, hi).expect("a range");
-            assert_eq!(decode_range(&cut), Some((5, lo, levels[lo as usize..hi as usize].to_vec())));
+            assert_eq!(
+                decode_range(&cut),
+                Some((5, lo, levels[lo as usize..hi as usize].to_vec()))
+            );
         }
         assert_eq!(range_record(&bytes, 4, 7), None);
         assert_eq!(range_record(&bytes, 3, 3), None);
@@ -284,19 +325,34 @@ mod tests {
     }
 
     #[test]
-    fn a_raw_record_at_a_cube_corner_comes_back_with_its_empty_corner_and_the_input_word_follows_the_artifact() {
+    fn a_raw_record_at_a_cube_corner_comes_back_with_its_empty_corner_and_the_input_word_follows_the_artifact()
+     {
         // Shift 2 (a node of four cells): the tile (0, 0) of a face 64 cells wide, its raster 40 wide from cell −4; the
         // cells past both edges at once (the cube corner's diagonal region) hold no height.
-        let key = TileKey { face: Face::PosX, tx: 0, ty: 0 };
+        let key = TileKey {
+            face: Face::PosX,
+            tx: 0,
+            ty: 0,
+        };
         let n7 = 64;
         let v: Vec<i32> = (0..40 * 40)
             .map(|c| {
                 let (a, b) = (c % 40 - 4, c / 40 - 4);
-                if chart_cell(key.face, a, b, n7).is_none() { MISSING } else { 3 * a - 5 * b }
+                if chart_cell(key.face, a, b, n7).is_none() {
+                    MISSING
+                } else {
+                    3 * a - 5 * b
+                }
             })
             .collect();
         assert_eq!(v.iter().filter(|&&q| q == MISSING).count(), 16);
-        let field = Field { gx0: -4, gy0: -4, w: 40, h: 40, v };
+        let field = Field {
+            gx0: -4,
+            gy0: -4,
+            w: 40,
+            h: 40,
+            v,
+        };
         let record = encode_raw(&field, 2).expect("codes");
         assert_eq!(decode_raw(&record, key, n7), Some(field));
         // Another form, a shift past the ladder, bytes that end early.
@@ -309,7 +365,13 @@ mod tests {
         assert_eq!(decode_raw(&record[..1], key, n7), None);
         assert_eq!(decode_raw(&record[..record.len() / 2], key, n7), None);
         // A step past the coder's plain word.
-        let cliff = Field { gx0: -4, gy0: -4, w: 2, h: 1, v: vec![0, 1 << 24] };
+        let cliff = Field {
+            gx0: -4,
+            gy0: -4,
+            w: 2,
+            h: 1,
+            v: vec![0, 1 << 24],
+        };
         assert_eq!(encode_raw(&cliff, 2), None);
         // The input word: the same artifact the same word, another artifact another.
         assert_eq!(input_word([1, 2]), input_word([1, 2]));
@@ -317,29 +379,84 @@ mod tests {
     }
 
     #[test]
-    fn a_raw_tile_stands_one_node_beyond_its_tile_and_nine_equal_ones_finish_into_their_own_ground() {
+    fn a_raw_tile_stands_one_node_beyond_its_tile_and_nine_equal_ones_finish_into_their_own_ground()
+    {
         // Shift 2: a node of four cells, a tile of 32, its raster 40 wide.
         let ground = |x: i64, y: i64| (5 * x + 7 * y) as i32;
         let raw = |tx: i32, ty: i32| {
-            let key = TileKey { face: Face::PosX, tx, ty };
+            let key = TileKey {
+                face: Face::PosX,
+                tx,
+                ty,
+            };
             let (x0, y0) = ((i64::from(tx) * 8 - 1) * 4, (i64::from(ty) * 8 - 1) * 4);
-            let quarters = (0..40 * 40).map(|c| ground(x0 + (c % 40), y0 + (c / 40))).collect();
-            raw_field(key, L1Tile { side: 40, quarters, points: 0, passes: Vec::new() }, 2)
+            let quarters = (0..40 * 40)
+                .map(|c| ground(x0 + (c % 40), y0 + (c / 40)))
+                .collect();
+            raw_field(
+                key,
+                L1Tile {
+                    side: 40,
+                    quarters,
+                    points: 0,
+                    passes: Vec::new(),
+                },
+                2,
+            )
         };
-        let grid: Vec<Field> = (0..3).flat_map(|ty| (0..3).map(move |tx| (tx, ty))).map(|(tx, ty)| raw(tx, ty)).collect();
+        let grid: Vec<Field> = (0..3)
+            .flat_map(|ty| (0..3).map(move |tx| (tx, ty)))
+            .map(|(tx, ty)| raw(tx, ty))
+            .collect();
         assert_eq!((grid[4].gx0, grid[4].gy0, grid[4].w), (28, 28, 40));
-        let slot = |k: usize| Some((TileKey { face: Face::PosX, tx: (k % 3) as i32, ty: (k / 3) as i32 }, &grid[k]));
+        let slot = |k: usize| {
+            Some((
+                TileKey {
+                    face: Face::PosX,
+                    tx: (k % 3) as i32,
+                    ty: (k / 3) as i32,
+                },
+                &grid[k],
+            ))
+        };
         // A band of a node less the blend is under nought here: no cut can join, no tile.
         assert_eq!(finish(std::array::from_fn(slot), 2, 96), None);
         // Shift 4 (a 16-cell node, a 128-cell tile, its raster 160 wide): the tile's own ground and its means.
         let raw16 = |tx: i32, ty: i32| {
-            let key = TileKey { face: Face::PosX, tx, ty };
+            let key = TileKey {
+                face: Face::PosX,
+                tx,
+                ty,
+            };
             let (x0, y0) = ((i64::from(tx) * 8 - 1) * 16, (i64::from(ty) * 8 - 1) * 16);
-            let quarters = (0..160 * 160).map(|c| ground(x0 + (c % 160), y0 + (c / 160))).collect();
-            raw_field(key, L1Tile { side: 160, quarters, points: 0, passes: Vec::new() }, 4)
+            let quarters = (0..160 * 160)
+                .map(|c| ground(x0 + (c % 160), y0 + (c / 160)))
+                .collect();
+            raw_field(
+                key,
+                L1Tile {
+                    side: 160,
+                    quarters,
+                    points: 0,
+                    passes: Vec::new(),
+                },
+                4,
+            )
         };
-        let grid: Vec<Field> = (0..3).flat_map(|ty| (0..3).map(move |tx| (tx, ty))).map(|(tx, ty)| raw16(tx, ty)).collect();
-        let slot = |k: usize| Some((TileKey { face: Face::PosX, tx: (k % 3) as i32, ty: (k / 3) as i32 }, &grid[k]));
+        let grid: Vec<Field> = (0..3)
+            .flat_map(|ty| (0..3).map(move |tx| (tx, ty)))
+            .map(|(tx, ty)| raw16(tx, ty))
+            .collect();
+        let slot = |k: usize| {
+            Some((
+                TileKey {
+                    face: Face::PosX,
+                    tx: (k % 3) as i32,
+                    ty: (k / 3) as i32,
+                },
+                &grid[k],
+            ))
+        };
         let levels = finish(std::array::from_fn(slot), 4, 384).expect("finishes");
         assert_eq!(levels.len(), MEAN_LEVELS as usize + 1);
         assert_eq!(levels[0][0], ground(128, 128));

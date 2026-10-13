@@ -25,14 +25,14 @@
 /// RLM Step 2, the demand-driven realm lifecycle (banner 11218): the hysteresis state machine that decides SpinUp/KeepAlive/drop per observer, the scalar primitives the demand fold reduces to (live and predictive distance, the cross-observer union, seed-lineage coord recovery, the counted coord-less ship exclusion), the evaluate_realm_aoi fold end to end through the rig, the downward interest byte of the look horizon (fail-closed admission, down-proxy, rising/beat/falling edges, self-proxy exclusion), the SL7 occupied-child liveness bit as a demand input, and the whole loop's latches, G-IDENTICAL spin-up, recheck cadence, parent/child directory head-reads, node caches, and the ChildLive bit shipped upward with its hand-off hold budget.
 mod aoi_demand;
 mod artifact_ship;
-/// The fine tiles' ship (B2): the provider's work every tick, the occupant's finished tiles in their parts, paced, each once.
-mod fine_ship;
 /// The realm lease and session admission, merged per reader 1's recommendation: boot requests the lease until granted, a foreign grant is refused, a lost lease self-fences, the holder re-reads and renews realm and entity leases on cadence, logout revokes at the recorded fence; then how a session's dot is admitted — spawn-pose resolution and the two-phase attach handshake through the directory, races, wrong-realm routing, idempotent re-attach.
 mod authority;
 /// The CONTAINMENT re-home trigger section (banner 6655, running to 11217): the shell/box region forest fixtures, the ancestor chain a shard folds over its own roster, the child index proving it decides what a full scan decides without touching every child (SL9); then the deepest-container scan (rootless forest, dense crowd, first-class Station/Area and co-hosted realms, banner 9143), the shape- and motion-agnostic G-IDENTICAL fixtures, and the crossing lifecycle (banner 9817: D-38 discharge, ledger eviction, cell-carry shape, grant/abort demuxes, ttl re-drive, exhaustion backoff, demote terminal, dock/undock, boot validation).
 mod containment;
 /// The crossing lane itself: Slice 1d.
 mod crossing;
+/// The fine tiles' ship (B2): the provider's work every tick, the occupant's finished tiles in their parts, paced, each once.
+mod fine_ship;
 /// The ownership hand-off machinery end to end (banner 3581): the dest-side OpenInputSlot adopt, the applied-steps idempotency journal, the ordered saga Demote/Promote/ReHome consumers including source==dest re-own and the retained-ghost collision, the source-ghost lifecycle (take-over proof, hold closure, band-exit Despawn), then the remaining saga-Promote no-op/defer arms, the deferred promote re-driven after the crossing lands, post-marker input at the resume watermark, the idle re-stamp and the slot's fence/watermark guards.
 mod handoff;
 mod interest;

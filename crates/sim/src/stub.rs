@@ -30,7 +30,6 @@
 
 mod aoi;
 pub mod artifact_ship;
-pub mod fine_ship;
 pub mod built_store;
 mod config;
 mod containment;
@@ -39,6 +38,7 @@ mod crossing_receive;
 mod dot;
 pub mod drive;
 pub mod exterior;
+pub mod fine_ship;
 mod frames;
 mod ghost;
 mod greeting;

@@ -551,12 +551,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // body (its artifact states a sea), its workers on the solve's share of the cores.
     if let Some((boot, body)) = artifact_boot.as_ref().zip(own_body.as_ref())
         && let Some(artifact) = boot.artifact()
-        && let Some(work) =
-            vd_bins::fine_source::FineWork::new(own_realm, *body, std::sync::Arc::clone(artifact), solve_cores.0)
+        && let Some(work) = vd_bins::fine_source::FineWork::new(
+            own_realm,
+            *body,
+            std::sync::Arc::clone(artifact),
+            solve_cores.0,
+        )
     {
         *world.resource_mut::<vd_sim::stub::fine_ship::FineSource>() =
             vd_sim::stub::fine_ship::FineSource(Some(Box::new(work)));
-        tracing::info!(threads = solve_cores.0, "the fine tiles are armed from the store");
+        tracing::info!(
+            threads = solve_cores.0,
+            "the fine tiles are armed from the store"
+        );
     }
     if let Some(body) = stored_body {
         *world.resource_mut::<vd_sim::stub::drive::OwnBody>() =
@@ -738,6 +745,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pace_started = std::time::Instant::now();
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let started = std::time::Instant::now();
+        // ★ WORK IN HAND (ruling B91, SL7 amended): while this realm's first solve has not landed it does not report
+        // itself empty, so it stays up until the solve lands (or ends with nothing) — a player who saw it for a minute
+        // never leaves it half solved, and the next start reads the rows instead of solving again.
+        let in_hand = artifact_boot
+            .as_ref()
+            .is_some_and(vd_bins::artifact_boot::ArtifactBoot::solving);
+        {
+            let mut work = node.world_mut().resource_mut::<vd_sim::stub::WorkInHand>();
+            if work.0 != in_hand {
+                work.0 = in_hand;
+            }
+        }
         let _ = node.step_tick();
         // ★ THE ARTIFACT LANDS (slice 8c stage C4): once, when the worker answers — the rows go to
         // this realm's store on this tick, and the digest and the wall time are logged (the number
@@ -752,6 +771,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|s| s as &mut dyn vd_sim::io::Store);
                 boot.poll(store)
             };
+            if landed.is_none() && !boot.solving() {
+                tracing::warn!(
+                    "the first solve ended without an artifact: the realm reports itself empty again, and its next \
+                     start solves again"
+                );
+            }
             if let Some(millis) = landed {
                 tracing::info!(
                     millis,
@@ -796,9 +821,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         solve_cores.0,
                     )
                 {
-                    *node.world_mut().resource_mut::<vd_sim::stub::fine_ship::FineSource>() =
+                    *node
+                        .world_mut()
+                        .resource_mut::<vd_sim::stub::fine_ship::FineSource>() =
                         vd_sim::stub::fine_ship::FineSource(Some(Box::new(work)));
-                    tracing::info!(threads = solve_cores.0, "the fine tiles are armed from the solve");
+                    tracing::info!(
+                        threads = solve_cores.0,
+                        "the fine tiles are armed from the solve"
+                    );
                 }
             }
         }

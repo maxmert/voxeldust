@@ -1141,7 +1141,14 @@ pub fn fine_needs(
     let reach = |k: u8| {
         let rung = L1_RUNG + k;
         let chunk_m = crate::chunk::CHUNK_EDGE as f64 * f64::from(vd_seed::ladder::cell_m(rung));
-        fine_reach_m(rung, (ground_m, top_m), relief_m, radial_m, pixel_rad, (chunk_m, tile_m))
+        fine_reach_m(
+            rung,
+            (ground_m, top_m),
+            relief_m,
+            radial_m,
+            pixel_rad,
+            (chunk_m, tile_m),
+        )
     };
     let top = L1_TOP_RUNG - L1_RUNG;
     // A coarser level reaches at least as far as a finer one: no reach at the coarsest names nothing.
@@ -1160,7 +1167,10 @@ pub fn fine_needs(
             }
         }
     }
-    names.into_iter().map(|n| (n, need.get(&n).copied().unwrap_or(top))).collect()
+    names
+        .into_iter()
+        .map(|n| (n, need.get(&n).copied().unwrap_or(top)))
+        .collect()
 }
 
 /// ★ THE FINE TILES A VIEW OF `body` READS, from the three numbers its artifact's head states — the drawn ground's lowest
@@ -1176,12 +1186,25 @@ pub fn fine_needs_of_head(
     radial_m: f64,
     pixel_rad: f64,
 ) -> Vec<((u8, u32, u32), u8)> {
-    let Some(lattice) = body.macro_lattice().filter(|_| crate::fine::read::applies(sea_m)) else {
+    let Some(lattice) = body
+        .macro_lattice()
+        .filter(|_| crate::fine::read::applies(sea_m))
+    else {
         return Vec::new();
     };
-    let (low, high) = body.with_fine_band_m(low_m, high_m, sea_m).unwrap_or(*body).ground_range_m();
+    let (low, high) = body
+        .with_fine_band_m(low_m, high_m, sea_m)
+        .unwrap_or(*body)
+        .ground_range_m();
     let r = body.radius_m();
-    fine_needs(&lattice, dir, radial_m, (r + low, r + high), high, pixel_rad)
+    fine_needs(
+        &lattice,
+        dir,
+        radial_m,
+        (r + low, r + high),
+        high,
+        pixel_rad,
+    )
 }
 
 /// ★ THE TILES WITHIN `radius_m` OF THE UNIT DIRECTION `dir`, the nearest first (2026-09-20, the
@@ -1206,7 +1229,12 @@ pub fn tiles_within(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64) -> Vec
 /// [`tiles_within`] for tiles of `tile_nodes` nodes a side (B2: the 128 m tiles are eight nodes, the artifact's 64) —
 /// the one walk and the one order for every tile size, so a fine tile is named by the very rule an artifact tile is.
 #[must_use]
-pub fn tiles_within_of(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64, tile_nodes: u32) -> Vec<(u8, u32, u32)> {
+pub fn tiles_within_of(
+    lattice: &MacroLattice,
+    dir: [f64; 3],
+    radius_m: f64,
+    tile_nodes: u32,
+) -> Vec<(u8, u32, u32)> {
     use vd_seed::bend::{BASIS, face_of, unbend};
     use vd_seed::ladder::index_of;
     let face = face_of(dir);
@@ -1246,7 +1274,11 @@ pub fn tiles_within_of(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64, til
     let mut set = BTreeSet::new();
     for jj in walk(j_lo, j_hi) {
         for ii in walk(i_lo, i_hi) {
-            set.insert(tile_of_node_of(edge, node_at(lattice, face, ii, jj), tile_nodes));
+            set.insert(tile_of_node_of(
+                edge,
+                node_at(lattice, face, ii, jj),
+                tile_nodes,
+            ));
         }
     }
     let mut out: Vec<(u8, u32, u32)> = set.into_iter().collect();
@@ -1255,7 +1287,10 @@ pub fn tiles_within_of(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64, til
     let unit = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
     let away = |&(f, tx, ty): &(u8, u32, u32)| -> f64 {
         let width = |t: u32| (edge - t * tile_nodes).min(tile_nodes);
-        let (cx, cy) = ((tx * tile_nodes + width(tx) / 2) as i32, (ty * tile_nodes + width(ty) / 2) as i32);
+        let (cx, cy) = (
+            (tx * tile_nodes + width(tx) / 2) as i32,
+            (ty * tile_nodes + width(ty) / 2) as i32,
+        );
         let face = Face::from_index(f).unwrap_or(face);
         let d = lattice.direction(lattice.index(face, cx, cy));
         let len = (0..3)
@@ -1834,10 +1869,20 @@ pub fn node_and_fraction(lattice: &MacroLattice, rung: u8, i: i32) -> (i64, Gi) 
     (node, Gi::new((rem << NOISE_BITS) / (2 * size)))
 }
 
-/// The node at `(i, j)` of a face where one axis may stand up to two nodes outside the face —
-/// across the seam, by the same rule a chunk's halo uses (`lattice::site_of`): the partner face's
-/// edge cell at the along position, then inward by what is left. Both axes outside — a cube
-/// corner's missing quadrant — takes the nearest node of the face ([`CORNER_BLEND`]).
+/// The node at `(i, j)` of a face where one axis may stand outside the face — across the seam, by
+/// the same rule a chunk's halo uses (`lattice::site_of`): the partner face's edge cell at the along
+/// position, then inward by what is left, and ON ACROSS the partner's far seam when what is left is
+/// more than the partner holds. Both axes outside — a cube corner's missing quadrant — takes the
+/// nearest node of the face ([`CORNER_BLEND`]).
+///
+/// ★ THE WALK ON (2026-10-13): a stencil stands at most two nodes outside a face, which stays inside
+/// the partner face at every edge of two nodes or more — but a body at the edge ceiling (2 048, a
+/// power of two) folds its pyramid down to ONE node per face, and there "two outside" lies past the
+/// whole partner face. MEASURED: Planet 17313999383825979787's shard panicked in
+/// [`Artifact::drawn_range_m`] the moment its first solve landed (index 6 of 6 nodes); three more
+/// planets at the ceiling would have done the same. Walking on names the node a straight step over
+/// the cube reaches — two nodes from a one-node face is its opposite face — and changes no read at
+/// any edge of two nodes or more (the partner then holds the step, and the walk ends in one call).
 #[must_use]
 pub fn node_at(lattice: &MacroLattice, face: Face, i: i64, j: i64) -> u32 {
     let n = i64::from(lattice.edge);
@@ -1872,7 +1917,9 @@ pub fn node_at(lattice: &MacroLattice, face: Face, i: i64, j: i64) -> u32 {
     } else {
         (c.i, c.j + inward)
     };
-    lattice.index(c.face, ci, cj)
+    // The along axis stands on the partner's edge, so at most the inward axis is outside it: the
+    // walk goes on across the partner's far seam, or ends here at the first branch.
+    node_at(lattice, c.face, i64::from(ci), i64::from(cj))
 }
 
 /// ★ THE READ of `Z` under the cell `(i, j)` of `face` at `rung`, in the height's unit (gap steps
@@ -3353,6 +3400,37 @@ mod tests {
         let last = lattice.cells_per_node as i32 * lattice.edge as i32 - 1;
         let (node, _) = node_and_fraction(&lattice, 0, last);
         assert_eq!(node, i64::from(lattice.edge) - 1);
+    }
+
+    /// ★ A LEVEL OF ONE NODE PER FACE (2026-10-13; every body at the edge ceiling folds one, and Planet
+    /// 17313999383825979787's shard panicked on it): a stencil node two outside the face lies past the
+    /// whole partner face, so the gather walks on across it — one node out is the partner face, two
+    /// out either way is the OPPOSITE face, and every read names one of the six real nodes.
+    #[test]
+    fn a_one_node_face_walks_on_across_the_partner() {
+        let lattice = MacroLattice::with_edge(&home_moon(), 1).expect("one node an edge");
+        for face in Face::ALL {
+            let opposite = Face::from_index(face.index() ^ 1).expect("a face");
+            for (i, j) in [(2, 0), (-2, 0), (0, 2), (0, -2)] {
+                assert_eq!(
+                    node_at(&lattice, face, i, j),
+                    lattice.index(opposite, 0, 0),
+                    "{face:?} ({i}, {j})"
+                );
+            }
+            for (i, j, edge) in [
+                (1, 0, Edge::UPlus),
+                (-1, 0, Edge::UMinus),
+                (0, 1, Edge::VPlus),
+                (0, -1, Edge::VMinus),
+            ] {
+                assert_eq!(
+                    node_at(&lattice, face, i, j),
+                    lattice.index(partner_of(face, edge).dst_face, 0, 0),
+                    "{face:?} ({i}, {j})"
+                );
+            }
+        }
     }
 
     /// ★ THE GATHER ACROSS A SEAM AND AT A CORNER: a node one past the +u edge of +X is the partner

@@ -9,18 +9,35 @@
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    assert_eq!(args.len(), 3, "usage: pair_png <left.png> <right.png> <out.png>");
-    let left = image::open(&args[0]).expect("the left picture reads").to_rgb8();
-    let right = image::open(&args[1]).expect("the right picture reads").to_rgb8();
+    assert_eq!(
+        args.len(),
+        3,
+        "usage: pair_png <left.png> <right.png> <out.png>"
+    );
+    let left = image::open(&args[0])
+        .expect("the left picture reads")
+        .to_rgb8();
+    let right = image::open(&args[1])
+        .expect("the right picture reads")
+        .to_rgb8();
     // The right one scaled to the left one's height (Earth's 30 m maps are smaller than the made ones).
     let right = if right.height() == left.height() {
         right
     } else {
-        let w = (u64::from(right.width()) * u64::from(left.height()) / u64::from(right.height())) as u32;
-        image::imageops::resize(&right, w, left.height(), image::imageops::FilterType::Triangle)
+        let w = (u64::from(right.width()) * u64::from(left.height()) / u64::from(right.height()))
+            as u32;
+        image::imageops::resize(
+            &right,
+            w,
+            left.height(),
+            image::imageops::FilterType::Triangle,
+        )
     };
     let gap = 16;
-    let (w, h) = (left.width() + gap + right.width(), left.height().max(right.height()));
+    let (w, h) = (
+        left.width() + gap + right.width(),
+        left.height().max(right.height()),
+    );
     let mut out = image::RgbImage::from_pixel(w, h, image::Rgb([255, 255, 255]));
     image::imageops::overlay(&mut out, &left, 0, 0);
     image::imageops::overlay(&mut out, &right, i64::from(left.width() + gap), 0);

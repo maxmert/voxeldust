@@ -9,7 +9,11 @@
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    assert_eq!(args.len(), 3, "usage: grid_png <in.png> <pixels a node> <out.png>");
+    assert_eq!(
+        args.len(),
+        3,
+        "usage: grid_png <in.png> <pixels a node> <out.png>"
+    );
     let step: u32 = args[1].parse().expect("a whole number");
     let mut img = image::open(&args[0]).expect("the picture reads").to_rgb8();
     let (w, h) = img.dimensions();

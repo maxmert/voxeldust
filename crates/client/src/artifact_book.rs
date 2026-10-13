@@ -135,8 +135,16 @@ impl ArtifactCache {
             return pick;
         };
         match &self.fine {
-            Some(book) if book.holds_all(&book.tiles_of_chunk(key.face, key.rung, key.x, key.y), key.rung) => {
-                FieldPick::Ready(Arc::new(FineField { inner, book: Arc::clone(book) }) as SharedField)
+            Some(book)
+                if book.holds_all(
+                    &book.tiles_of_chunk(key.face, key.rung, key.x, key.y),
+                    key.rung,
+                ) =>
+            {
+                FieldPick::Ready(Arc::new(FineField {
+                    inner,
+                    book: Arc::clone(book),
+                }) as SharedField)
             }
             _ => FieldPick::Rough(inner),
         }
@@ -147,7 +155,11 @@ impl ArtifactCache {
     /// are all the one ground under the fine ground.
     #[must_use]
     pub fn rough_view(&self) -> ArtifactCache {
-        ArtifactCache { fine: None, rough: true, ..self.clone() }
+        ArtifactCache {
+            fine: None,
+            rough: true,
+            ..self.clone()
+        }
     }
 
     /// Whether this cache is a rough view.
@@ -291,7 +303,10 @@ impl ArtifactCache {
         let serves = !self.rough & applies(self.head.sea_m) & (rung <= L1_TOP_RUNG);
         match (serves, self.fine.as_ref()) {
             (false, _) => Some(field),
-            (true, Some(book)) => Some(Arc::new(FineField { inner: field, book: Arc::clone(book) }) as SharedField),
+            (true, Some(book)) => Some(Arc::new(FineField {
+                inner: field,
+                book: Arc::clone(book),
+            }) as SharedField),
             (true, None) => None,
         }
     }
@@ -830,11 +845,22 @@ impl ArtifactReceiver {
         let Some(face) = vd_seed::bend::Face::from_index(face).filter(|_| level == 1) else {
             return ArtifactIngest::Shape;
         };
-        if (part >= parts) | (parts > MAX_FINE_PARTS) | (tx > i32::MAX as u32) | (ty > i32::MAX as u32) {
+        if (part >= parts)
+            | (parts > MAX_FINE_PARTS)
+            | (tx > i32::MAX as u32)
+            | (ty > i32::MAX as u32)
+        {
             return ArtifactIngest::Shape;
         }
-        let key = TileKey { face, tx: tx as i32, ty: ty as i32 };
-        let slots = self.fine_parts.entry((realm, key)).or_insert_with(|| vec![None; parts as usize]);
+        let key = TileKey {
+            face,
+            tx: tx as i32,
+            ty: ty as i32,
+        };
+        let slots = self
+            .fine_parts
+            .entry((realm, key))
+            .or_insert_with(|| vec![None; parts as usize]);
         if slots.len() != parts as usize {
             // A tile shipped again under another cut starts over.
             *slots = vec![None; parts as usize];
@@ -846,7 +872,14 @@ impl ArtifactReceiver {
         if slots.iter().any(Option::is_none) {
             return ArtifactIngest::FinePart;
         }
-        let record: Vec<u8> = self.fine_parts.remove(&(realm, key)).unwrap_or_default().into_iter().flatten().flatten().collect();
+        let record: Vec<u8> = self
+            .fine_parts
+            .remove(&(realm, key))
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect();
         let Some((ts, lo, levels)) = vd_terrain::fine::tile::decode_range(&record) else {
             return ArtifactIngest::Shape;
         };
@@ -859,18 +892,35 @@ impl ArtifactReceiver {
             parked.push((key, ts, lo, levels));
             return ArtifactIngest::FineParked;
         }
-        if self.hold_fine(realm, key, ts, lo, levels) { ArtifactIngest::FineTile } else { ArtifactIngest::Shape }
+        if self.hold_fine(realm, key, ts, lo, levels) {
+            ArtifactIngest::FineTile
+        } else {
+            ArtifactIngest::Shape
+        }
     }
 
     /// One fine tile's levels from `lo` into its realm's book, the book made with the head's own numbers on the first
     /// tile; `false` where the tile's side is not the book's, its levels are not the side's, or they do not join the
     /// levels held.
-    fn hold_fine(&mut self, realm: RealmId, key: TileKey, ts: u32, lo: u32, levels: Vec<Vec<i32>>) -> bool {
+    fn hold_fine(
+        &mut self,
+        realm: RealmId,
+        key: TileKey,
+        ts: u32,
+        lo: u32,
+        levels: Vec<Vec<i32>>,
+    ) -> bool {
         let Some(cache) = Arc::make_mut(&mut self.book).realms.get_mut(&realm) else {
             return false;
         };
         let fresh = || FineBook::with_side(cache.head.edge, ts, cache.head.sea_m);
-        let Some(mut book) = cache.fine.as_deref().cloned().or_else(fresh).filter(|b| b.side_shift() == ts) else {
+        let Some(mut book) = cache
+            .fine
+            .as_deref()
+            .cloned()
+            .or_else(fresh)
+            .filter(|b| b.side_shift() == ts)
+        else {
             return false;
         };
         if !book.insert_from(key, lo, levels) {
@@ -879,7 +929,10 @@ impl ArtifactReceiver {
         let held = book.held_from(key).unwrap_or(lo) as u8;
         cache.fine = Some(Arc::new(book));
         cache.epoch += 1;
-        self.fine_held.push((realm, (key.face.index(), key.tx as u32, key.ty as u32, held)));
+        self.fine_held.push((
+            realm,
+            (key.face.index(), key.tx as u32, key.ty as u32, held),
+        ));
         true
     }
 
@@ -953,7 +1006,8 @@ mod tests {
             .map(|k| vec![100 + k as i32; (1usize << (ts - k)) * (1usize << (ts - k))])
             .collect();
         let whole = vd_terrain::fine::tile::encode_levels(&levels, ts).expect("codes");
-        vd_terrain::fine::tile::range_record(&whole, 0, vd_terrain::fine::read::MEAN_LEVELS + 1).expect("a range")
+        vd_terrain::fine::tile::range_record(&whole, 0, vd_terrain::fine::read::MEAN_LEVELS + 1)
+            .expect("a range")
     }
 
     /// The field a pick hands a build on the fine ground, or none while it waits or stands on the rough ground.
@@ -992,21 +1046,31 @@ mod tests {
             bytes: bytes.to_vec(),
         };
         let mut rx = ArtifactReceiver::default();
-        assert_eq!(rx.accept(part(0, 2, &record[..half])), ArtifactIngest::FinePart);
-        assert_eq!(rx.accept(part(0, 2, &record[..half])), ArtifactIngest::Duplicate);
-        assert_eq!(rx.accept(part(1, 2, &record[half..])), ArtifactIngest::FineParked);
+        assert_eq!(
+            rx.accept(part(0, 2, &record[..half])),
+            ArtifactIngest::FinePart
+        );
+        assert_eq!(
+            rx.accept(part(0, 2, &record[..half])),
+            ArtifactIngest::Duplicate
+        );
+        assert_eq!(
+            rx.accept(part(1, 2, &record[half..])),
+            ArtifactIngest::FineParked
+        );
         // By shape: another level, a face past six, a part past its count, a count past the bound, a record that is
         // no record.
-        let shaped = |level: u8, face: u8, part: u32, parts: u32, bytes: Vec<u8>| BulkMsg::FineTilePart {
-            realm: wet,
-            level,
-            face,
-            tx: 0,
-            ty: 0,
-            part,
-            parts,
-            bytes,
-        };
+        let shaped =
+            |level: u8, face: u8, part: u32, parts: u32, bytes: Vec<u8>| BulkMsg::FineTilePart {
+                realm: wet,
+                level,
+                face,
+                tx: 0,
+                ty: 0,
+                part,
+                parts,
+                bytes,
+            };
         for msg in [
             shaped(2, 2, 0, 1, record.clone()),
             shaped(1, 6, 0, 1, record.clone()),
@@ -1017,14 +1081,24 @@ mod tests {
             assert_eq!(rx.accept(msg), ArtifactIngest::Shape);
         }
         // A tile shipped again under another cut starts over.
-        assert_eq!(rx.accept(shaped(1, 2, 0, 3, record[..10].to_vec())), ArtifactIngest::FinePart);
-        assert_eq!(rx.accept(shaped(1, 2, 0, 1, record.clone())), ArtifactIngest::FineParked);
+        assert_eq!(
+            rx.accept(shaped(1, 2, 0, 3, record[..10].to_vec())),
+            ArtifactIngest::FinePart
+        );
+        assert_eq!(
+            rx.accept(shaped(1, 2, 0, 1, record.clone())),
+            ArtifactIngest::FineParked
+        );
         // The head lands the two parked tiles.
         assert_eq!(rx.accept(stated_head(wet, 0)), ArtifactIngest::Head);
         assert_eq!((rx.counters.fine_tiles, rx.counters.fine_parked), (2, 2));
         let face = Face::from_index(2).expect("a face");
         let cache = rx.book().get(wet).cloned().expect("a cache");
-        assert!(cache.fine().is_some_and(|b| b.holds(TileKey { face, tx: 1, ty: 1 })));
+        assert!(
+            cache
+                .fine()
+                .is_some_and(|b| b.holds(TileKey { face, tx: 1, ty: 1 }))
+        );
         // A tile of another side is refused; a whole tile after the head is held.
         let wider = fine_record(6);
         let other = |tx: u32, bytes: &[u8]| BulkMsg::FineTilePart {
@@ -1043,63 +1117,116 @@ mod tests {
         // stop short of the coarsest a fresh tile needs are refused.
         let levels = |lo: u32, hi: u32| {
             let whole = vd_terrain::fine::tile::encode_levels(
-                &(0..=vd_terrain::fine::read::MEAN_LEVELS).map(|k| vec![100 + k as i32; (32usize >> k) * (32usize >> k)]).collect::<Vec<_>>(),
+                &(0..=vd_terrain::fine::read::MEAN_LEVELS)
+                    .map(|k| vec![100 + k as i32; (32usize >> k) * (32usize >> k)])
+                    .collect::<Vec<_>>(),
                 5,
             )
             .expect("codes");
             vd_terrain::fine::tile::range_record(&whole, lo, hi).expect("a range")
         };
-        let far = |tx: u32, ty: u32, bytes: &[u8]| BulkMsg::FineTilePart { realm: wet, level: 1, face: 2, tx, ty, part: 0, parts: 1, bytes: bytes.to_vec() };
-        let held_from = |rx: &ArtifactReceiver, tx: i32| rx.book().get(wet).and_then(|c| c.fine().and_then(|b| b.held_from(TileKey { face, tx, ty: 2 })));
-        assert_eq!(rx.accept(far(4, 2, &levels(3, 6))), ArtifactIngest::FineTile);
+        let far = |tx: u32, ty: u32, bytes: &[u8]| BulkMsg::FineTilePart {
+            realm: wet,
+            level: 1,
+            face: 2,
+            tx,
+            ty,
+            part: 0,
+            parts: 1,
+            bytes: bytes.to_vec(),
+        };
+        let held_from = |rx: &ArtifactReceiver, tx: i32| {
+            rx.book().get(wet).and_then(|c| {
+                c.fine()
+                    .and_then(|b| b.held_from(TileKey { face, tx, ty: 2 }))
+            })
+        };
+        assert_eq!(
+            rx.accept(far(4, 2, &levels(3, 6))),
+            ArtifactIngest::FineTile
+        );
         assert_eq!(held_from(&rx, 4), Some(3));
-        assert_eq!(rx.accept(far(4, 2, &levels(1, 3))), ArtifactIngest::FineTile);
+        assert_eq!(
+            rx.accept(far(4, 2, &levels(1, 3))),
+            ArtifactIngest::FineTile
+        );
         assert_eq!(held_from(&rx, 4), Some(1));
         assert_eq!(rx.accept(far(5, 2, &levels(0, 2))), ArtifactIngest::Shape);
         assert_eq!(held_from(&rx, 5), None);
         // The chunk at rung 0 over cells 6 199 … 6 262 both ways reads samples 45 … 51: the tile (1, 1) alone.
         let cache = rx.book().get(wet).cloned().expect("a cache");
         let inner: SharedField = Arc::new(TileCache::new(68));
-        let at = |rung: u8, x: i32| ChunkKey { face, rung, x, y: 100, z: 0 };
-        let wrapped = ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).expect("ready");
+        let at = |rung: u8, x: i32| ChunkKey {
+            face,
+            rung,
+            x,
+            y: 100,
+            z: 0,
+        };
+        let wrapped = ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100)))
+            .expect("ready");
         assert!(!Arc::ptr_eq(&wrapped, &inner));
-        assert_eq!(wrapped.fine_z(face, 0, 0, 6_230, 6_230), cache.fine().expect("a book").z(face, 0, 0, 6_230, 6_230));
+        assert_eq!(
+            wrapped.fine_z(face, 0, 0, 6_230, 6_230),
+            cache.fine().expect("a book").z(face, 0, 0, 6_230, 6_230)
+        );
         // A chunk over a tile not held stands on the rough ground (B86 item 7): the field under the fine ground, and the
         // cache's rough view reads the same chunk on it too; a rung over 12 and a waiting pick stand as they were.
         assert!(ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 400))).is_none());
-        let under = rough(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 400))).expect("rough");
+        let under = rough(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 400)))
+            .expect("rough");
         assert!(Arc::ptr_eq(&under, &inner));
         let view = cache.rough_view();
         assert_eq!((view.is_rough_view(), cache.is_rough_view()), (true, false));
-        assert!(Arc::ptr_eq(&ready(view.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).expect("ready"), &inner));
+        assert!(Arc::ptr_eq(
+            &ready(view.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100)))
+                .expect("ready"),
+            &inner
+        ));
         assert!(rough(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).is_none());
-        let kept = ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(13, 0))).expect("ready");
+        let kept =
+            ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(13, 0))).expect("ready");
         assert!(Arc::ptr_eq(&kept, &inner));
         assert!(ready(cache.with_fine(FieldPick::Waiting, at(0, 100))).is_none());
         // The rung's field reads the fine ground too, at rungs it serves.
         let lattice = MacroLattice::of(&home_moon()).expect("a lattice");
         let near = cache.field_at_rung(&lattice, 3).expect("a field");
-        assert_eq!(near.fine_z(face, 3, 3, 778, 778), cache.fine().expect("a book").z(face, 3, 3, 778, 778));
+        assert_eq!(
+            near.fine_z(face, 3, 3, 778, 778),
+            cache.fine().expect("a book").z(face, 3, 3, 778, 778)
+        );
         // A dry realm's chunk stands on its pick, with or without a book.
         let dry = RealmId::Planet(78);
-        assert_eq!(rx.accept(stated_head(dry, vd_terrain::artifact::DRY_M)), ArtifactIngest::Head);
+        assert_eq!(
+            rx.accept(stated_head(dry, vd_terrain::artifact::DRY_M)),
+            ArtifactIngest::Head
+        );
         let dry_cache = rx.book().get(dry).cloned().expect("a cache");
-        let kept = ready(dry_cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).expect("ready");
+        let kept = ready(dry_cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100)))
+            .expect("ready");
         assert!(Arc::ptr_eq(&kept, &inner));
         // A wet realm with no tile yet waits, and its fine rungs' field is not here yet (a reader stands on a coarser level
         // and reads again); over rung 12 the plain field answers.
         let bare = RealmId::Planet(79);
         assert_eq!(rx.accept(stated_head(bare, 0)), ArtifactIngest::Head);
         let bare_cache = rx.book().get(bare).cloned().expect("a cache");
-        assert!(ready(bare_cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).is_none());
+        assert!(
+            ready(bare_cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).is_none()
+        );
         assert!(bare_cache.field_at_rung(&lattice, 3).is_none());
         assert!(bare_cache.field_at_rung(&lattice, 13).is_some());
         // A dry realm's fine rung answers its plain field.
         assert!(dry_cache.field_at_rung(&lattice, 3).is_some());
         // A realm forgotten forgets its parts.
-        assert_eq!(rx.accept(part(0, 2, &record[..half])), ArtifactIngest::FinePart);
+        assert_eq!(
+            rx.accept(part(0, 2, &record[..half])),
+            ArtifactIngest::FinePart
+        );
         rx.forget(wet);
-        assert_eq!(rx.accept(part(1, 2, &record[half..])), ArtifactIngest::FinePart);
+        assert_eq!(
+            rx.accept(part(1, 2, &record[half..])),
+            ArtifactIngest::FinePart
+        );
     }
 
     fn head_of(artifact: &Artifact) -> BulkMsg {

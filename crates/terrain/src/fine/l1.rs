@@ -72,7 +72,11 @@ pub fn decode_class(class: u8, frac: u32) -> u64 {
 
 /// The cells of `rung` to a node, as a shift: `None` unless the rung's cells nest in the nodes by a power of two.
 #[must_use]
-pub fn cells_per_node_shift(body: &BodyDefinition, lattice: &MacroLattice, rung: u8) -> Option<u32> {
+pub fn cells_per_node_shift(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    rung: u8,
+) -> Option<u32> {
     let n_r = body.ladder().cells_per_edge(rung);
     (0..20u32).find(|&s| lattice.edge << s == n_r)
 }
@@ -104,7 +108,8 @@ pub struct Domain {
 }
 
 fn metres_over_sea(z: vd_recipe::Gi, sea_m: i16) -> Gf {
-    Gf::from_i64(z.raw()) / Gf::from_i64(STEPS_PER_M << LENGTH_BITS) - Gf::from_i32(i32::from(sea_m))
+    Gf::from_i64(z.raw()) / Gf::from_i64(STEPS_PER_M << LENGTH_BITS)
+        - Gf::from_i32(i32::from(sea_m))
 }
 
 fn chord2_m(a: &Dir, b: &Dir, r_m: Gf) -> Gf {
@@ -116,14 +121,23 @@ fn chord2_m(a: &Dir, b: &Dir, r_m: Gf) -> Gf {
 /// ★ THE DOMAIN of `key` at `rung` (see the module's head). `None` where the rung's cells do not nest in the nodes by
 /// a power of two, the level refuses, or the domain holds too few points.
 #[must_use]
-pub fn domain(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifact, rung: u8, key: TileKey) -> Option<Domain> {
+pub fn domain(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    rung: u8,
+    key: TileKey,
+) -> Option<Domain> {
     let n_r = body.ladder().cells_per_edge(rung);
     let shift = cells_per_node_shift(body, lattice, rung)?;
     let level = Level::new(body.seed(), rung, n_r)?;
     let r_m = Gf::from_f64(body.radius_m());
     let node_m = Gf::from_f64(lattice.node_m());
     let edge = lattice.edge as i32;
-    let (ni0, nj0) = (key.tx * TILE_NODES - BUFFER_NODES, key.ty * TILE_NODES - BUFFER_NODES);
+    let (ni0, nj0) = (
+        key.tx * TILE_NODES - BUFFER_NODES,
+        key.ty * TILE_NODES - BUFFER_NODES,
+    );
     let side = TILE_NODES + 2 * BUFFER_NODES;
     // The domain's nodes, in chart order.
     let mut nodes = Vec::new();
@@ -140,10 +154,18 @@ pub fn domain(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifact
         }
     }
     let sea = artifact.sea_m;
-    let z_of = |node: u32| Gf::from_i32(i32::from(artifact.rows[node as usize].z_m) - i32::from(sea));
+    let z_of =
+        |node: u32| Gf::from_i32(i32::from(artifact.rows[node as usize].z_m) - i32::from(sea));
     let node_z: Vec<Gf> = nodes.iter().map(|&n| z_of(n)).collect();
     let held: Vec<bool> = node_z.iter().map(|&z| z > Gf::ZERO).collect();
-    let pts = domain_points(&level, key.face, ni0 << shift, nj0 << shift, side << shift, side << shift);
+    let pts = domain_points(
+        &level,
+        key.face,
+        ni0 << shift,
+        nj0 << shift,
+        side << shift,
+        side << shift,
+    );
     let dirs: Vec<Dir> = pts.iter().map(|p| p.dir).collect();
     let cells: Vec<CellId> = pts.iter().map(|p| p.cell).collect();
     let graph = triangulate(&dirs)?;
@@ -155,7 +177,10 @@ pub fn domain(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifact
         let face = Face::from_index(c.face)?;
         let node = lattice.index(face, c.i >> shift, c.j >> shift);
         pnode.push(*local.get(&node)?);
-        base.push(metres_over_sea(sample_z(lattice, artifact, face, rung, c.i, c.j)?, sea));
+        base.push(metres_over_sea(
+            sample_z(lattice, artifact, face, rung, c.i, c.j)?,
+            sea,
+        ));
     }
     // The Gaussian weights over the nodes near each point.
     let two_s2 = Gf::from_f64(2.0 * READ_SIGMA * READ_SIGMA);
@@ -170,12 +195,19 @@ pub fn domain(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifact
             let mut near: Vec<u32> = Vec::with_capacity(49);
             for dj in -3..=3 {
                 for di in -3..=3 {
-                    near.push(node_at(lattice, face, i64::from(ni) + di, i64::from(nj) + dj));
+                    near.push(node_at(
+                        lattice,
+                        face,
+                        i64::from(ni) + di,
+                        i64::from(nj) + dj,
+                    ));
                 }
             }
             near.sort_unstable();
             near.dedup();
-            near.into_iter().map(|m| (m, lattice.direction(m))).collect()
+            near.into_iter()
+                .map(|m| (m, lattice.direction(m)))
+                .collect()
         })
         .collect();
     for (p, &pn) in pnode.iter().enumerate() {
@@ -203,9 +235,18 @@ pub fn domain(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifact
     for w in &mut wnode {
         *w = refs.binary_search(w).expect("a read node") as u32;
     }
-    let ref_u0: Vec<Gf> = refs.iter().map(|&m| Gf::from_f64(if z_of(m) > Gf::ZERO { U0_LAND } else { U0_SEA })).collect();
-    let node_ref: Vec<u32> = nodes.iter().map(|m| refs.binary_search(m).unwrap_or(usize::MAX) as u32).collect();
-    let rain_m = |node: u32| Gf::from_i64(decode_class(artifact.rows[node as usize].rain, 4) as i64) / Gf::from_i64(1_000);
+    let ref_u0: Vec<Gf> = refs
+        .iter()
+        .map(|&m| Gf::from_f64(if z_of(m) > Gf::ZERO { U0_LAND } else { U0_SEA }))
+        .collect();
+    let node_ref: Vec<u32> = nodes
+        .iter()
+        .map(|m| refs.binary_search(m).unwrap_or(usize::MAX) as u32)
+        .collect();
+    let rain_m = |node: u32| {
+        Gf::from_i64(decode_class(artifact.rows[node as usize].rain, 4) as i64)
+            / Gf::from_i64(1_000)
+    };
     let ref_rain: Vec<Gf> = refs.iter().map(|&m| rain_m(m)).collect();
     let mut water = Vec::with_capacity(n);
     for p in 0..n {
@@ -241,7 +282,11 @@ pub fn domain(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifact
     // — the recipe's normalise holds only there; the whole sum, two units long, was slow and wrong).
     let midpoint = |a: u32, b: u32| {
         let (da, db) = (lattice.direction(a), lattice.direction(b));
-        vd_recipe::bend::normalise([(da[0] + db[0]) >> 1, (da[1] + db[1]) >> 1, (da[2] + db[2]) >> 1])
+        vd_recipe::bend::normalise([
+            (da[0] + db[0]) >> 1,
+            (da[1] + db[1]) >> 1,
+            (da[2] + db[2]) >> 1,
+        ])
     };
     let mut outs = 0usize;
     for (li, &k) in nodes.iter().enumerate() {
@@ -273,7 +318,12 @@ pub fn domain(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifact
             let s = side << shift;
             (c.face == key.face.index()) & ((a == 0) | (b == 0) | (a == s - 1) | (b == s - 1))
         };
-        let low = (0..n).filter(|&p| rim(&cells[p])).min_by(|&a, &b| base[a].partial_cmp(&base[b]).expect("finite").then(a.cmp(&b)));
+        let low = (0..n).filter(|&p| rim(&cells[p])).min_by(|&a, &b| {
+            base[a]
+                .partial_cmp(&base[b])
+                .expect("finite")
+                .then(a.cmp(&b))
+        });
         if let Some(p) = low {
             outlet[p] = true;
         }
@@ -303,7 +353,11 @@ pub fn domain(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifact
 /// returns each round's passes.
 pub fn rounds(d: &Domain, u: &mut [Gf], h: &mut [Gf], rounds: usize) -> Vec<usize> {
     let n = h.len();
-    let (k_lp, inv_n, half_n) = (Gf::from_f64(JOINT_K_LP), Gf::from_f64(1.0 / JOINT_N), Gf::from_f64(0.5 * JOINT_N));
+    let (k_lp, inv_n, half_n) = (
+        Gf::from_f64(JOINT_K_LP),
+        Gf::from_f64(1.0 / JOINT_N),
+        Gf::from_f64(0.5 * JOINT_N),
+    );
     let tan = Gf::from_f64(TAN_REPOSE);
     let settle = Gf::from_f64(SETTLE_M);
     let tiny = Gf::from_f64(f64::MIN_POSITIVE);
@@ -314,7 +368,15 @@ pub fn rounds(d: &Domain, u: &mut [Gf], h: &mut [Gf], rounds: usize) -> Vec<usiz
             sum[k as usize] += hp * a;
             area[k as usize] += a;
         }
-        (0..nl).map(|k| if area[k] > Gf::ZERO { sum[k] / area[k] } else { Gf::ZERO }).collect()
+        (0..nl)
+            .map(|k| {
+                if area[k] > Gf::ZERO {
+                    sum[k] / area[k]
+                } else {
+                    Gf::ZERO
+                }
+            })
+            .collect()
     };
     let mut log = Vec::with_capacity(rounds);
     for _ in 0..rounds {
@@ -342,11 +404,16 @@ pub fn rounds(d: &Domain, u: &mut [Gf], h: &mut [Gf], rounds: usize) -> Vec<usiz
                     h[c] = d.base[c];
                     continue;
                 }
-                let s = (up[c] / (k_lp * q[c].greater(tiny))).powf_fine(inv_n).lesser(tan);
+                let s = (up[c] / (k_lp * q[c].greater(tiny)))
+                    .powf_fine(inv_n)
+                    .lesser(tan);
                 h[c] = h[r as usize] + s * t.link[c];
             }
             let now = means(h);
-            let moved = (0..nl).filter(|&k| d.held[k]).map(|k| (now[k] - last[k]).abs()).fold(Gf::ZERO, Gf::greater);
+            let moved = (0..nl)
+                .filter(|&k| d.held[k])
+                .map(|k| (now[k] - last[k]).abs())
+                .fold(Gf::ZERO, Gf::greater);
             last = now;
             if moved <= settle {
                 break;
@@ -376,7 +443,12 @@ pub struct L1Tile {
 
 /// ★ THE 128 m TILE `key`: the coarse start, the rounds, the raster. `None` where a domain cannot be built.
 #[must_use]
-pub fn solve_l1(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifact, key: TileKey) -> Option<L1Tile> {
+pub fn solve_l1(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    key: TileKey,
+) -> Option<L1Tile> {
     let coarse = domain(body, lattice, artifact, COARSE_RUNG, key)?;
     let mut uc = coarse.ref_u0.clone();
     let mut hc = coarse.base.clone();
@@ -407,7 +479,10 @@ pub fn solve_l1(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifa
     let n_r = body.ladder().cells_per_edge(L1_RUNG);
     let shift = cells_per_node_shift(body, lattice, L1_RUNG)?;
     let half = BUFFER_NODES >> 1;
-    let (i0, j0) = ((key.tx * TILE_NODES - half) << shift, (key.ty * TILE_NODES - half) << shift);
+    let (i0, j0) = (
+        (key.tx * TILE_NODES - half) << shift,
+        (key.ty * TILE_NODES - half) << shift,
+    );
     let side = ((TILE_NODES + 2 * half) << shift) as usize;
     let inv_n = vd_recipe::bend::inv_n_of(n_r);
     let mut quarters = Vec::with_capacity(side * side);
@@ -430,7 +505,12 @@ pub fn solve_l1(body: &BodyDefinition, lattice: &MacroLattice, artifact: &Artifa
             from = t;
         }
     }
-    Some(L1Tile { side, quarters, points: fine.dirs.len(), passes })
+    Some(L1Tile {
+        side,
+        quarters,
+        points: fine.dirs.len(),
+        passes,
+    })
 }
 
 #[cfg(test)]
@@ -444,11 +524,19 @@ mod tests {
     fn a_class_decodes_to_its_lower_bound_and_a_rung_nests_by_its_shift() {
         // 1 000 falls in the class of 992 … 1 022; the next class starts at 1 023; the first class is nought.
         let c = log2_class(1_000, 4);
-        assert_eq!([decode_class(c, 4), decode_class(c + 1, 4), decode_class(0, 4)], [991, 1_023, 0]);
+        assert_eq!(
+            [
+                decode_class(c, 4),
+                decode_class(c + 1, 4),
+                decode_class(0, 4)
+            ],
+            [991, 1_023, 0]
+        );
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
         assert_eq!(cells_per_node_shift(&body, &lattice, L1_RUNG), Some(6));
-        let one = MacroLattice::with_edge(&body, body.ladder().n).expect("a lattice of one-cell nodes");
+        let one =
+            MacroLattice::with_edge(&body, body.ladder().n).expect("a lattice of one-cell nodes");
         assert_eq!(cells_per_node_shift(&body, &one, L1_RUNG), None);
     }
 
@@ -459,13 +547,25 @@ mod tests {
     #[test]
     fn the_wet_moon_tile_with_the_most_land_solves_end_to_end() {
         let moon = home_moon();
-        let words = SolveWords { water_km3: 3_000_000, ..home_solve_words() };
+        let words = SolveWords {
+            water_km3: 3_000_000,
+            ..home_solve_words()
+        };
         let lattice = MacroLattice::of(&moon).expect("a lattice");
-        let (state, facies, _) = crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
-        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
+        let (state, facies, _) =
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
+        let climate =
+            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact = Artifact::of(&state, &facies, &climate, true);
         let edge = lattice.edge as i32;
-        let mut best = (0usize, TileKey { face: Face::PosX, tx: 0, ty: 0 });
+        let mut best = (
+            0usize,
+            TileKey {
+                face: Face::PosX,
+                tx: 0,
+                ty: 0,
+            },
+        );
         for f in 0..6u8 {
             let face = Face::from_index(f).expect("a face");
             for ty in 0..=(edge - 1) >> 3 {
@@ -473,7 +573,11 @@ mod tests {
                     let land = (0..64)
                         .map(|k| (tx * 8 + (k & 7), ty * 8 + (k >> 3)))
                         .filter(|&(i, j)| (i < edge) & (j < edge))
-                        .filter(|&(i, j)| artifact.z_m(lattice.index(face, i, j)).is_some_and(|z| z > artifact.sea_m))
+                        .filter(|&(i, j)| {
+                            artifact
+                                .z_m(lattice.index(face, i, j))
+                                .is_some_and(|z| z > artifact.sea_m)
+                        })
                         .count();
                     if land > best.0 {
                         best = (land, TileKey { face, tx, ty });
@@ -484,20 +588,39 @@ mod tests {
         let tile = solve_l1(&moon, &lattice, &artifact, best.1).expect("the tile solves");
         assert_eq!((tile.side, tile.quarters.len()), (640, 640 * 640));
         assert_eq!(tile.passes.len(), COARSE_ROUNDS + ROUNDS);
-        assert_eq!(tile.passes.iter().filter(|&&p| (p == 0) | (p > MAX_PASSES)).count(), 0, "{:?}", tile.passes);
+        assert_eq!(
+            tile.passes
+                .iter()
+                .filter(|&&p| (p == 0) | (p > MAX_PASSES))
+                .count(),
+            0,
+            "{:?}",
+            tile.passes
+        );
         // Every raster cell a face holds has a height; only the cube corner's diagonal region has none.
         let shift = cells_per_node_shift(&moon, &lattice, L1_RUNG).expect("nests") as i32;
         let n7 = edge << shift;
-        let (i0, j0) = ((best.1.tx * TILE_NODES - 1) << shift, (best.1.ty * TILE_NODES - 1) << shift);
+        let (i0, j0) = (
+            (best.1.tx * TILE_NODES - 1) << shift,
+            (best.1.ty * TILE_NODES - 1) << shift,
+        );
         let unheld = (0..640)
             .flat_map(|b| (0..640).map(move |a| (a, b)))
             .filter(|&(a, b)| {
-                chart_cell(best.1.face, i0 + a, j0 + b, n7).is_some() & (tile.quarters[(b * 640 + a) as usize] == i32::MIN)
+                chart_cell(best.1.face, i0 + a, j0 + b, n7).is_some()
+                    & (tile.quarters[(b * 640 + a) as usize] == i32::MIN)
             })
             .count();
         assert_eq!(unheld, 0);
         // MEASURED on the bench (release, 2026-10-11): the rule picks (NegX, 7, 0), all 64 nodes land, 563 134 points,
         // 3.4 s, the heights −0.8 … 80.8 m over the sea.
-        assert_eq!(best.1, TileKey { face: Face::NegX, tx: 7, ty: 0 });
+        assert_eq!(
+            best.1,
+            TileKey {
+                face: Face::NegX,
+                tx: 7,
+                ty: 0
+            }
+        );
     }
 }

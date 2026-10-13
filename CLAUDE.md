@@ -441,6 +441,11 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     ground's rungs by their curve's step; the level edges at 20 km/s are the LOADING LIMIT, cured by B86 item 4's
     send-ahead); THE RECONSTRUCTION AT 0.67 IS THE WINDOW'S DEFAULT (amends B24; 16.8 ms against 32 ms; `VD_TEMPORAL=0`
     for a run; the capture keeps its reference defaults); THE FREEZES OPEN (~2 a second 50–150 ms, outside the terrain).
+    ★ B91 (2026-10-12, the freezes' cause MEASURED — two far planets' first solves restart at every login and never land,
+    taking the cores; A/B 247 → 2 late frames): THE SOLVE THREADS BELOW THE TICK AND THE WINDOW (macOS "utility", Linux
+    nice 10; `libc` approved for the shard program; the generator's helpers take the host's start step); A STARTED FIRST
+    SOLVE LANDS — SL7 AMENDED (a realm stays alive while its first solve has not landed; it does not report itself empty;
+    a failed solve ends the reason); WHEN a solve starts stays the advance calculation's (B86 item 6, must not be hurt).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION
@@ -735,8 +740,9 @@ Each of these was stated by the owner after a live defect. They are not preferen
 12. **SL7 — AN OCCUPIED REALM IS ITS OWN OCCUPANTS' PROXY, AT ITS PARENT'S SCALE.** How area-of-
     interest works at any nesting depth without a pose ever crossing, and without anything central:
     - LIVENESS, decided by the realm itself, looking only at itself and ONE level down: *do I hold
-      occupants? do I have a live direct child?* Either ⇒ stay active. Neither ⇒ shut down after
-      the cooldown. A realm never reaches upward and has zero control over its parent.
+      occupants? do I have a live direct child? do I hold a first solve that has not landed (B91,
+      2026-10-12)?* Any ⇒ stay active. None ⇒ shut down after the cooldown. A realm never reaches
+      upward and has zero control over its parent.
     - AREA OF INTEREST, decided by the PARENT, never by the realm about itself: for each of MY
       direct children, is it within the interest of an occupant I hold, or of an OCCUPIED CHILD
       treated at the placement I authored for it? Yes ⇒ demand it stays alive.

@@ -251,8 +251,13 @@ pub fn encode_fine_part(part: &FinePart) -> Vec<u8> {
 /// # Errors
 /// The bytes are not a fine part this build can read.
 pub fn decode_fine_part(bytes: &[u8]) -> Result<FinePart, String> {
-    let r = TlvReader::parse(FINE_PART_SCHEMA, bytes).map_err(|e| format!("a stored fine part does not decode: {e}"))?;
-    Ok(FinePart { part: field(&r, fine::PART, "part")?, parts: field(&r, fine::PARTS, "parts")?, bytes: field(&r, fine::BYTES, "bytes")? })
+    let r = TlvReader::parse(FINE_PART_SCHEMA, bytes)
+        .map_err(|e| format!("a stored fine part does not decode: {e}"))?;
+    Ok(FinePart {
+        part: field(&r, fine::PART, "part")?,
+        parts: field(&r, fine::PARTS, "parts")?,
+        bytes: field(&r, fine::BYTES, "bytes")?,
+    })
 }
 
 /// ★ ONE FINE TILE's record read back whole from its part rows: `Ok(None)` with no row (never stored), the record's
@@ -260,7 +265,10 @@ pub fn decode_fine_part(bytes: &[u8]) -> Result<FinePart, String> {
 ///
 /// # Errors
 /// A part row does not decode, or the parts do not run `0 .. parts` with one count.
-pub fn read_fine_record(store: &dyn crate::io::Store, at: &FineAt) -> Result<Option<Vec<u8>>, String> {
+pub fn read_fine_record(
+    store: &dyn crate::io::Store,
+    at: &FineAt,
+) -> Result<Option<Vec<u8>>, String> {
     let rows = store.scan(&fine_tile_prefix(at));
     if rows.is_empty() {
         return Ok(None);
@@ -269,7 +277,12 @@ pub fn read_fine_record(store: &dyn crate::io::Store, at: &FineAt) -> Result<Opt
     for (k, (_, bytes)) in rows.iter().enumerate() {
         let part = decode_fine_part(bytes)?;
         if (part.part != k as u32) | (part.parts != rows.len() as u32) {
-            return Err(format!("a stored fine tile's part {} of {} stands at {k} of {}", part.part, part.parts, rows.len()));
+            return Err(format!(
+                "a stored fine tile's part {} of {} stands at {k} of {}",
+                part.part,
+                part.parts,
+                rows.len()
+            ));
         }
         out.extend_from_slice(&part.bytes);
     }
@@ -283,11 +296,19 @@ pub fn write_fine_record(store: &mut dyn crate::io::Store, at: &FineAt, record: 
     for part in 0..parts {
         let start = (part as usize * FINE_PART_BYTES).min(record.len());
         let end = (start + FINE_PART_BYTES).min(record.len());
-        let row = FinePart { part, parts, bytes: record[start..end].to_vec() };
+        let row = FinePart {
+            part,
+            parts,
+            bytes: record[start..end].to_vec(),
+        };
         store.put(&fine_part_key(at, part), &encode_fine_part(&row).into());
     }
     for (key, _) in store.scan(&fine_tile_prefix(at)) {
-        let index = key.len().checked_sub(4).and_then(|i| key.get(i..)).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+        let index = key
+            .len()
+            .checked_sub(4)
+            .and_then(|i| key.get(i..))
+            .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
         if index >= parts {
             store.delete(&key);
         }
@@ -1075,15 +1096,30 @@ mod tests {
     /// tile, and two input words, never share a row; a part out of place or one that does not decode is refused by name.
     #[test]
     fn a_fine_record_is_kept_in_parts_and_read_back_whole() {
-        use super::{FINE_PART_BYTES, FINE_PART_SCHEMA, FineAt, FineForm, FinePart, decode_fine_part, encode_fine_part};
+        use super::{
+            FINE_PART_BYTES, FINE_PART_SCHEMA, FineAt, FineForm, FinePart, decode_fine_part,
+            encode_fine_part,
+        };
         use super::{fine_part_key, fine_tile_prefix, read_fine_record, write_fine_record};
         use crate::io::Store;
         let mut store = crate::io::mem::MemStore::default();
-        let at = FineAt { form: FineForm::Finished, input: 0xF1E, level: 1, face: 3, tx: 23, ty: 69 };
-        let raw = FineAt { form: FineForm::Raw, ..at };
+        let at = FineAt {
+            form: FineForm::Finished,
+            input: 0xF1E,
+            level: 1,
+            face: 3,
+            tx: 23,
+            ty: 69,
+        };
+        let raw = FineAt {
+            form: FineForm::Raw,
+            ..at
+        };
         let other = FineAt { input: 0xF1F, ..at };
         assert_eq!(read_fine_record(&store, &at), Ok(None));
-        let record: Vec<u8> = (0..2 * FINE_PART_BYTES + 100).map(|k| (k % 251) as u8).collect();
+        let record: Vec<u8> = (0..2 * FINE_PART_BYTES + 100)
+            .map(|k| (k % 251) as u8)
+            .collect();
         assert_eq!(write_fine_record(&mut store, &at, &record), 3);
         store.commit();
         assert_eq!(read_fine_record(&store, &at), Ok(Some(record)));
@@ -1100,7 +1136,11 @@ mod tests {
         store.commit();
         assert_eq!(read_fine_record(&store, &raw), Ok(Some(Vec::new())));
         // A part that states another place, or one that does not decode, refuses the record.
-        let stray = FinePart { part: 1, parts: 1, bytes: vec![1] };
+        let stray = FinePart {
+            part: 1,
+            parts: 1,
+            bytes: vec![1],
+        };
         store.put(&fine_part_key(&other, 0), &encode_fine_part(&stray).into());
         store.commit();
         assert!(read_fine_record(&store, &other).is_err());

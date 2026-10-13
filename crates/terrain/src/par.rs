@@ -14,7 +14,40 @@
     reason = "the ranges are cut on the CPU, never in a kernel; integer-exact on every host"
 )]
 
+use std::cell::Cell;
 use std::ops::Range;
+
+thread_local! {
+    /// The start step this thread hands to the helper threads its steps start ([`adopt_start_step`]). `None` on every
+    /// thread no host gave one — the client's, a test's, a tick's.
+    static START_STEP: Cell<Option<fn()>> = const { Cell::new(None) };
+}
+
+/// ★ THE HOST'S START STEP FOR A SOLVE'S THREADS (ruling B91, 2026-10-12): runs `step` on this thread now, and on every
+/// helper thread this thread's steps start, and on theirs. The generator calls no system itself (its rule: the recipe,
+/// the seed leaf, nothing else), so the HOST hands it the step — the shard's lowers a thread below the tick and the
+/// window. A host must hand it down: on macOS a thread's class is NOT inherited (MEASURED 2026-10-12: a child of a
+/// "utility" thread starts at "default"). The bytes are the same whatever the step does to a thread's class.
+///
+/// **Example.** The planet's shard starts the desert world's first solve on its solve thread and adopts the step that
+/// lowers a thread; each of the climate's seven helper threads runs it before its first node, so a frame of the window
+/// or a tick of the shard gets a core before any of them.
+pub fn adopt_start_step(step: fn()) {
+    step();
+    START_STEP.with(|s| s.set(Some(step)));
+}
+
+/// The start step this thread carries, read before a step starts its helpers.
+fn inherited_step() -> Option<fn()> {
+    START_STEP.with(Cell::get)
+}
+
+/// A helper thread's first act: adopt the step its parent carried, if it carried one.
+fn begin_helper(step: Option<fn()>) {
+    if let Some(step) = step {
+        adopt_start_step(step);
+    }
+}
 
 /// ★ HOW MANY THREADS A STEP OF THE SOLVE MAY USE — an operational word, never part of the world: two states that differ
 /// only in their cores are the same state (their equality ignores this word), because the same bytes come out on any
@@ -64,9 +97,13 @@ pub fn per_range<T: Send>(
     let parts = ranges(n, threads);
     let mut slots: Vec<Option<T>> = parts.iter().map(|_| None).collect();
     let f = &f;
+    let step = inherited_step();
     std::thread::scope(|s| {
         for (r, slot) in parts.into_iter().zip(slots.iter_mut()) {
-            s.spawn(move || *slot = Some(f(r)));
+            s.spawn(move || {
+                begin_helper(step);
+                *slot = Some(f(r));
+            });
         }
     });
     slots.into_iter().flatten().collect()
@@ -98,12 +135,16 @@ pub fn join<T>(parts: Vec<Vec<T>>) -> Vec<T> {
 #[must_use]
 pub fn sort_keys(mut keys: Vec<u128>, threads: usize) -> Vec<u128> {
     let parts = ranges(keys.len(), threads);
+    let step = inherited_step();
     std::thread::scope(|s| {
         let mut rest: &mut [u128] = &mut keys;
         for r in &parts {
             let (run, tail) = rest.split_at_mut(r.len());
             rest = tail;
-            s.spawn(move || run.sort_unstable());
+            s.spawn(move || {
+                begin_helper(step);
+                run.sort_unstable();
+            });
         }
     });
     let runs: Vec<&[u128]> = parts.iter().map(|r| &keys[r.clone()]).collect();
@@ -137,7 +178,10 @@ pub fn sort_keys(mut keys: Vec<u128>, threads: usize) -> Vec<u128> {
                 .collect();
             let (part, tail) = rest.split_at_mut(pieces.iter().map(|p| p.len()).sum());
             rest = tail;
-            s.spawn(move || merge_into(&pieces, part));
+            s.spawn(move || {
+                begin_helper(step);
+                merge_into(&pieces, part);
+            });
         }
     });
     out
@@ -217,6 +261,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// How many times the counting step ran — on the one test thread that adopts it and its helpers only.
+    static STEPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn count_step() {
+        STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn steps() -> usize {
+        STEPS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// ★ THE HOST'S START STEP (ruling B91) runs on the thread that adopts it and on every helper its steps start — the
+    /// map's, the sort's runs and merges, a helper's own helpers — and on no thread that never adopted it.
+    #[test]
+    fn every_helper_runs_the_hosts_start_step() {
+        std::thread::spawn(|| {
+            assert_eq!(map(8, 3, |i| i).len(), 8);
+            assert_eq!(steps(), 0, "a thread with no step starts plain helpers");
+            adopt_start_step(count_step);
+            assert_eq!(steps(), 1, "the adopting thread runs it at once");
+            assert_eq!(map(9, 3, |i| i), (0..9).collect::<Vec<_>>());
+            assert_eq!(steps(), 4, "each of the map's three helpers");
+            let keys: Vec<u128> = (0..10u128).rev().collect();
+            assert_eq!(sort_keys(keys, 2), (0..10u128).collect::<Vec<_>>());
+            assert_eq!(steps(), 8, "the sort's two runs and its two merges");
+            assert_eq!(per_range(2, 2, |_| map(4, 2, |i| i).len()), vec![4, 4]);
+            assert_eq!(steps(), 14, "two helpers, and each one's own two");
+        })
+        .join()
+        .expect("the test's own thread");
     }
 
     /// A panic in a solve thread is the caller's panic.

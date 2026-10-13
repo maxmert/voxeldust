@@ -539,4 +539,3 @@ pub(crate) fn relay_bulk(
         stats.artifact_parts_relayed += 1;
     }
 }
-

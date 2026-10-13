@@ -13503,12 +13503,28 @@ fn a_named_bulk_is_relayed_or_held_and_never_recorded() {
         (SessionId(2), tile(vec![2])),
         (SessionId(1), vec![1, 2, 3]),
     ] {
-        relay_bulk(NodeId(7), Fence(1), &[sid], bytes, &mut sessions, &mut stats, &mut outbox);
+        relay_bulk(
+            NodeId(7),
+            Fence(1),
+            &[sid],
+            bytes,
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
     }
     assert_eq!(stats.artifact_parts_relayed, 2);
     assert_eq!(stats.bulk_for_held, 1);
-    assert_eq!(sessions.by_session[&SessionId(2)].held_bulk, vec![tile(vec![2])]);
-    assert!(sessions.by_session[&SessionId(1)].artifact_redrive.repass.is_empty());
+    assert_eq!(
+        sessions.by_session[&SessionId(2)].held_bulk,
+        vec![tile(vec![2])]
+    );
+    assert!(
+        sessions.by_session[&SessionId(1)]
+            .artifact_redrive
+            .repass
+            .is_empty()
+    );
 }
 
 /// ★ AN OWED PASS FOLLOWS THE PICTURES: an owed pass of a realm no picture names is forgotten, the
@@ -13566,9 +13582,19 @@ fn every_new_transfer_forgets_an_owed_pass() {
             .expect("the session")
             .artifact_redrive
             .repass = BTreeSet::from([r0]);
-        super::artifact::cache_artifact_part(from, r0, head(digest), TickId(1), &mut sessions, &mut stats);
+        super::artifact::cache_artifact_part(
+            from,
+            r0,
+            head(digest),
+            TickId(1),
+            &mut sessions,
+            &mut stats,
+        );
         assert!(
-            sessions.by_session[&SessionId(1)].artifact_redrive.repass.is_empty(),
+            sessions.by_session[&SessionId(1)]
+                .artifact_redrive
+                .repass
+                .is_empty(),
             "{from:?} {digest:?}: a new transfer starts from the head"
         );
     }
@@ -14000,10 +14026,17 @@ fn the_view_of_every_drawn_realm_comes_from_one_formula() {
         (home, [f64::NAN, 0.0, 0.0]),
     ] {
         session.eye.at = Some(at);
-        assert_eq!(super::artifact::session_view(&session, home), None, "{at:?}");
+        assert_eq!(
+            super::artifact::session_view(&session, home),
+            None,
+            "{at:?}"
+        );
     }
     // A realm the picture does not hold: no view.
-    assert_eq!(super::artifact::session_view(&session, RealmId::Planet(9)), None);
+    assert_eq!(
+        super::artifact::session_view(&session, RealmId::Planet(9)),
+        None
+    );
 }
 
 /// ★ THE AVATAR IN A FRAME'S BODY (ruling B88): read off the body once, in its realm's frame; a body without the avatar,
@@ -14026,14 +14059,21 @@ fn the_avatar_is_read_off_a_frames_body_decoded_once() {
         entity: EntityId(entity),
         pose: StampedPose {
             pos,
-            ..StampedPose::at_rest(FrameRef::PlanetCentered { planet_seed: 7 }, DVec3::ZERO, UniverseTick(50))
+            ..StampedPose::at_rest(
+                FrameRef::PlanetCentered { planet_seed: 7 },
+                DVec3::ZERO,
+                UniverseTick(50),
+            )
         },
     };
     let tier = FrameRef::PlanetCentered { planet_seed: 7 }.tier();
     let bytes = body(vec![
         at(76, LatticePos::from_metres(DVec3::new(9.0, 9.0, 9.0), tier)),
         at(77, LatticePos::from_metres(DVec3::new(1.0, 2.0, 3.0), tier)),
-        at(78, LatticePos::at(vd_core::glam::I64Vec3::ZERO, DVec3::splat(f64::NAN))),
+        at(
+            78,
+            LatticePos::at(vd_core::glam::I64Vec3::ZERO, DVec3::splat(f64::NAN)),
+        ),
     ]);
     let mut decoded = None;
     let read = super::artifact::avatar_at(&mut decoded, &bytes, EntityId(77)).expect("the avatar");
@@ -14042,10 +14082,21 @@ fn the_avatar_is_read_off_a_frames_body_decoded_once() {
         assert!((got - want).abs() < 1.0e-6, "{read:?}");
     }
     assert!(decoded.is_some());
-    assert_eq!(super::artifact::avatar_at(&mut decoded, &bytes, EntityId(79)), None, "not in the body");
-    assert_eq!(super::artifact::avatar_at(&mut decoded, &bytes, EntityId(78)), None, "not a number");
+    assert_eq!(
+        super::artifact::avatar_at(&mut decoded, &bytes, EntityId(79)),
+        None,
+        "not in the body"
+    );
+    assert_eq!(
+        super::artifact::avatar_at(&mut decoded, &bytes, EntityId(78)),
+        None,
+        "not a number"
+    );
     let mut failed = None;
-    assert_eq!(super::artifact::avatar_at(&mut failed, &[0xFF; 3], EntityId(77)), None);
+    assert_eq!(
+        super::artifact::avatar_at(&mut failed, &[0xFF; 3], EntityId(77)),
+        None
+    );
     assert_eq!(failed, Some(None), "decoded once, kept as a failure");
 }
 
@@ -14060,22 +14111,45 @@ fn the_eye_is_read_off_an_accepted_frame_once_wanted() {
     let frame = postcard::to_allocvec(&frame_msg(Fence(1), 9)).expect("encode");
     let eye = |s: &GatewaySessions| s.by_session[&sid].eye;
     // Nothing wanted: nothing read.
-    sessions.by_session.get_mut(&sid).expect("the session").eye.entity = Some(EntityId(77));
+    sessions
+        .by_session
+        .get_mut(&sid)
+        .expect("the session")
+        .eye
+        .entity = Some(EntityId(77));
     on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
     assert_eq!(eye(&sessions).at, None);
     // Wanted, but a fence-stale frame: nothing read.
-    sessions.by_session.get_mut(&sid).expect("the session").eye.wanted = true;
+    sessions
+        .by_session
+        .get_mut(&sid)
+        .expect("the session")
+        .eye
+        .wanted = true;
     let stale = postcard::to_allocvec(&frame_msg(Fence(0), 10)).expect("encode");
     on_shard_frame(SHARD, &stale, &mut sessions, &mut stats, &mut outbox);
     assert_eq!((eye(&sessions).at, eye(&sessions).wanted), (None, true));
     // Wanted, the avatar not in the body: the want stays.
-    sessions.by_session.get_mut(&sid).expect("the session").eye.entity = Some(EntityId(78));
+    sessions
+        .by_session
+        .get_mut(&sid)
+        .expect("the session")
+        .eye
+        .entity = Some(EntityId(78));
     on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
     assert_eq!((eye(&sessions).at, eye(&sessions).wanted), (None, true));
     // Wanted and held: read, and the want cleared.
-    sessions.by_session.get_mut(&sid).expect("the session").eye.entity = Some(EntityId(77));
+    sessions
+        .by_session
+        .get_mut(&sid)
+        .expect("the session")
+        .eye
+        .entity = Some(EntityId(77));
     on_shard_frame(SHARD, &frame, &mut sessions, &mut stats, &mut outbox);
-    assert_eq!((eye(&sessions).at, eye(&sessions).wanted), (Some((RealmId::System(7), [0.0, 0.0, 0.0])), false));
+    assert_eq!(
+        (eye(&sessions).at, eye(&sessions).wanted),
+        (Some((RealmId::System(7), [0.0, 0.0, 0.0])), false)
+    );
 }
 
 /// ★ THE AVATAR IS NAMED FOR THE EYE AT THE ATTACH AND AGAIN AT A CROSSING (ruling B88), and its position is wanted.
@@ -14092,5 +14166,8 @@ fn the_avatar_is_named_for_the_eye_at_the_attach_and_at_a_crossing() {
         session.eye.wanted = false;
     }
     let _ = rig.tick(vec![subscription_ready(DEST, sid)]);
-    assert_eq!((eye(&rig).entity, eye(&rig).wanted), (Some(EntityId(77)), true));
+    assert_eq!(
+        (eye(&rig).entity, eye(&rig).wanted),
+        (Some(EntityId(77)), true)
+    );
 }

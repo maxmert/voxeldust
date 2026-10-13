@@ -158,7 +158,10 @@ impl FineBook {
         let hi = lo + levels.len() as u32;
         let sized = (lo < top)
             && (hi <= top)
-            && levels.iter().zip(lo..).all(|(l, k)| l.len() == (self.side() >> k) * (self.side() >> k));
+            && levels
+                .iter()
+                .zip(lo..)
+                .all(|(l, k)| l.len() == (self.side() >> k) * (self.side() >> k));
         let held = self.tiles.get(&key);
         // The levels must reach the coarsest, or the finest level the book holds of the tile.
         let joins = held.map_or(hi == top, |h| hi >= h.lo);
@@ -175,7 +178,8 @@ impl FineBook {
             }
             None => levels,
         };
-        self.tiles.insert(key, Arc::new(HeldLevels { lo, levels: merged }));
+        self.tiles
+            .insert(key, Arc::new(HeldLevels { lo, levels: merged }));
         true
     }
 
@@ -210,7 +214,10 @@ impl FineBook {
         for row in 0..4i64 {
             for col in 0..4i64 {
                 match self.sample(face, k, x + col - 1, y + row - 1) {
-                    Ok(q) => words[(row * 4 + col) as usize] = Gi::new(i64::from(q) * QUARTER_STEPS) << LENGTH_BITS,
+                    Ok(q) => {
+                        words[(row * 4 + col) as usize] =
+                            Gi::new(i64::from(q) * QUARTER_STEPS) << LENGTH_BITS
+                    }
                     Err(key) => return FineZ::Missing(key),
                 }
             }
@@ -232,14 +239,24 @@ impl FineBook {
     /// sample off the face by the chart's one crossing rule, a cube corner's diagonal region the face's nearest cell.
     fn locate(&self, face: Face, k: u32, x: i64, y: i64) -> (TileKey, usize) {
         let n = self.n7 >> k;
-        let (x, y) = (x.clamp(-i64::from(n), 2 * i64::from(n)) as i32, y.clamp(-i64::from(n), 2 * i64::from(n)) as i32);
+        let (x, y) = (
+            x.clamp(-i64::from(n), 2 * i64::from(n)) as i32,
+            y.clamp(-i64::from(n), 2 * i64::from(n)) as i32,
+        );
         let (f, ci, cj) = match chart_cell(face, x, y, n) {
             Some(c) => (Face::from_index(c.face).unwrap_or(face), c.i, c.j),
             None => (face, x.clamp(0, n - 1), y.clamp(0, n - 1)),
         };
         let s = self.ts - k;
         let mask = (1i32 << s) - 1;
-        (TileKey { face: f, tx: ci >> s, ty: cj >> s }, (((cj & mask) << s) | (ci & mask)) as usize)
+        (
+            TileKey {
+                face: f,
+                tx: ci >> s,
+                ty: cj >> s,
+            },
+            (((cj & mask) << s) | (ci & mask)) as usize,
+        )
     }
 
     /// ★ THE TILES A CHUNK READS: every finished tile the stencils of the chunk `(face, rung, x, y)`'s columns can read —
@@ -262,7 +279,11 @@ impl FineBook {
         // On the face: the tiles over the rectangle clipped to it.
         for ty in (y0.max(0) >> s)..=(y1.min(n - 1) >> s) {
             for tx in (x0.max(0) >> s)..=(x1.min(n - 1) >> s) {
-                keys.insert(TileKey { face, tx: tx as i32, ty: ty as i32 });
+                keys.insert(TileKey {
+                    face,
+                    tx: tx as i32,
+                    ty: ty as i32,
+                });
             }
         }
         // Past the face's edges: each sample by the chart's crossing rule — walked only for a chunk whose samples reach
@@ -283,7 +304,8 @@ impl FineBook {
     #[must_use]
     pub fn holds_all(&self, keys: &[TileKey], rung: u8) -> bool {
         let k = u32::from(rung.saturating_sub(L1_RUNG));
-        keys.iter().all(|key| self.tiles.get(key).is_some_and(|h| h.lo <= k))
+        keys.iter()
+            .all(|key| self.tiles.get(key).is_some_and(|h| h.lo <= k))
     }
 }
 
@@ -327,7 +349,10 @@ pub fn sample_and_fraction(k: u32, cell_rung: u8, i: i32) -> (i64, Gi) {
     let bits = u32::from(L1_RUNG) + 1 + k;
     let centre = (i64::from(i) << (u32::from(cell_rung) + 1)) + (1i64 << cell_rung);
     let rel = centre - (1i64 << (bits - 1));
-    (rel >> bits, Gi::new((rel & ((1i64 << bits) - 1)) << (NOISE_BITS - bits)))
+    (
+        rel >> bits,
+        Gi::new((rel & ((1i64 << bits) - 1)) << (NOISE_BITS - bits)),
+    )
 }
 
 /// A field that answers ONE fine read everywhere over a level macro field: the column's and the float read's tests
@@ -393,7 +418,10 @@ mod tests {
         assert_eq!(FineBook::new(&body, &small, 0), None);
         // The home planet's own lattice: 512-cell tiles.
         let lattice = MacroLattice::of(&body).expect("a lattice");
-        assert_eq!(FineBook::new(&body, &lattice, 0).expect("a book").side(), 512);
+        assert_eq!(
+            FineBook::new(&body, &lattice, 0).expect("a book").side(),
+            512
+        );
     }
 
     /// The levels of tile `(tx, ty)` of face 0 over a global plane: the raster `4·(X + 2Y)` quarters at rung-7 cell
@@ -405,7 +433,11 @@ mod tests {
                 (0..s * s)
                     .map(|c| {
                         let (x, y) = (tx * s + (c & (s - 1)), ty * s + (c >> (9 - k)));
-                        if k == 0 { 4 * (x + 2 * y) } else { 1_000 * k as i32 + 3 * x + 5 * y }
+                        if k == 0 {
+                            4 * (x + 2 * y)
+                        } else {
+                            1_000 * k as i32 + 3 * x + 5 * y
+                        }
                     })
                     .collect()
             })
@@ -413,7 +445,8 @@ mod tests {
     }
 
     #[test]
-    fn a_held_tile_reads_its_samples_its_means_and_the_curve_between_and_names_a_missing_neighbour() {
+    fn a_held_tile_reads_its_samples_its_means_and_the_curve_between_and_names_a_missing_neighbour()
+    {
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
         let sea_m = -100i16;
@@ -427,18 +460,32 @@ mod tests {
         let sea = Gi::new(i64::from(sea_m) * STEPS_PER_M) << LENGTH_BITS;
         // A rung-7 column on tile (3, 4) reads its own sample.
         let (i, j) = (3 * 512 + 10, 4 * 512 + 20);
-        assert_eq!(book.z(face, 7, 7, i, j), FineZ::Held(gap(i64::from(4 * (i + 2 * j))) + sea));
+        assert_eq!(
+            book.z(face, 7, 7, i, j),
+            FineZ::Held(gap(i64::from(4 * (i + 2 * j))) + sea)
+        );
         // A rung-12 column reads level 5's mean at its own cell.
         let (i, j) = (3 * 16 + 2, 4 * 16 + 5);
-        assert_eq!(book.z(face, 12, 12, i, j), FineZ::Held(gap(i64::from(5_000 + 3 * i + 5 * j)) + sea));
+        assert_eq!(
+            book.z(face, 12, 12, i, j),
+            FineZ::Held(gap(i64::from(5_000 + 3 * i + 5 * j)) + sea)
+        );
         // A rung-3 column reads the curve between the raster's samples: a plane, within a millimetre.
         let (i, j) = (24_576 + 1_003, 32_768 + 2_007);
         let (x256, y256) = (i64::from(i) * 16 + 8 - 128, i64::from(j) * 16 + 8 - 128);
         let want = Gi::new((x256 + 2 * y256) << 27) + sea;
-        let FineZ::Held(got) = book.z(face, 3, 3, i, j) else { panic!("held") };
-        assert!((got - want).raw().abs() < 1 << 25, "{got:?} against {want:?}");
+        let FineZ::Held(got) = book.z(face, 3, 3, i, j) else {
+            panic!("held")
+        };
+        assert!(
+            (got - want).raw().abs() < 1 << 25,
+            "{got:?} against {want:?}"
+        );
         // A column at tile (4, 4)'s east edge needs tile (5, 4), which the book does not hold.
-        assert_eq!(book.z(face, 7, 7, 5 * 512 - 1, 4 * 512 + 100), FineZ::Missing(TileKey { face, tx: 5, ty: 4 }));
+        assert_eq!(
+            book.z(face, 7, 7, 5 * 512 - 1, 4 * 512 + 100),
+            FineZ::Missing(TileKey { face, tx: 5, ty: 4 })
+        );
         // Rung 13 reads the node's row: no fine level serves it.
         assert_eq!(book.z(face, 13, 13, 0, 0), FineZ::Outside);
     }
@@ -448,7 +495,11 @@ mod tests {
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
         let mut book = FineBook::new(&body, &lattice, 0).expect("a book");
-        let key = TileKey { face: Face::from_index(1).expect("a face"), tx: 0, ty: 0 };
+        let key = TileKey {
+            face: Face::from_index(1).expect("a face"),
+            tx: 0,
+            ty: 0,
+        };
         let mut short = plane(0, 0);
         short.pop();
         assert!(!book.insert(key, short));
@@ -464,12 +515,18 @@ mod tests {
     fn a_book_from_the_head_numbers_is_the_body_book_and_refuses_a_side_too_small() {
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
-        assert_eq!(FineBook::with_side(lattice.edge, 9, -100), FineBook::new(&body, &lattice, -100));
+        assert_eq!(
+            FineBook::with_side(lattice.edge, 9, -100),
+            FineBook::new(&body, &lattice, -100)
+        );
         // Smaller than its eight nodes, or too small for five mean levels.
         assert_eq!(FineBook::with_side(lattice.edge, 2, 0), None);
         assert_eq!(FineBook::with_side(lattice.edge, 4, 0), None);
         // The level applies where the solve's water exists.
-        assert_eq!([applies(DRY_M), applies(0), applies(-3_000)], [false, true, true]);
+        assert_eq!(
+            [applies(DRY_M), applies(0), applies(-3_000)],
+            [false, true, true]
+        );
     }
 
     #[test]
@@ -481,11 +538,29 @@ mod tests {
         // A rung-12 chunk reads level 5 (16 samples a tile): samples 121 … 189 by 183 … 251, tiles 7 … 11 by 11 … 15.
         let keys = book.tiles_of_chunk(face, 12, 2, 3);
         assert_eq!(keys.len(), 25);
-        assert_eq!((keys[0], keys[24]), (TileKey { face, tx: 7, ty: 11 }, TileKey { face, tx: 11, ty: 15 }));
+        assert_eq!(
+            (keys[0], keys[24]),
+            (
+                TileKey {
+                    face,
+                    tx: 7,
+                    ty: 11
+                },
+                TileKey {
+                    face,
+                    tx: 11,
+                    ty: 15
+                }
+            )
+        );
         // A rung-0 chunk at the face's first column: its own tile and the partner face's tile across the edge.
         let n7 = (lattice.edge << 6) as i32;
         let c = chart_cell(face, -1, 5, n7).expect("the partner face's cell");
-        let partner = TileKey { face: Face::from_index(c.face).expect("a face"), tx: c.i >> 9, ty: c.j >> 9 };
+        let partner = TileKey {
+            face: Face::from_index(c.face).expect("a face"),
+            tx: c.i >> 9,
+            ty: c.j >> 9,
+        };
         let mut want = vec![TileKey { face, tx: 0, ty: 0 }, partner];
         want.sort();
         assert_eq!(book.tiles_of_chunk(face, 0, 0, 10), want);
@@ -511,9 +586,18 @@ mod tests {
         let mut whole = FineBook::new(&body, &lattice, 0).expect("a book");
         assert!(whole.insert(key, all.clone()));
         let (i, j) = ((3 * 64 + 10) << 3, (4 * 64 + 20) << 3);
-        assert_eq!(book.z(face, 10, 10, 3 * 64 + 10, 4 * 64 + 20), whole.z(face, 10, 10, 3 * 64 + 10, 4 * 64 + 20));
-        assert_ne!(whole.z(face, 10, 10, 3 * 64 + 10, 4 * 64 + 20), FineZ::Missing(key));
-        assert_eq!(book.z(face, 9, 9, 3 * 128 + 20, 4 * 128 + 40), FineZ::Missing(key));
+        assert_eq!(
+            book.z(face, 10, 10, 3 * 64 + 10, 4 * 64 + 20),
+            whole.z(face, 10, 10, 3 * 64 + 10, 4 * 64 + 20)
+        );
+        assert_ne!(
+            whole.z(face, 10, 10, 3 * 64 + 10, 4 * 64 + 20),
+            FineZ::Missing(key)
+        );
+        assert_eq!(
+            book.z(face, 9, 9, 3 * 128 + 20, 4 * 128 + 40),
+            FineZ::Missing(key)
+        );
         assert!(book.holds_all(&[key], 10));
         assert!(!book.holds_all(&[key], 9));
         // A finer level with a gap under the held ones is refused; one that reaches them joins below them.
@@ -524,8 +608,14 @@ mod tests {
         assert!(book.insert_from(key, 2, all[2..].to_vec()));
         assert_eq!(book.held_from(key), Some(1));
         // The whole tile now reads as the full insert reads it, at every rung it holds.
-        assert_eq!(book.z(face, 8, 0, i + 77, j + 3), whole.z(face, 8, 0, i + 77, j + 3));
-        assert_eq!(book.z(face, 12, 12, 3 * 16 + 5, 4 * 16 + 6), whole.z(face, 12, 12, 3 * 16 + 5, 4 * 16 + 6));
+        assert_eq!(
+            book.z(face, 8, 0, i + 77, j + 3),
+            whole.z(face, 8, 0, i + 77, j + 3)
+        );
+        assert_eq!(
+            book.z(face, 12, 12, 3 * 16 + 5, 4 * 16 + 6),
+            whole.z(face, 12, 12, 3 * 16 + 5, 4 * 16 + 6)
+        );
         assert!(book.insert_from(key, 0, all[0..1].to_vec()));
         assert_eq!(book.held_from(key), Some(0));
         assert_eq!(book, whole);
@@ -537,17 +627,41 @@ mod tests {
         let lattice = MacroLattice::of(&body).expect("a lattice");
         let mut book = FineBook::new(&body, &lattice, 0).expect("a book");
         let face = Face::from_index(0).expect("a face");
-        assert_eq!((book.len(), book.is_empty(), book.side_shift()), (0, true, 9));
+        assert_eq!(
+            (book.len(), book.is_empty(), book.side_shift()),
+            (0, true, 9)
+        );
         for (tx, ty) in [(3, 4), (2, 4)] {
             assert!(book.insert(TileKey { face, tx, ty }, plane(tx, ty)));
         }
-        assert_eq!(book.keys().collect::<Vec<_>>(), vec![TileKey { face, tx: 2, ty: 4 }, TileKey { face, tx: 3, ty: 4 }]);
+        assert_eq!(
+            book.keys().collect::<Vec<_>>(),
+            vec![
+                TileKey { face, tx: 2, ty: 4 },
+                TileKey { face, tx: 3, ty: 4 }
+            ]
+        );
         assert!(book.holds_all(&[TileKey { face, tx: 2, ty: 4 }], 7));
         assert!(!book.holds_all(&[TileKey { face, tx: 9, ty: 9 }], 7));
         // A field over the book: the macro words from its inner field, the fine ground from the book.
-        let field = FineField { inner: Arc::new(test_field::OneFineRead(FineZ::Outside)), book: Arc::new(book.clone()) };
-        assert_eq!((field.z_m(7), field.level(), field.water_facies(7), field.province(7), field.water_side(7)), (Some(0), 0, None, None, None));
-        assert_eq!(field.fine_z(face, 7, 7, 3 * 512 + 10, 4 * 512 + 20), book.z(face, 7, 7, 3 * 512 + 10, 4 * 512 + 20));
+        let field = FineField {
+            inner: Arc::new(test_field::OneFineRead(FineZ::Outside)),
+            book: Arc::new(book.clone()),
+        };
+        assert_eq!(
+            (
+                field.z_m(7),
+                field.level(),
+                field.water_facies(7),
+                field.province(7),
+                field.water_side(7)
+            ),
+            (Some(0), 0, None, None, None)
+        );
+        assert_eq!(
+            field.fine_z(face, 7, 7, 3 * 512 + 10, 4 * 512 + 20),
+            book.z(face, 7, 7, 3 * 512 + 10, 4 * 512 + 20)
+        );
         assert_eq!(field.fine_z(face, 13, 13, 0, 0), FineZ::Outside);
         // Letting a tile go.
         assert!(book.remove(TileKey { face, tx: 2, ty: 4 }));
@@ -564,9 +678,16 @@ mod tests {
         let n7 = (lattice.edge << 6) as i32;
         // The stencil's first sample of the face's first column lies on the partner face.
         let c = chart_cell(face, -1, 99, n7).expect("the partner face's cell");
-        let partner = TileKey { face: Face::from_index(c.face).expect("a face"), tx: c.i >> 9, ty: c.j >> 9 };
+        let partner = TileKey {
+            face: Face::from_index(c.face).expect("a face"),
+            tx: c.i >> 9,
+            ty: c.j >> 9,
+        };
         assert_eq!(book.z(face, 7, 7, 0, 100), FineZ::Missing(partner));
         // At the face's corner the first sample lies in the cube corner's diagonal region: the face's own corner cell.
-        assert_eq!(book.z(face, 7, 7, 0, 0), FineZ::Missing(TileKey { face, tx: 0, ty: 0 }));
+        assert_eq!(
+            book.z(face, 7, 7, 0, 0),
+            FineZ::Missing(TileKey { face, tx: 0, ty: 0 })
+        );
     }
 }
