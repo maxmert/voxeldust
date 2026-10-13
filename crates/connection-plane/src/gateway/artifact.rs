@@ -522,6 +522,27 @@ fn drawn_realms(session: &Session) -> impl Iterator<Item = RealmId> + '_ {
         .filter(move |r| seen.insert(*r))
 }
 
+/// ★ THE FINE CACHE FOLLOWS THE SHARD'S RECORD (2026-10-13): a realm's cached fine records are trimmed to what this
+/// beat's views read ONLY when this beat named fine needs for the realm — that is, when its views went to the realm's
+/// shard. The shard keeps its record of what it answered this gateway until a new view arrives or the keep-alive lapses,
+/// so a trim on a beat with no view dropped records the shard still counted as answered, and nobody sent them again.
+/// MEASURED (headless, twice, the first login after a hull was re-planted at its berth): a beat with no view of the home
+/// planet dropped all 471 cached records; the client held 622 of the 702 tiles the shard named, 715 pieces of ground
+/// stood on the rough ground for ever and the loading screen never went.
+///
+/// **Example.** A pilot logs in aboard a hull the planet re-plants at its berth: for one beat the picture holds no row
+/// of the planet, so no view of it goes out; the planet's tiles stay cached, and the next beat serves them.
+pub(crate) fn trim_fine_cache(
+    realm: RealmId,
+    fine: &mut BTreeMap<(FineTile, u8), Vec<Vec<u8>>>,
+    read: &BTreeSet<(RealmId, FineTile)>,
+    viewed: &BTreeSet<RealmId>,
+) {
+    if viewed.contains(&realm) {
+        fine.retain(|(tile, _), _| read.contains(&(realm, *tile)));
+    }
+}
+
 /// ★ THE BEAT: ask for what is not held, forget what nobody draws, serve what is whole.
 pub(crate) fn serve_artifacts(
     config: &GatewayConfig,
@@ -674,10 +695,11 @@ pub(crate) fn serve_artifacts(
         .iter()
         .flat_map(|((_, realm), needs)| needs.iter().map(move |(t, _)| (*realm, *t)))
         .collect();
+    // ★ THE FINE CACHE FOLLOWS THE SHARD'S RECORD: trimmed only for a realm this beat named fine needs for
+    // ([`trim_fine_cache`]).
+    let viewed: BTreeSet<RealmId> = fine_needs.keys().map(|(_, realm)| *realm).collect();
     for (realm, cache) in sessions.artifacts.iter_mut() {
-        cache
-            .fine
-            .retain(|(tile, _), _| read.contains(&(*realm, *tile)));
+        trim_fine_cache(*realm, &mut cache.fine, &read, &viewed);
     }
     // The serve: each session that draws a realm whose artifact is whole here, and has not stated
     // it holds it, gets the head then the parts, paced, each once — within ONE budget a beat for the

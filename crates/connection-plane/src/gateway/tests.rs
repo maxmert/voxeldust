@@ -14171,3 +14171,34 @@ fn the_avatar_is_named_for_the_eye_at_the_attach_and_at_a_crossing() {
         (Some(EntityId(77)), true)
     );
 }
+
+/// ★ THE FINE CACHE FOLLOWS THE SHARD'S RECORD (2026-10-13): a realm whose views went out this beat keeps only the records
+/// they read; a realm with no view this beat keeps every record, because its shard still counts them as answered and
+/// will not send them again — the delivery defect a re-planted hull's first login measured (622 of 702 tiles held).
+#[test]
+fn a_realm_with_no_view_this_beat_keeps_its_fine_cache() {
+    const VIEWED: RealmId = RealmId::Planet(1);
+    const UNVIEWED: RealmId = RealmId::Planet(2);
+    let records = || {
+        BTreeMap::from([
+            (((2, 0, 0), 0u8), vec![vec![1u8]]),
+            (((2, 1, 0), 0u8), vec![vec![2u8]]),
+        ])
+    };
+    let read = BTreeSet::from([(VIEWED, (2, 0, 0))]);
+    let viewed = BTreeSet::from([VIEWED]);
+    let mut fine = records();
+    super::artifact::trim_fine_cache(VIEWED, &mut fine, &read, &viewed);
+    assert_eq!(
+        fine.keys().copied().collect::<Vec<_>>(),
+        vec![((2, 0, 0), 0)],
+        "a viewed realm keeps what its views read"
+    );
+    let mut fine = records();
+    super::artifact::trim_fine_cache(UNVIEWED, &mut fine, &read, &viewed);
+    assert_eq!(
+        fine,
+        records(),
+        "a realm with no view this beat keeps every record"
+    );
+}
