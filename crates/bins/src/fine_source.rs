@@ -20,6 +20,7 @@
 //! and the finished record goes to the pilot in about thirteen parts.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vd_core::pose::RealmId;
@@ -109,6 +110,49 @@ fn work(ctx: &Ctx, job: Job) -> Answer {
     }
 }
 
+/// ★ THE FINE WORK'S METER (send-ahead's first step, 2026-10-13): what the work did since the shard last read it, and
+/// where it stands now — so a fast flight shows whether its late tiles wait for a SOLVE (the backlog grows) or for the
+/// WIRE (the backlog stays empty while the client builds on the rough ground). Shared, so the shard program reads it
+/// after it hands the work to the sim; counters only, nothing reads them back into the work.
+///
+/// **Example.** A hull at 20 km/s over the belt: each pace line says how many named tiles have no finished record yet,
+/// and how many tiles the workers solved or read back from the store in the last five seconds.
+#[derive(Debug, Default)]
+pub struct FineMeter {
+    /// Raw tiles solved since the last read, and their wall nanoseconds summed.
+    pub raw_solved: AtomicU64,
+    pub raw_solve_nanos: AtomicU64,
+    /// Raw records read back from the store since the last read.
+    pub raw_loaded: AtomicU64,
+    /// Tiles finished from their nine raw fields since the last read, and their wall nanoseconds summed.
+    pub finished_made: AtomicU64,
+    pub finish_nanos: AtomicU64,
+    /// Finished records read back from the store since the last read.
+    pub finished_loaded: AtomicU64,
+    /// Now: the tiles the reasons name, those a view reads whole with no finished record yet (the backlog: a far copy
+    /// never starts a solve, so it is never in it), the jobs in flight.
+    pub reasons: AtomicU64,
+    pub backlog: AtomicU64,
+    pub in_flight: AtomicU64,
+}
+
+/// [`work`], timed into `meter` by the job's kind.
+fn timed_work(ctx: &Ctx, job: Job, meter: &FineMeter) -> Answer {
+    let (done, nanos) = match &job {
+        Job::Solve(_) => (&meter.raw_solved, Some(&meter.raw_solve_nanos)),
+        Job::LoadRaw(..) => (&meter.raw_loaded, None),
+        Job::Finish(..) => (&meter.finished_made, Some(&meter.finish_nanos)),
+        Job::LoadFinished(..) => (&meter.finished_loaded, None),
+    };
+    let started = std::time::Instant::now();
+    let answer = work(ctx, job);
+    if let Some(nanos) = nanos {
+        nanos.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    done.fetch_add(1, Ordering::Relaxed);
+    answer
+}
+
 /// The workers: threads on a channel, or none (the work runs at submission, on the tick's thread — the Tier-A rig's
 /// shape, as the artifact's `InlineWorker`).
 enum Pool {
@@ -137,9 +181,11 @@ struct State {
     unstored: BTreeSet<(TileKey, bool)>,
     /// Tiles whose solve or finish answered nothing: `(tile, finished?)`.
     refused: BTreeSet<(TileKey, bool)>,
-    /// This tick's lists, by occupant, and the merged order of the last.
-    named: Vec<Vec<TileKey>>,
+    /// This tick's lists, by occupant, each tile with whether its view reads it WHOLE (level 0), and the merged order of
+    /// the last with the tiles some view reads whole — the only ones a solve may start for (send-ahead's first rule).
+    named: Vec<Vec<(TileKey, bool)>>,
     reasons: Vec<TileKey>,
+    whole: BTreeSet<TileKey>,
 }
 
 /// ★ THE PROVIDER over one realm's artifact (see the module's head).
@@ -151,6 +197,7 @@ pub struct FineWork {
     /// B55, B87): the gateway reads the same off the head, so both name the same tiles at the same levels.
     head_band: (i32, i32, i16),
     state: Mutex<State>,
+    meter: Arc<FineMeter>,
 }
 
 impl FineWork {
@@ -179,6 +226,7 @@ impl FineWork {
             ts: book.side_shift(),
             n7: (lattice.edge << shift) as i32,
         });
+        let meter = Arc::new(FineMeter::default());
         let pool = if threads == 0 {
             Pool::Inline { done: Vec::new() }
         } else {
@@ -186,6 +234,7 @@ impl FineWork {
             let (answer_tx, answers) = crossbeam_channel::unbounded::<Answer>();
             for k in 0..threads {
                 let (rx, tx, ctx) = (job_rx.clone(), answer_tx.clone(), Arc::clone(&ctx));
+                let meter = Arc::clone(&meter);
                 std::thread::Builder::new()
                     .name(format!("fine-solve-{k}"))
                     .spawn(move || {
@@ -196,7 +245,7 @@ impl FineWork {
                         );
                         // The provider dropped (the shard shut down): the channel closes and the thread ends.
                         for job in rx.iter() {
-                            if tx.send(work(&ctx, job)).is_err() {
+                            if tx.send(timed_work(&ctx, job, &meter)).is_err() {
                                 break;
                             }
                         }
@@ -225,8 +274,16 @@ impl FineWork {
                 refused: BTreeSet::new(),
                 named: Vec::new(),
                 reasons: Vec::new(),
+                whole: BTreeSet::new(),
             }),
+            meter,
         })
+    }
+
+    /// The work's meter, shared (see [`FineMeter`]).
+    #[must_use]
+    pub fn meter(&self) -> Arc<FineMeter> {
+        Arc::clone(&self.meter)
     }
 
     /// How far the work stands: raw fields held, finished tiles held, jobs in flight — a reading for the log and the
@@ -294,12 +351,12 @@ impl FineWork {
     }
 
     /// Hands `job` to the workers (or runs it, inline).
-    fn submit(state: &mut State, ctx: &Ctx, job: Job) {
+    fn submit(state: &mut State, ctx: &Ctx, meter: &FineMeter, job: Job) {
         match &mut state.pool {
             Pool::Threads { jobs, .. } => {
                 let _ = jobs.send(job);
             }
-            Pool::Inline { done } => done.push(work(ctx, job)),
+            Pool::Inline { done } => done.push(timed_work(ctx, job, meter)),
         }
     }
 
@@ -363,15 +420,24 @@ impl FineTiles for FineWork {
         let longest = named.iter().map(Vec::len).max().unwrap_or(0);
         let mut seen = BTreeSet::new();
         state.reasons = (0..longest)
-            .flat_map(|rank| named.iter().filter_map(move |list| list.get(rank).copied()))
+            .flat_map(|rank| {
+                named
+                    .iter()
+                    .filter_map(move |list| list.get(rank).map(|(key, _)| *key))
+            })
             .filter(|key| seen.insert(*key))
+            .collect();
+        state.whole = named
+            .iter()
+            .flatten()
+            .filter_map(|&(key, whole)| whole.then_some(key))
             .collect();
         // ★ WHAT NO REASON NAMES LEAVES MEMORY (it stays in the store): the finished tiles outside the reasons, and the
         // raw fields no unfinished reason's block reads.
         let wanted: BTreeSet<TileKey> = state.reasons.iter().copied().collect();
         let mut keep_raw = BTreeSet::new();
         for key in &state.reasons {
-            if !state.finished.contains_key(key) {
+            if !state.finished.contains_key(key) && state.whole.contains(key) {
                 keep_raw.extend(self.block_of(*key).into_iter().flatten());
             }
         }
@@ -410,7 +476,7 @@ impl FineTiles for FineWork {
                 {
                     Some(Ok(Some(bytes))) => {
                         state.in_flight.insert((key, true));
-                        Self::submit(state, &self.ctx, Job::LoadFinished(key, bytes));
+                        Self::submit(state, &self.ctx, &self.meter, Job::LoadFinished(key, bytes));
                         continue;
                     }
                     Some(Err(reason)) => tracing::warn!(
@@ -421,6 +487,12 @@ impl FineTiles for FineWork {
                     _ => {}
                 }
                 state.unstored.insert((key, true));
+            }
+            // ★ A FAR COPY NEVER STARTS A SOLVE (send-ahead's first rule, 2026-10-13): a tile no view reads whole is served
+            // when stored and is otherwise left to the coarser ground. MEASURED before it: at 1 000 km over the home
+            // planet the reach named 22 575 tiles for their coarse copies alone and queued a full solve for each.
+            if !state.whole.contains(&key) {
+                continue;
             }
             let block = self.block_of(key);
             if block
@@ -434,7 +506,12 @@ impl FineTiles for FineWork {
                 let slots =
                     block.map(|b| b.and_then(|b| state.raw.get(&b).map(|f| (b, Arc::clone(f)))));
                 state.in_flight.insert((key, true));
-                Self::submit(state, &self.ctx, Job::Finish(key, Box::new(slots)));
+                Self::submit(
+                    state,
+                    &self.ctx,
+                    &self.meter,
+                    Job::Finish(key, Box::new(slots)),
+                );
                 continue;
             }
             for raw in block.into_iter().flatten() {
@@ -453,14 +530,29 @@ impl FineTiles for FineWork {
                         .and_then(|s| read_fine_record(s, &self.at(raw, false)).ok().flatten())
                 };
                 match stored {
-                    Some(bytes) => Self::submit(state, &self.ctx, Job::LoadRaw(raw, bytes)),
+                    Some(bytes) => {
+                        Self::submit(state, &self.ctx, &self.meter, Job::LoadRaw(raw, bytes))
+                    }
                     None => {
                         state.unstored.insert((raw, false));
-                        Self::submit(state, &self.ctx, Job::Solve(raw));
+                        Self::submit(state, &self.ctx, &self.meter, Job::Solve(raw));
                     }
                 }
             }
         }
+        // ★ THE METER'S GAUGES (send-ahead's first step): the tiles named, those not finished yet, the jobs in flight.
+        let backlog = state
+            .reasons
+            .iter()
+            .filter(|key| !state.finished.contains_key(key) && state.whole.contains(key))
+            .count();
+        self.meter
+            .reasons
+            .store(state.reasons.len() as u64, Ordering::Relaxed);
+        self.meter.backlog.store(backlog as u64, Ordering::Relaxed);
+        self.meter
+            .in_flight
+            .store(state.in_flight.len() as u64, Ordering::Relaxed);
     }
 
     fn want(&self, dir: [f64; 3], radial_m: f64) -> Vec<(FineName, u8)> {
@@ -486,17 +578,22 @@ impl FineTiles for FineWork {
             relief_m,
             pixel_rad,
         );
-        self.hold(&named.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+        self.hold(&named);
         named
     }
 
-    fn hold(&self, tiles: &[FineName]) {
-        let keys: Vec<TileKey> = tiles
+    fn hold(&self, tiles: &[(FineName, u8)]) {
+        let keys: Vec<(TileKey, bool)> = tiles
             .iter()
-            .map(|&(f, tx, ty)| TileKey {
-                face: Face::from_index(f).unwrap_or(Face::PosX),
-                tx: tx as i32,
-                ty: ty as i32,
+            .map(|&((f, tx, ty), level)| {
+                (
+                    TileKey {
+                        face: Face::from_index(f).unwrap_or(Face::PosX),
+                        tx: tx as i32,
+                        ty: ty as i32,
+                    },
+                    level == 0,
+                )
             })
             .collect();
         self.lock().named.push(keys);

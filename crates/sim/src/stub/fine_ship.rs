@@ -64,8 +64,10 @@ pub trait FineTiles: Send + Sync {
     /// ★ THE TILES a view at `radial_m` from the realm's centre along the unit direction `dir` (the realm's own frame)
     /// reads, the nearest first, each with the finest level it reads — and the provider's reason to solve them.
     fn want(&self, dir: [f64; 3], radial_m: f64) -> Vec<(FineName, u8)>;
-    /// Holds `tiles` as reasons this tick (a view set named them on an earlier tick).
-    fn hold(&self, tiles: &[FineName]);
+    /// Holds `tiles` as reasons this tick (a view set named them on an earlier tick), each with the finest level a view
+    /// reads it at — level 0 is the tile read whole, a coarser level only its far copies (which the provider serves when
+    /// stored and never solves, send-ahead's first rule).
+    fn hold(&self, tiles: &[(FineName, u8)]);
     /// The coarsest level a finished tile carries plus one (the level count).
     fn levels(&self) -> u8;
     /// The parts of one finished tile's levels `lo` up to (not including) `hi` — `hi` [`NONE_HELD`] for the levels to
@@ -209,7 +211,7 @@ pub(crate) fn emit_fine(
             g.sent.retain(|t, _| merged.contains_key(t));
             g.fresh = false;
         } else {
-            source.hold(&g.named.iter().map(|(t, _)| *t).collect::<Vec<_>>());
+            source.hold(&g.named);
         }
     }
     source.tick(store.0.as_deref_mut().map(|s| s as &mut dyn Store));

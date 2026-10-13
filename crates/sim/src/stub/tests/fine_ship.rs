@@ -49,11 +49,11 @@ impl FineTiles for Stated {
             ((2, 2, 0), 0),
         ]
     }
-    fn hold(&self, tiles: &[FineName]) {
+    fn hold(&self, tiles: &[(FineName, u8)]) {
         self.held
             .lock()
             .expect("the held list")
-            .extend_from_slice(tiles);
+            .extend(tiles.iter().map(|(tile, _)| *tile));
     }
     fn levels(&self) -> u8 {
         6

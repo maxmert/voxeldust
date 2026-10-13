@@ -547,6 +547,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vd_sim::stub::artifact_ship::ArtifactSource(Some(source));
         tracing::info!("the artifact ship is armed from the store");
     }
+    // ★ THE FINE WORK'S METER (send-ahead's first step): kept here after the work goes to the sim, read at each pace line.
+    let mut fine_meter: Option<std::sync::Arc<vd_bins::fine_source::FineMeter>> = None;
     // ★ THE FINE TILES (the fine ground's way in, B2): armed beside the artifact ship where the 128 m level applies to the
     // body (its artifact states a sea), its workers on the solve's share of the cores.
     if let Some((boot, body)) = artifact_boot.as_ref().zip(own_body.as_ref())
@@ -558,6 +560,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             solve_cores.0,
         )
     {
+        fine_meter = Some(work.meter());
         *world.resource_mut::<vd_sim::stub::fine_ship::FineSource>() =
             vd_sim::stub::fine_ship::FineSource(Some(Box::new(work)));
         tracing::info!(
@@ -743,6 +746,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pace_ticks: u64 = 0;
     let pace_window_wall = tick_budget * u32::try_from(pace_window_ticks).unwrap_or(u32::MAX);
     let mut pace_started = std::time::Instant::now();
+    let mut fine_tiles_sent_before = 0u64;
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let started = std::time::Instant::now();
         // ★ WORK IN HAND (ruling B91, SL7 amended): while this realm's first solve has not landed it does not report
@@ -821,6 +825,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         solve_cores.0,
                     )
                 {
+                    fine_meter = Some(work.meter());
                     *node
                         .world_mut()
                         .resource_mut::<vd_sim::stub::fine_ship::FineSource>() =
@@ -862,6 +867,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window_frames = st.window_frames_sent,
                     "tick pace"
                 );
+                // ★ THE FINE WORK OVER THE SAME WINDOW (send-ahead's first step): what waits for a solve and what was
+                // shipped. A line only when the work did something or holds a backlog.
+                if let Some(meter) = &fine_meter {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let solved = meter.raw_solved.swap(0, Relaxed);
+                    let solve_ms = meter.raw_solve_nanos.swap(0, Relaxed) as f64 / 1e6;
+                    let made = meter.finished_made.swap(0, Relaxed);
+                    let finish_ms = meter.finish_nanos.swap(0, Relaxed) as f64 / 1e6;
+                    let raw_loaded = meter.raw_loaded.swap(0, Relaxed);
+                    let finished_loaded = meter.finished_loaded.swap(0, Relaxed);
+                    let backlog = meter.backlog.load(Relaxed);
+                    let tiles_sent = st.fine_tiles_sent - fine_tiles_sent_before;
+                    fine_tiles_sent_before = st.fine_tiles_sent;
+                    if (solved + made + raw_loaded + finished_loaded + backlog + tiles_sent) > 0 {
+                        tracing::info!(
+                            reasons = meter.reasons.load(Relaxed),
+                            backlog,
+                            in_flight = meter.in_flight.load(Relaxed),
+                            raw_solved = solved,
+                            raw_solve_mean_ms = solve_ms / solved.max(1) as f64,
+                            finished_made = made,
+                            finish_mean_ms = finish_ms / made.max(1) as f64,
+                            raw_loaded,
+                            finished_loaded,
+                            tiles_sent,
+                            "fine work"
+                        );
+                    }
+                }
             }
             if slowest > tick_budget {
                 tracing::warn!(
