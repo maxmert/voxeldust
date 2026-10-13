@@ -12168,5 +12168,14 @@ generation alone), so a body solves once per generation on a machine, not once p
 - 🟥 **THE DEV SPAWN IS A FIXED POINT.** `VD_SPAWN_POSES` names a point in the planet's frame; account 1000's was hull 15's
   berth, and the stand moved the hull 280 m off it, so the spawn was re-stated at the hull's standing centre (cluster
   restarted). The cure is the durable login place (P7): a player logs in where they left — aboard the hull.
+- 🟥 **A PARKED HULL FOLLOWS ITS GROUND'S TILES, NOT ITS GROUND (MEASURED 2026-10-13).** The stand reads the ground the planet
+  HOLDS: when the last viewer left the day-side hills place, the planet dropped the 128 m tile under hull 17 and the hull
+  rose 432 m back onto the 8 km ground (6 345 898.7 → 6 346 331.2 m); at every boot it stands first on the 8 km ground and
+  drops onto the 128 m ground when the tile loads (303–432 m at the two hills berths). A parked body must not move when
+  nobody looks at it; the cure belongs with the first statement on the coarser ground (above) and the advance calculation
+  (B86 item 6: the tiles under parked children held, never dropped).
+- 🟥 **THE FIRST LOGIN AFTER A CLUSTER RESTART TIMES OUT (MEASURED 2026-10-13).** Three of four restarts of slot 37: the
+  gateway closed the client — "the dynamic home realm did not become routable inside the bounded bootstrap TTL" — and the
+  second login worked each time. Cause NOT MEASURED (the planet's boot with its stored tiles is a suspect).
 - 🟥 **LOWERING NEEDS NO GRAVITY YET, BUT A LANDED HULL IS NOT RE-STOOD.** A hull that flew and stopped is a drive state
   away from its parked place: it stands on nothing until the next boot re-plants it at its berth. Owed with the colliders.
