@@ -467,6 +467,12 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     ★ B96 (2026-10-14, the owner: "Can you adjust the formula and law, so we don't break what we already have today?" →
     "Go"): THE 16 m GROUND = TODAY'S DRAWN 128 m GROUND + THE LAW'S DETAIL FINER THAN 128 m (the law solved alone, no hold;
     amends B95 item 2); THE PIPELINE BUILT END TO END through the one tile machinery, then the first look on foot.
+    ★ B97 (2026-10-14, the owner on the cure's pictures: "Yes, I accept the cure"): the 16 m level made needles and walls on
+    steep ground (the dry world's slow rate + Oregon's creep sank the law's ground under today's; the pinned channels stood);
+    THE 16 m LAW IS THE 128 m LAW (B80's, B93 item 3: the joint law's steady state, single-flow water, no pinned channels;
+    amends B96 item 1) UNDER tan 35° (amends B82 item 1's 1.25 at 16 m: the creep's own limit); B96's form stays; the solve
+    stops by convergence; only the 16 m tiles move. Benched against Earth's 1 m lidar at 16 m (San Gabriel, Oregon).
+    THE LOOK GIVEN in the window at hull 19's valley: "It looks amazing!" (9 680 pieces, loading ~80 s).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

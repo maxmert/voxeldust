@@ -38,7 +38,9 @@ pub const FINE_VERSION: u32 = 3;
 
 /// ★ THE 16 m LEVEL'S OWN VERSION (ruling B95): every change to what a 16 m tile holds for the same 128 m ground is a
 /// new number; it folds into the 16 m level's input word only ([`input_word_of`]), so a 128 m tile stays valid across it.
-pub const L2_VERSION: u32 = 1;
+/// 2 (ruling B97, 2026-10-14): the 16 m law is the 128 m level's own law under tan 35° (the creep, the shared water and
+/// the pinned channels made walls and needles on steep ground).
+pub const L2_VERSION: u32 = 2;
 
 /// ★ THE INPUT WORD of a stored tile of `level`: the 128 m level's is [`input_word`]; the 16 m level folds its own
 /// version and number in after it (a 16 m tile reads the finished 128 m ground, so it changes with it).

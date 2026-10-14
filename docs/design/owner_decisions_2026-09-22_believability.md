@@ -2455,3 +2455,37 @@ pipeline as the next step. The owner: *"Go"*.
    draws; the law adds only what is finer.
 2. **THE PIPELINE IS BUILT END TO END** through the one tile machinery (B81 item 4): the generator, the shard's fine work,
    the gateway's needs, the client's books — then the first look on foot (B95 item 4), on the owner's word.
+
+## B97 (2026-10-14) — the 16 m level runs the 128 m level's own law
+
+THE DEFECT, MEASURED (status file, 2026-10-14 later; B5's first step): on the mountain tile at hull 19's valley the 16 m
+ground stood as needles and walls — 7.09 % of its 16 m links over 63°, the steepest 89°, 589 of the 621 stored tiles over
+100 m off today's ground. The cause: the rate the 16 m level reads back from today's ground is the dry world's (8.6 m per
+million years on the mountain), and at that rate the creep at Oregon's `D` wants hillslopes far gentler than the 128 m
+river-law ground, so the law's free ground sank hundreds of metres under today's while its channel points stayed pinned at
+today's height. The one-day round (the owner: "Please go") benched each part alone and then the proven method (B93 item 3):
+the 128 m level's own law on the 16 m points passes both stands against Earth's 1 m lidar read at 16 m (the San Gabriel
+Mountains 17.6 / 2.80 / 0.069 % of the links over 35° / 45° / 63°, the mountain tile 18.4 / 1.61 / 0.046 %; the Oregon
+Coast Range 6.6 / 0.065 / 0 %, the hills tile 5.47 / 0.096 / 0.0003 %), with no needle and no wall in the views. The owner,
+on the six pictures: *"Yes, I accept the cure"*.
+
+1. **THE 16 m LAW IS THE 128 m LAW** (B80's method, B93 item 3): the joint law's steady state on the 16 m points' flow
+   tree, each point draining to its one steepest lower neighbour, the rates read back from today's ground (as before), the
+   rim's exits and the sea the only outlets. AMENDS B96 item 1: the creep (Roering et al. 2007), the water shared over the
+   lower neighbours (Freeman 1991) and the channel points pinned under the 128 m channels leave the 16 m law.
+2. **THE THRESHOLD AT 16 m IS tan 35°** (Burbank et al. 1996, the angle threshold hillslopes stand at). AMENDS B82 item 1's
+   1.25 at 16 m: 1.25 is the creep law's own limit, which a hillslope approaches and does not stand at; under the river law
+   alone it gave 34–40 % of the 16 m links over 35° against Earth's 6.6–17.6 %.
+3. **B96's FORM STAYS**: the 16 m ground is today's drawn 128 m ground plus the law's detail finer than 128 m.
+4. **THE SOLVE STOPS BY CONVERGENCE** (B39): the passes stop when no 128 m cell's mean moves more than a metre, within the
+   128 m level's own bound. MEASURED on the bench: 40 and 80 passes move the link shares by under 0.2 points.
+5. **ONLY THE 16 m TILES MOVE** (the 16 m level's own version): every stored 16 m tile is solved again on its first want; the
+   128 m tiles stay.
+
+**Example.** A walker on the floor at hull 19 looks up the valley side: in place of thin rock walls along every creek line
+and needles on the slope, the side stands at most at the threshold angle and carries small gullies that branch into the
+valley, as on the San Gabriel Mountains' 16 m ground.
+
+**THE LOOK GIVEN (2026-10-14, the window at hull 19's valley on the built B97 ground, hull 20 berthed 40 m away as a size
+reference):** *"It looks amazing!"* MEASURED in the same session: the loading screen went after ~80 s with 9 680 pieces
+wanted (the day before at the same valley under the 1.25 bound: 34 232 pieces, 3 min 45 s).

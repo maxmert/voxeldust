@@ -130,6 +130,14 @@ rung-7 cell, L2's at the rung-4 cell. On the home planet (node 8 192 m) that is 
 | L1 | the joint law's steady state on the flow tree: `S = (U/(K·Q))^(1/2.2)`, `Q` = rain × the area draining through the point (Adams et al. 2020); the threshold law: no link steeper than `S_c`; each node's `U/K` solved by B80's rounds so the law's mean meets the node's (rev 4: from a coarse start, §3.3) | `n = 2.2` (Adams et al.); **rev 4 (B82): `S_c` = tan 35° = 0.70 at L1** (Burbank et al. 1996, threshold hillslopes on 90 m relief; amends A6: 1.25 gave 52 % of the 128 m ground over 45°) |
 | L2 | **rev 4: the steady form** — each point over its receiver by the lower of the joint law's slope and Roering's creep steady slope at `ℓ = A/width` (Roering et al. 2007), never steeper than `S_c`; the water's area shared over the lower neighbours (Freeman 1991); UNDER L1's CHANNELS (§3.3); the relaxation of revision 3 measured 15 min a tile and retires | `D` = 0.003 m²/yr, `S_c` = 1.25 (Roering et al. 1999, Oregon, at the hillslope's own scale; B82); the ABSOLUTE rise from the planet's present rise, `K` so L1's `U/K` holds |
 
+**B97 (2026-10-14) AMENDS THE L2 ROW:** the 16 m law IS the L1 law — the joint law's steady state on the 16 m points'
+tree, single-flow water, the threshold tan 35° (amends B82's 1.25 at L2: the creep's own limit), the rim's exits and the sea
+the only outlets (no channel points pinned under L1's channels), the half step from the second pass, the settle law (1 m)
+within L1's bound, B96's form kept (today's L1 ground plus the law's detail finer than L1). The creep and Freeman's sharing
+leave L2: at the dry world's slow rate the creep sank the law's ground hundreds of metres under L1's on steep ground and
+the pinned channels stood as walls (7.09 % of the 16 m links over 63° beside hull 19). Benched against Earth's 1 m lidar
+read at 16 m (the San Gabriel Mountains, the Oregon Coast Range).
+
 Where the solve has no water (`Q = 0`: an airless moon, a dry body) the joint law does not apply and no fluvial level is
 solved there (§3.6) — never a slope from a division by nothing (A11, B-I1).
 
@@ -575,7 +583,10 @@ division by a whole number replaced by a multiplication by its reciprocal writte
    16 m); the shard's fine work keyed by level, a 16 m tile solved once its 3 × 3 finished L1 tiles are held; the gateway's
    needs per level; the client's second book and the COARSE state (a chunk on the L1 ground until its 16 m tiles land,
    built again then).
-6. **B5 — L3:** the law at 2–4 m in a small ring around a walker (its cost measured first).
+   **B97 (2026-10-14):** the L2 law replaced by L1's own (see §3.2's note); `L2_VERSION` 2, only the 16 m tiles move.
+6. **B5 — L3:** the law at 2–4 m in a small ring around a walker (its cost measured first). B87 makes the ring a rule by
+   distance for every viewer, never a walker's special case; Earth's 1 m lidar gives its readings at 2 m and 4 m (B97's
+   bench: the San Gabriel Mountains 22.3 / 21.6 % of the links over 35°, the Oregon Coast Range 10.0 / 9.4 %).
 
 ## 10. The reviews' findings and their answers (revision 1 → 2)
 

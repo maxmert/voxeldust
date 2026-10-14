@@ -1,4 +1,4 @@
-//! ★ THE 16 m LEVEL'S SOLVE (ruling B95; the way-in design revision 4 §3.2–§3.4, build step B3).
+//! ★ THE 16 m LEVEL'S SOLVE (rulings B95, B96, B97; the way-in design revision 4 §3.2–§3.4, build step B3).
 //!
 //! A 16 m TILE is one macro node of a face; its DOMAIN adds a buffer of a quarter node each side (2 km on the home planet,
 //! the measured seam rule). It REFINES the drawn 128 m ground — the finished 128 m tiles a host holds
@@ -9,23 +9,28 @@
 //!    and the same joint law read backwards gives each node its RATE — `U = K·Q·S^n` over the node's links under the
 //!    threshold, the median — the rate at which the drawn ground is in balance (ruling B95: on all land, where the
 //!    macro world's present rise is nought on still land and would draw it flat).
-//! 2. **The 128 m channels kept.** A 128 m link is a CHANNEL where the 16 m law says its water cuts: the joint law's slope
-//!    `(U/(K·Q))^(1/n)` under the creep's steady slope at `ℓ = A/width` (Roering, Perron & Kirchner 2007); the 16 m points
-//!    within three quarters of a spacing of a channel link are outlets on the drawn ground along it. A 128 m link that
-//!    crosses the domain's rim is its exit (outward) or its inflow (inward), so two neighbours' valleys leave the same way.
-//! 3. **The steady form** on the 16 m points (§3.2): each point over its receiver by the lower of the joint law's slope and
-//!    the creep's (`D` [`CREEP_D_M2_YR`], `S_c` 1.25 — Roering, Kirchner & Dietrich 1999, the Oregon Coast Range), never
-//!    steeper than `S_c`; the water and the area shared over the lower neighbours (Freeman 1991, `p` [`FREEMAN_P`]); the
-//!    passes stop when no point changes its receiver.
-//! 4. **The hold per 128 m cell by its slopes** (§3.3, B84's rule): on the fixed tree each link's slope scaled by a factor
-//!    per 128 m point's own Voronoi cell, read with Gaussian weights (σ half a 128 m spacing), half the logarithm a sweep,
-//!    until each cell's mean meets the drawn ground's mean over the same points; a cell with fewer than four free points,
-//!    or whose own links lift it less than a metre, is LEFT TO THE LAW (the design's owed cure: such a cell drove its
-//!    factor without end); a scaled slope stays under `S_c` (the threshold is a law, B23).
+//! 2. **The rim.** A 128 m link that crosses the domain's rim is its exit (outward, an outlet on the drawn ground along
+//!    the link) or its inflow (inward, its water handed to the point nearest the crossing), so two neighbours' valleys
+//!    leave the same way; the sea's points are outlets on their own ground.
+//! 3. **The steady form is the 128 m level's own law** (ruling B97, B80's method): each 16 m point over its one steepest
+//!    lower neighbour by the joint law's slope `(U/(K·Q))^(1/n)` for its rate and the water the tree brings it, never
+//!    steeper than the threshold tan 35° ([`TAN_REPOSE`], Burbank et al. 1996); the drainage built again from each pass's
+//!    heights, each point moving half way to the new form from the second pass (the 128 m level's half step, B92); the
+//!    passes stop when no 128 m cell's mean moves more than [`STEADY_SETTLE_M`] (the settle law, B39), within the 128 m
+//!    level's own bound.
+//! 4. **Today's ground plus the law's detail** (ruling B96): the 16 m ground is today's drawn 128 m ground plus the law's
+//!    raster less its own 128 m version — the box means over each 128 m cell read back by the same Catmull-Rom — so the law
+//!    adds only what lies under 128 m.
 //!
-//! **Example.** The 16 m tile under hull 17 on the home planet's day-side hills: about 590 000 points over 12.3 km, the
-//! 128 m flow over 57 km around it, its channels marked, the steady form and the hold, then 640 × 640 heights in quarter
-//! metres — the tile and half its buffer — the same on any host.
+//! MEASURED (B97, the bench against Earth's 1 m lidar read at 16 m): the mountain tile beside hull 19 18.4 / 1.61 /
+//! 0.046 % of its 16 m links over 35° / 45° / 63° (the San Gabriel Mountains 17.6 / 2.80 / 0.069 %), hull 17's hills
+//! 5.47 / 0.096 / 0.0003 % (the Oregon Coast Range 6.6 / 0.065 / 0 %). The form B96 first built — the creep (Roering et
+//! al. 2007) at the dry world's slow rate, `S_c` 1.25, channel points pinned under the 128 m channels — sank the law's
+//! ground hundreds of metres under today's on steep ground, and the pinned channels stood as walls (7.09 % over 63°).
+//!
+//! **Example.** The 16 m tile under hull 17 on the home planet's day-side hills: about 560 000 points over 12.3 km, the
+//! 128 m flow over 57 km around it, the steady form on the 16 m points, then 640 × 640 heights in quarter metres — the
+//! tile and half its buffer, today's ground plus the law's small valleys — the same on any host.
 
 use super::delaunay::{Dir, NONE, triangulate_on_face};
 use super::geometry::{geometry, locate};
@@ -38,7 +43,6 @@ use crate::body::{BodyDefinition, TAN_REPOSE};
 use crate::gf::Gf;
 use crate::macro_lattice::MacroLattice;
 use crate::solve::{JOINT_K_LP, JOINT_N};
-use crate::surface::SOIL_CRITICAL_SLOPE;
 use crate::units::{LENGTH_BITS, STEPS_PER_M};
 use vd_seed::bend::Face;
 
@@ -50,20 +54,14 @@ pub const BUFFER_SHIFT: u32 = 2;
 /// The 128 m flow's region: the node and this many nodes each side (the Gaussian read of the rates reaches 2.45 nodes, so
 /// every 128 m point the domain reads stands in it whole).
 pub const FLOW_NODES: i32 = 3;
-/// The creep's rate (m²/yr; Roering, Kirchner & Dietrich 1999, the Oregon Coast Range — the design's interim, A14).
-pub const CREEP_D_M2_YR: f64 = 0.003;
-/// Freeman's exponent: the water shared over the lower neighbours by `(drop/length)^p` (Freeman 1991).
-pub const FREEMAN_P: f64 = 1.1;
-/// The warm start's passes (the joint law under tan 35°, as the 128 m level) and the steady form's.
-pub const WARM_PASSES: usize = 40;
-/// ★ THE STEADY FORM'S END (B93's rule one level down): the drainage built again after every second pass, the passes
-/// stopped when no 128 m cell's mean moves more than [`STEADY_SETTLE_M`], within the 128 m level's own bound.
+/// ★ THE STEADY FORM'S END (ruling B97, the settle law of B92/B93 one level down): the passes stop when no 128 m cell's mean
+/// moves more than [`STEADY_SETTLE_M`] metres, within the 128 m level's own bound — a bound that only guarantees an end.
 pub const STEADY_BOUND: usize = super::l1::FINE_ROUND_BOUND;
 pub const STEADY_SETTLE_M: f64 = 1.0;
-/// A channel's reach in 16 m spacings; the hold's Gaussian in 128 m spacings and its reach in widths.
-pub const CHANNEL_REACH: f64 = 0.75;
-pub const HOLD_SIGMA: f64 = 0.5;
-pub const HOLD_REACH: f64 = 2.5;
+/// The Gaussian that reads each 16 m point's rate and rain from the 128 m points around it, in 128 m spacings, and its
+/// reach in widths (the 128 m level's own read).
+pub const READ_SIGMA: f64 = 0.5;
+pub const READ_REACH: f64 = 2.5;
 
 /// A solved 16 m tile: the tile and half its buffer as `side × side` heights in quarter metres over the sea (rows of the
 /// face's chart from its north-west corner), and the readings.
@@ -72,12 +70,8 @@ pub struct L2Tile {
     pub side: usize,
     pub quarters: Vec<i32>,
     pub points: usize,
-    /// The warm start's passes and the steady form's.
-    pub passes: [usize; 2],
-    /// The channels' 128 m links and the 16 m points they hold.
-    pub channels: [usize; 2],
-    /// The channels' beds under the drawn ground: the mean and the largest depth, in centimetres.
-    pub bed_cm: [i64; 2],
+    /// The steady form's passes.
+    pub passes: usize,
     /// The law's detail added to today's ground: the median and the largest size, in centimetres.
     pub detail_cm: [i64; 2],
 }
@@ -109,59 +103,10 @@ fn dist2(a: &[Gf; 3], b: &[Gf; 3]) -> Gf {
     x * x + y * y + z * z
 }
 
-/// The point `p`'s squared distance to the segment `a → b` and the segment's parameter at its foot, in `[0, 1]`.
-fn to_segment(p: &[Gf; 3], a: &[Gf; 3], b: &[Gf; 3]) -> (Gf, Gf) {
-    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
-    let len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
-    let t = if len2 > Gf::ZERO {
-        ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / len2).clamp(Gf::ZERO, Gf::ONE)
-    } else {
-        Gf::ZERO
-    };
-    let foot = [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t];
-    (dist2(p, &foot), t)
-}
-
 /// The median of `v` (the lower of the two middles), `None` when empty.
 fn median(mut v: Vec<Gf>) -> Option<Gf> {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
     (!v.is_empty()).then(|| v[(v.len() - 1) >> 1])
-}
-
-/// ★ THE CREEP'S STEADY SLOPE (Roering, Kirchner & Dietrich 1999): the slope at which the nonlinear creep
-/// `q = D·S / (1 − (S/S_c)²)` carries `ul` (the rate times the area over the contour), in its closed form
-/// `S = S_c²·(√(D² + (2·ul/S_c)²) − D) / (2·ul)`; nought where nothing is carried.
-fn creep_slope(ul: Gf) -> Gf {
-    let (d, sc) = (
-        Gf::from_f64(CREEP_D_M2_YR),
-        Gf::from_f64(SOIL_CRITICAL_SLOPE),
-    );
-    if ul <= Gf::ZERO {
-        return Gf::ZERO;
-    }
-    let two_ul = ul * Gf::TWO;
-    let x = two_ul / sc;
-    sc * sc * ((d * d + x * x).sqrt() - d) / two_ul
-}
-
-/// ★ THE BANK'S MEAN HEIGHT OVER ITS CHANNEL (Roering, Perron & Kirchner 2007: the steady hillslope of the nonlinear
-/// creep): from the divide (`x` = 0) to the channel (`x` = `half`), each step's slope the creep's steady slope for the rate
-/// `u` times the distance from the divide ([`creep_slope`], the same form the 16 m solve stands on); the height over the
-/// foot `z(x) = ∫ₓ S`, and its mean over the hillslope `(1/L)·∫₀ᴸ s·S(s) ds` — how far a channel's bed lies under the
-/// mean of the cell its banks fill. Thirty-two steps by the middle rule.
-fn bank_mean_height(u: Gf, half: Gf) -> Gf {
-    const STEPS: i64 = 32;
-    if half <= Gf::ZERO {
-        return Gf::ZERO;
-    }
-    let dx = half / Gf::from_i64(STEPS);
-    let mut sum = Gf::ZERO;
-    for k in 0..STEPS {
-        let x = dx * (Gf::from_i64(k) + Gf::HALF);
-        sum += x * creep_slope(u * x) * dx;
-    }
-    sum / half
 }
 
 /// The joint law's slope for the rate `u` and the water `q` (`(U/(K·Q))^(1/n)`); unbounded (a large word) where no water.
@@ -322,97 +267,6 @@ impl CellGrid {
     }
 }
 
-/// The 16 m drainage of the moment: the flow tree, and the water and the area through each point shared over its lower
-/// neighbours by Freeman's rule (from the highest point down, ties to the lower index; a point with no lower neighbour
-/// hands all to its receiver; an outlet keeps what reaches it).
-struct Network<'a> {
-    outlet: &'a [bool],
-    graph: &'a super::delaunay::Graph,
-    len: &'a [Gf],
-    water: &'a [Gf],
-    area: &'a [Gf],
-}
-
-impl Network<'_> {
-    fn build(&self, h: &[Gf]) -> (super::tree::Tree, Vec<Gf>, Vec<Gf>) {
-        let t = tree(h, self.outlet, self.graph, self.len);
-        let n = h.len();
-        let mut order: Vec<u32> = (0..n as u32).collect();
-        order.sort_unstable_by(|&a, &b| {
-            h[b as usize]
-                .partial_cmp(&h[a as usize])
-                .unwrap_or(core::cmp::Ordering::Equal)
-                .then(a.cmp(&b))
-        });
-        let p_freeman = Gf::from_f64(FREEMAN_P);
-        let (mut q, mut a) = (self.water.to_vec(), self.area.to_vec());
-        let mut shares: Vec<(u32, Gf)> = Vec::with_capacity(16);
-        for &c in &order {
-            let c = c as usize;
-            if self.outlet[c] {
-                continue;
-            }
-            shares.clear();
-            let mut sum = Gf::ZERO;
-            let (lo, hi) = (
-                self.graph.start[c] as usize,
-                self.graph.start[c + 1] as usize,
-            );
-            for (&m, &l) in self.graph.adj[lo..hi].iter().zip(&self.len[lo..hi]) {
-                if h[m as usize] < h[c] {
-                    let w = ((h[c] - h[m as usize]) / l).powf_fine(p_freeman);
-                    shares.push((m, w));
-                    sum += w;
-                }
-            }
-            if sum > Gf::ZERO {
-                for &(m, w) in &shares {
-                    let f = w / sum;
-                    let (qc, ac) = (q[c] * f, a[c] * f);
-                    q[m as usize] += qc;
-                    a[m as usize] += ac;
-                }
-            } else if t.recv[c] != NONE {
-                let r = t.recv[c] as usize;
-                let (qc, ac) = (q[c], a[c]);
-                q[r] += qc;
-                a[r] += ac;
-            }
-        }
-        (t, q, a)
-    }
-}
-
-/// ★ THE STEADY FORM'S HEIGHTS on the tree `t`: each point over its receiver by the lower of the joint law's slope for
-/// its rate and water and the creep's for its rate and area over the 16 m contour, never steeper than `S_c`; an outlet
-/// (or a point no outlet reaches) on its base.
-#[allow(clippy::too_many_arguments)]
-fn integrate_form(
-    t: &super::tree::Tree,
-    outlet: &[bool],
-    base: &[Gf],
-    rates: &[Gf],
-    q: &[Gf],
-    a: &[Gf],
-    width: Gf,
-    sc: Gf,
-    h: &mut [Gf],
-) {
-    for &c in &t.order {
-        let c = c as usize;
-        let r = t.recv[c];
-        if outlet[c] || r == NONE {
-            h[c] = base[c];
-            continue;
-        }
-        let ul = rates[c] * a[c] / width;
-        let s = river_slope(rates[c], q[c])
-            .lesser(creep_slope(ul))
-            .lesser(sc);
-        h[c] = h[r as usize] + s * t.link[c];
-    }
-}
-
 /// ★ THE 16 m TILE `key` — one macro node: the node `(key.tx, key.ty)` of `key.face` — refining the finished 128 m tiles of `book`. `None` where the
 /// rung's cells do not nest in the nodes by a power of two, a finished 128 m tile it reads is not held, or a domain
 /// cannot be built.
@@ -484,12 +338,11 @@ pub fn solve_l2(
             })
             .map(|b| b.1 as usize)
     };
-    // THE HOLD'S WEIGHTS AND EACH POINT'S CELL: the 128 m points within the reach of each 16 m point, by the Gaussian of
+    // THE READ'S WEIGHTS AND EACH POINT'S CELL: the 128 m points within the reach of each 16 m point, by the Gaussian of
     // their distance (σ half a 128 m spacing); its cell the nearest (ties to the lower index).
     let spacing7 = Gf::from_f64(lattice.node_m() / f64::from(1u32 << shift7));
-    let spacing4 = Gf::from_f64(lattice.node_m() / f64::from(1u32 << shift4));
-    let sigma = spacing7 * Gf::from_f64(HOLD_SIGMA);
-    let reach2 = (sigma * Gf::from_f64(HOLD_REACH)) * (sigma * Gf::from_f64(HOLD_REACH));
+    let sigma = spacing7 * Gf::from_f64(READ_SIGMA);
+    let reach2 = (sigma * Gf::from_f64(READ_REACH)) * (sigma * Gf::from_f64(READ_REACH));
     let two_s2 = sigma * sigma * Gf::TWO;
     let (mut wstart, mut wcell, mut wval) = (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
     let mut cell_of = vec![u32::MAX; n];
@@ -604,55 +457,6 @@ pub fn solve_l2(
             water[p] += f1.q[c];
         }
     }
-    // THE CHANNELS: a 128 m link inside the domain whose water the 16 m law cuts holds the 16 m points along it.
-    let (mut channel_links, mut channel_points) = (0usize, 0usize);
-    let (mut bed_sum, mut bed_max) = (Gf::ZERO, Gf::ZERO);
-    let reach_c = spacing4 * Gf::from_f64(CHANNEL_REACH);
-    let reach_c2 = reach_c * reach_c;
-    for c in 0..f1.h.len() {
-        let r = f1.recv[c];
-        if r == NONE || f1.d.outlet[c] || !inside(at7[c]) {
-            continue;
-        }
-        let r = r as usize;
-        let (u, q, rain) = (f1.rate[c], f1.q[c], f1.rain[c]);
-        if rain <= Gf::ZERO {
-            continue;
-        }
-        // The area over the contour at the 128 m level's own width: a 128 m link drains a strip one 128 m spacing wide.
-        let ul = u * (q / rain) / spacing7;
-        if river_slope(u, q) >= creep_slope(ul) {
-            continue;
-        }
-        channel_links += 1;
-        // ★ THE BED UNDER THE CELL'S MEAN: the drawn 128 m ground is each cell's mean, the bed plus its banks; the bed
-        // lies under it by the banks' mean height over half a 128 m spacing at the cell's rate.
-        let depth = bank_mean_height(u, spacing7 * Gf::HALF);
-        bed_sum += depth;
-        bed_max = bed_max.greater(depth);
-        let (Some(a), Some(b)) = (in4(at7[c]), in4(at7[r])) else {
-            continue;
-        };
-        let reach = 1i32 << down;
-        let near: Vec<u32> = grid4
-            .near(
-                (a.0.min(b.0) - reach, a.0.max(b.0) + reach),
-                (a.1.min(b.1) - reach, a.1.max(b.1) + reach),
-            )
-            .collect();
-        for p in near {
-            let p = p as usize;
-            let (d2, t) = to_segment(&pos[p], &f1.pos[c], &f1.pos[r]);
-            if d2 <= reach_c2 {
-                let z = lerp(f1.h[c], f1.h[r], t) - depth;
-                if !outlet[p] {
-                    channel_points += 1;
-                }
-                base[p] = if outlet[p] { base[p].lesser(z) } else { z };
-                outlet[p] = true;
-            }
-        }
-    }
     if exits == 0 && !outlet.iter().any(|&o| o) {
         // No 128 m water leaves and no sea: the rim's lowest point drains the domain.
         let rim = |p: usize| {
@@ -669,43 +473,14 @@ pub fn solve_l2(
             outlet[p] = true;
         }
     }
-    // THE WARM START: the joint law under tan 35° (the 128 m level's own form) on the 16 m points.
+    // ★ THE STEADY FORM IS THE 128 m LEVEL'S OWN LAW (ruling B97): each pass builds the drainage from the last pass's
+    // heights (the first from today's ground), brings each point the water its tree carries, and stands each point over its
+    // receiver by the joint law's slope for its rate and that water, never steeper than tan 35°. From the second pass each
+    // point moves HALF way to that form (the 128 m level's half step, B92): rebuilt from full steps, a divide's two sides
+    // kept capturing each other and the means never settled (MEASURED: the mountain tile beside hull 19 still moved
+    // 170 m at pass 180). The passes stop when no 128 m cell's mean moves more than a metre (the settle law), within the
+    // bound.
     let tan = Gf::from_f64(TAN_REPOSE);
-    let mut h = base.clone();
-    let mut last_recv: Vec<u32> = Vec::new();
-    let mut warm = 0usize;
-    for _ in 0..WARM_PASSES {
-        warm += 1;
-        let t = tree(&h, &outlet, &graph, &geom.len);
-        let q = accumulate(&t, &water);
-        for &c in &t.order {
-            let c = c as usize;
-            let r = t.recv[c];
-            if outlet[c] || r == NONE {
-                h[c] = base[c];
-                continue;
-            }
-            h[c] = h[r as usize] + river_slope(rate[c], q[c]).lesser(tan) * t.link[c];
-        }
-        let same = t.recv == last_recv;
-        last_recv = t.recv;
-        if same {
-            break;
-        }
-    }
-    // THE STEADY FORM, the law alone at each cell's own rate: the drainage and the shared water built again every pass
-    // until no point changes its receiver.
-    let sc = Gf::from_f64(SOIL_CRITICAL_SLOPE);
-    let rates: Vec<Gf> = rate.clone();
-    let net = Network {
-        outlet: &outlet,
-        graph: &graph,
-        len: &geom.len,
-        water: &water,
-        area: &geom.area,
-    };
-    let (mut t, mut q, mut a) = net.build(&h);
-    // Each 128 m cell's mean over its 16 m points (the settle law reads how far the means move).
     let ncell = f1.h.len();
     let cell_means = |h: &[Gf]| -> Vec<Gf> {
         let (mut sum, mut area) = (vec![Gf::ZERO; ncell], vec![Gf::ZERO; ncell]);
@@ -727,11 +502,27 @@ pub fn solve_l2(
             .collect()
     };
     let settle = Gf::from_f64(STEADY_SETTLE_M);
+    let mut h = base.clone();
     let mut last = cell_means(&h);
-    let mut steady = 0usize;
+    let mut passes = 0usize;
     for pass in 1..=STEADY_BOUND {
-        steady = pass;
-        integrate_form(&t, &outlet, &base, &rates, &q, &a, spacing4, sc, &mut h);
+        passes = pass;
+        let t = tree(&h, &outlet, &graph, &geom.len);
+        let q = accumulate(&t, &water);
+        for &c in &t.order {
+            let c = c as usize;
+            let r = t.recv[c];
+            if outlet[c] || r == NONE {
+                h[c] = base[c];
+                continue;
+            }
+            let full = h[r as usize] + river_slope(rate[c], q[c]).lesser(tan) * t.link[c];
+            h[c] = if pass == 1 {
+                full
+            } else {
+                (h[c] + full) * Gf::HALF
+            };
+        }
         let now = cell_means(&h);
         let moved = now
             .iter()
@@ -741,9 +532,6 @@ pub fn solve_l2(
         last = now;
         if moved <= settle {
             break;
-        }
-        if pass.is_multiple_of(2) {
-            (t, q, a) = net.build(&h);
         }
     }
     // THE LAW'S RASTER: the tile and half its buffer, cell centres at rung 4, by the walk's weights; beside it the drawn
@@ -855,12 +643,7 @@ pub fn solve_l2(
         side: rs,
         quarters,
         points: n,
-        passes: [warm, steady],
-        channels: [channel_links, channel_points],
-        bed_cm: [
-            cm(bed_sum / Gf::from_i64(channel_links.max(1) as i64)),
-            cm(bed_max),
-        ],
+        passes,
         detail_cm: [
             detail.get(detail.len() >> 1).map_or(0, |&g| cm(g)),
             detail.last().map_or(0, |&g| cm(g)),
@@ -877,14 +660,14 @@ mod tests {
     use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_solve_words};
     use crate::solve::{Schedule, SolveWords};
 
-    /// ★ ONE 16 m TILE OF THE WET MOON, END TO END (ruling B96). The 16 m node at the corner where four 128 m tiles meet
+    /// ★ ONE 16 m TILE OF THE WET MOON, END TO END (rulings B96, B97). The 16 m node at the corner where four 128 m tiles meet
     /// — (NegX, 6 … 7, 0 … 1), beside the tile the 128 m test's rule picks — whose flow (three nodes each way, and the
     /// 128 m curve's stencil a sample or two past them) reads all four; each 128 m tile held as its own raw square and
     /// that square's mean levels (the finish's stitch is the finish's own tests'; the shard holds the 3 × 3 finished tiles
-    /// around a 16 m tile for the same reach). With none held the 16 m tile does not solve; with them it solves: the warm
-    /// start and the steady form within their passes, every raster cell given a height, and EVERY cell today's drawn
-    /// 128 m ground plus at most the law's largest detail (and the raster's rounding) — the 16 m level refines today's
-    /// ground and never departs from it by more than its own detail.
+    /// around a 16 m tile for the same reach). With none held the 16 m tile does not solve; with them it solves: the
+    /// steady form within its passes, every raster cell given a height, and EVERY cell today's drawn 128 m ground plus at
+    /// most the law's largest detail (and the raster's rounding) — the 16 m level refines today's ground and never departs
+    /// from it by more than its own detail.
     #[test]
     fn the_wet_moon_16m_tile_solves_on_its_128m_ground() {
         let moon = home_moon();
@@ -967,12 +750,7 @@ mod tests {
         let side = (1usize << shift4) + 2 * half as usize;
         assert_eq!((tile.side, tile.quarters.len()), (side, side * side));
         assert_eq!(tile.quarters.iter().filter(|&&q| q == i32::MIN).count(), 0);
-        assert!(tile.passes[0] <= WARM_PASSES, "{:?}", tile.passes);
-        assert!(
-            (1..=STEADY_BOUND).contains(&tile.passes[1]),
-            "{:?}",
-            tile.passes
-        );
+        assert!((1..=STEADY_BOUND).contains(&tile.passes), "{}", tile.passes);
         assert!(tile.detail_cm[1] > 0, "{:?}", tile.detail_cm);
         // Every cell today's drawn ground plus at most the largest detail (its centimetre's floor, and the rounding).
         let sea = Gf::from_i32(i32::from(artifact.sea_m));

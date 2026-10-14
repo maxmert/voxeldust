@@ -318,17 +318,12 @@ pub const CURVE_OVERSHOOT: f64 = 1.5;
 /// own tolerance holds it from 56 m; under the old rule the 1 m ring reached 869 m.
 ///
 /// ★ THE 16 m LEVEL (ruling B95): where the 16 m level draws, the rungs under it (0–3) read the curve through ITS points
-/// — 16 m apart, never steeper than the soil's critical slope (`vd_terrain::surface::SOIL_CRITICAL_SLOPE`, B82) — so the
-/// same rule with that level's cell and bound.
+/// — 16 m apart, never steeper than the same threshold (ruling B97: the 16 m law is the 128 m level's own, under tan 35°;
+/// B82's 1.25 was the creep's limit, which left the law) — so the same rule with that level's cell.
 #[must_use]
 pub fn curve_step_m(level: vd_terrain::fine::level::FineLevel, rung: u8) -> f64 {
-    use vd_terrain::fine::level::FineLevel;
     let fine_cell = f64::from(cell_m(level.rung()));
-    let bound = match level {
-        FineLevel::L1 => vd_terrain::body::TAN_REPOSE,
-        FineLevel::L2 => vd_terrain::surface::SOIL_CRITICAL_SLOPE,
-    };
-    let slope = bound * CURVE_OVERSHOOT;
+    let slope = vd_terrain::body::TAN_REPOSE * CURVE_OVERSHOOT;
     let bend = 6.0 * slope / fine_cell;
     let miss = |d: f64| (bend * d * d / 2.0).min(slope * d * std::f64::consts::FRAC_1_SQRT_2);
     let d = f64::from(cell_m(rung));

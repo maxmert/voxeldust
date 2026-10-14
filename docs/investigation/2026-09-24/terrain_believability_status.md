@@ -1803,3 +1803,69 @@ defects from the speed step and the parked hulls' stand (the band table's frame 
 offset read apart, a hull lying along its up). Not run: the bins crate's three tests that solve the moon's 8 km ground
 crawl at the utility thread class (registered). NEXT: B5, the 2–4 m level, beginning with its cost and the near pieces'
 measurement (`examples/fine_steps.rs`).
+- 2026-10-14 (later) — B5 STEP 1, THE MEASUREMENT FIRST, FOUND THE 16 m LEVEL BROKEN ON STEEP GROUND (the owner: "proceed" on
+the B5 plan; read only, nothing in the game changed; this worktree, slot 22, given the solved world of slot 52 by the
+worktree script's copy). THE NEAR STEPS (`examples/fine_steps.rs` on the stored tiles): at hull 17's hills every hand-over
+step at rungs 0–3 stands far under the client's bound for the 16 m ground (the largest 0.55 / 2.25 / 4.89 / 12.9 m against
+1.76 / 6.71 / 15.9 / 31.8 m), so the near pieces' reach could shrink about three times; at hull 19's valley (the mountain
+tile, `planet_stand valley` 3,19,65) the steps stand far OVER it (rung 4 → 5 the largest 1 338 m, the 99.9th 242 m).
+WHERE (`examples/fine_detail.rs`, the 16 m ground less today's 128 m ground at each 16 m cell): 589 of the 621 stored 16 m
+tiles around the valley stand over 100 m off today's ground somewhere (a tile's largest: median 477 m, largest 2 016 m;
+one 16 m link 2 156 m high). THE BENCH'S OWN SOLVE AGREES (`planet_stand l2` 3,20,66, the game's `solve_l2`): 7.09 % of the
+16 m links over 63°, the steepest 89.1°, the law's detail up to 997 m, the joins up to 531 m — needles and walls in the
+views (today's 128 m curve there: none over 63°, the steepest 53.4°); hull 17's tile 3,18,4 gives B96's numbers exactly
+(0.0015 % over 63°). THE MECHANISM, MEASURED (temporary readings, removed): the law solved alone sinks its free ground far
+under today's on steep ground — the median −83 to −176 m, the 1st percentile −569 to −1 061 m on the mountain tile against
+−9 to −13 m and −44 to −56 m on the hills — while its channel points stay pinned at today's ground less ~4 m; the channel
+points stand 56–148 m over their free neighbours (0.0–0.2 m on the hills), and 60–65 % of the links over 63° run from a
+channel point down to a free point. B96's form (the law's raster less its own 128 m version) holds only where the law
+agrees with today's ground at 128 m. A SECOND DEFECT: since B96 removed the hold, a pass on an unchanged drainage repeats
+the last exactly, so the steady form stops at pass 2 before its first rebuild (`passes [40, 2]` on every tile, both stands);
+built again every pass it does not settle in 180 passes and the walls grow (10.2 % over 63°, 31 s a tile) — so the loop is
+not the walls' cause. B5 waits: it would copy this form one level down. The owner's word on the cure owed (B93 item 3).
+- 2026-10-14 (later) — THE 16 m CURE ROUND, ONE DAY (the owner: "Please go"; bench only, the game's `solve_l2` with temporary
+switches, removed after; nothing committed). EARTH'S 1 m LIDAR (US Geological Survey 3DEP, public domain, outside the repo in
+`~/voxeldust_earth/lidar1m/`; B79 Q1: a measuring stick, no constant from it), read at 16 m by the bench's own census: the
+San Gabriel Mountains (x41y380, relief 1 231 m at 5 km — the mountain tile's own 1 226 m) 17.6 % of the links over 35°,
+2.80 % over 45°, 0.069 % over 63°; the Oregon Coast Range (x41y480) 6.6 / 0.065 / 0 %. THE PARTS, ONE AT A TIME (the
+mountain tile 3,20,66 and the hills tile 3,18,4): the rates read from links at the threshold too, and single-flow water —
+no change; no creep — the free ground over today's by up to 140 m, the hills 35 % over 35°; no fixed channel points — the
+walls go, 1.19 % over 63°, the law's ground 340–580 m under today's. THE CAUSE: the rate read back from today's ground is
+the dry world's (8.6 × 10⁻⁶ m/yr on the mountain, 5.5 × 10⁻⁷ on the hills), and at that rate the creep at Oregon's D wants
+hillslopes far gentler than the 128 m river-law ground; so the free ground sinks and the fixed channels stand. THE PROVEN
+METHOD (B93 item 3; B80's law, the one the 128 m level runs) PASSES BOTH STANDS: the joint law's steady state on the 16 m
+points' tree, single-flow water, the threshold tan 35°, the rim's exits and the sea as the only outlets, B96's form kept
+(today's ground plus the law's detail finer than 128 m) — the mountain 18.4 / 1.61 / 0.046 % (the steepest 85.6°), each
+128 m cell's mean off by 4.3 / 9.8 / 28.9 m (median / 99th / largest), the joins 6.0 / 16.2 / 30.8 m; the hills 5.47 /
+0.096 / 0.0003 %, 3.3 / 7.7 / 10.5 m, 5.5 / 13.8 / 17.0 m; no needle, no wall in the views. CONVERGED (B39): 40 → 80
+passes move the shares by under 0.2 points and the median detail not at all (6.2 m, 9.0 m). THE SAME FORM UNDER 1.25
+FAILS (40 % and 34 % over 35°): 1.25 is the creep law's own limit, not the slope hillslopes stand at. Times NOT measured
+(the machine's load 57: Spotlight indexing the new files, Docker's machine running). Pictures: `/tmp/vd-b5/pairs/`. The
+owner's look and word owed: the law change amends B82 item 1 (1.25 at 16 m) and B96 item 1 (the creep, the channels).
+- 2026-10-14 (later) — B97 BUILT (the owner on the cure's six pictures: "Yes, I accept the cure"; ruling B97; built, linted on
+the three changed crates and all their targets, NO test run yet (B74), NOT committed). `fine::l2`: the 16 m law is the 128 m
+level's own — single-flow water, tan 35°, the rim's exits and the sea the only outlets (the creep, Freeman's sharing, the
+pinned channels and the bank-depth bed are gone), the half step from the second pass (rebuilt from full steps a divide's
+two sides kept capturing each other: the mountain tile still moved 170 m at pass 180), the settle law (1 m) within the bound
+(180); `L2_VERSION` 2 (only the 16 m tiles solve again); the client's near-piece bound reads tan 35° for both levels (the
+16 m bound at rung 0 1.76 → 0.98 m). THE BENCH WITH THE BUILT CODE: the hills tile settles in 53–76 passes (4.76 / 0.024 /
+0.000 % of the links over 35° / 45° / 63°, the steepest 51.3°); the mountain tile reaches the bound with its largest cell
+move 5 m and falling (18.57 / 1.146 / 0.000 %, the steepest 58.4°; the joins after the stitch 21 m at most). THE GAME'S OWN
+PATH (two headless logins in slot 22, the stores cloned from slot 52; no window): the planet solved again the 16 m tiles
+around each stand — at hull 19's valley 253 of 621 named in 21 minutes: 16.50 / 1.208 / 0.0126 % of the stored 16 m links
+over 35° / 45° / 63° (before: 7 % over 63°), a tile's largest detail 39.5 m at the median and 53.4 m at most (before: 477 /
+2 016 m), no tile over 100 m off today's ground (before: 589); at hull 17's hills 204 of 575: 3.86 / 0.029 / 0.0000 % (45
+links over 63°, all within 8 cells of a tile's rim). THE NEAR STEPS (`fine_steps` on the new tiles): at both stands every
+hand-over from rung 0 to rung 4 stands under the new bound (the valley's 1 → 2 m largest 0.11 m against 0.98; its 16 → 32 m
+29.6 m against 35.6 m; before 10.5 and 1 338 m); at rung 5 → 6 the valley's largest 91 m stands over the 71 m bound, as
+today's 128 m ground there does (76 m) — registered. THE SPEED, NOT MEASURED CLEANLY: on the shard a 16 m tile took 9–41 s
+(7 threads at the background class, the machine's load 20–57 with Spotlight indexing and Docker's machine running); on the
+bench 4.5–6.5 s on the hills and 10–16 s on the mountain (four at once, the load ~50) against B96's 3.7 s. OWED: the speed on
+a calm machine, the near-piece count (the headless client draws nothing), the tests, the owner's look in the window.
+- 2026-10-14 (later) — ★ THE OWNER'S LOOK ON THE B97 GROUND: "It looks amazing!" (the window in slot 22 at hull 19's valley,
+the walker on the new 16 m floor — 19.7 m under the old spawn, the new law cut the creek deeper — and hull 20 berthed 40 m
+away by `valley_hull`; hull 19's berth row in the planet's store stands 198 250 km from the centre, registered). MEASURED in
+the session: the loading screen went after ~80 s with 9 680 pieces wanted (the day before at the same valley: 34 232
+pieces, 3 min 45 s — the near pieces reach less far under tan 35°, and many tiles were stored); a 16 m tile further out took
+up to 107 s while the window ran (the solve threads below the window, B91). NEXT: the tests (the owner's word), the speed
+on a calm machine, then B5.

@@ -2069,8 +2069,8 @@ fn main() {
                                 "  the 16 m tile at node {nd:?}: {:.1} s{}",
                                 t0.elapsed().as_secs_f64(),
                                 t.as_ref().map_or(" — DID NOT SOLVE".to_owned(), |t| format!(
-                                    ", {} points, passes (warm, steady) {:?}, channel links / points {:?}, beds under the drawn ground mean / largest {:.2} / {:.2} m, the law's detail median / largest {:.2} / {:.2} m",
-                                    t.points, t.passes, t.channels, t.bed_cm[0] as f64 / 100.0, t.bed_cm[1] as f64 / 100.0, t.detail_cm[0] as f64 / 100.0, t.detail_cm[1] as f64 / 100.0
+                                    ", {} points, {} passes, the law's detail median / largest {:.2} / {:.2} m",
+                                    t.points, t.passes, t.detail_cm[0] as f64 / 100.0, t.detail_cm[1] as f64 / 100.0
                                 ))
                             );
                             t

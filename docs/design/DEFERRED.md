@@ -12198,6 +12198,28 @@ generation alone), so a body solves once per generation on a machine, not once p
   8 km ground (`artifact_boot`, `artifact_worker`, `solve_copy`'s control) ran 30 minutes and more at a tenth of a core
   in the unoptimised build: the solve thread lowers itself to macOS's "utility" class (B91). Not run in the test round;
   the cure (the class in a test build, or the tests' own solve thread) is owed before the next full suite.
+- 🟨 **THE 16 m LEVEL MADE WALLS AND NEEDLES ON STEEP GROUND — CURED BY B97, BUILT 2026-10-14; THE OWNER'S LOOK GIVEN ("It
+  looks amazing!", the window at hull 19's valley: 9 680 pieces, the loading ~80 s against 34 232 and 3 min 45 s the day
+  before). Still owed: the speed on a calm machine and the tests.** The 16 m
+  law is the 128 m level's own (`fine::l2`: single-flow water, tan 35°, no pinned channels, the half step from the second
+  pass, the settle law within the bound), `L2_VERSION` 2 (only the 16 m tiles solve again), the client's near-piece bound
+  at tan 35° for both levels. The bench with the built code: the mountain tile 18.6 / 1.15 / 0.000 % of the links over 35° /
+  45° / 63° (the steepest 58.4°), the hills 4.8 / 0.024 / 0.000 % (51.3°); the hills settle in 53–76 passes, the mountain
+  reaches the bound (180) with its largest cell move 5 m and falling. THE GAME'S OWN PATH (headless logins, slot 22): the
+  valley's 253 new stored tiles 16.50 / 1.208 / 0.0126 % over 35° / 45° / 63° (the San Gabriel Mountains 17.6 / 2.80 /
+  0.069 %), no tile over 100 m off today's ground; the hills' 204 tiles 3.86 / 0.029 / 0.0000 % (Oregon 6.6 / 0.065 / 0 %);
+  every near hand-over (rungs 0–4) under the new bound. OWED: the speed on a calm machine (a 16 m tile 9–41 s on the shard
+  under a load of 20–57, against B96's 3.7 s on the bench), the near-piece count, the tests, the owner's look in the window.
+  The history before the cure: On the mountain tile
+  at hull 19's valley the law solved alone sinks its free ground 83–176 m under today's 128 m ground at the median (up to
+  ~1 km) while its channel points stay pinned at today's ground, so the channels stand as walls: 7.09 % of the 16 m links
+  over 63°, the steepest 89°, 589 of 621 stored tiles over 100 m off today's ground (hull 17's hills: 0.0015 %, the free
+  ground −11 m). And the steady form stops at pass 2 (a pass on an unchanged drainage repeats the last since B96 removed the
+  hold). B96's form holds only where the law agrees with today's ground at 128 m. The cure waits for the owner's word (B93
+  item 3); B5 (the 2–4 m level) waits for it. The status file, 2026-10-14 (later), holds the numbers. ★ THE CURE ROUND (the
+  same evening): the 128 m level's own law on the 16 m points (tan 35°, single-flow water, no fixed channel points, B96's
+  form kept) passes both stands against Earth's 1 m lidar at 16 m (the mountain 0.046 % over 63° against the San Gabriel
+  Mountains' 0.069 %; the hills 5.47 % over 35° against Oregon's 6.6 %); the owner's look and word owed before the build.
 - 🟥 **THE 16 m TILES ARE NEVER ACKNOWLEDGED.** `ClientControlMsg::FineHeld` names 128 m tiles only (its tile carries no
   level), so after a shed send the gateway sends a client's 16 m tiles again — bytes only; the client drops what it holds.
   The cure reshapes the message (a level in its tile): an SL6 ask.
