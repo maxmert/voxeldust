@@ -867,3 +867,130 @@ pub fn solve_l2(
         ],
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fine::l1::{TILE_NODES, TileKey, solve_l1};
+    use crate::fine::level::{FineLevel, LevelGeom};
+    use crate::fine::stitch::{Field, mean_levels};
+    use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_solve_words};
+    use crate::solve::{Schedule, SolveWords};
+
+    /// ★ ONE 16 m TILE OF THE WET MOON, END TO END (ruling B96). The 16 m node at the corner where four 128 m tiles meet
+    /// — (NegX, 6 … 7, 0 … 1), beside the tile the 128 m test's rule picks — whose flow (three nodes each way, and the
+    /// 128 m curve's stencil a sample or two past them) reads all four; each 128 m tile held as its own raw square and
+    /// that square's mean levels (the finish's stitch is the finish's own tests'; the shard holds the 3 × 3 finished tiles
+    /// around a 16 m tile for the same reach). With none held the 16 m tile does not solve; with them it solves: the warm
+    /// start and the steady form within their passes, every raster cell given a height, and EVERY cell today's drawn
+    /// 128 m ground plus at most the law's largest detail (and the raster's rounding) — the 16 m level refines today's
+    /// ground and never departs from it by more than its own detail.
+    #[test]
+    fn the_wet_moon_16m_tile_solves_on_its_128m_ground() {
+        let moon = home_moon();
+        let words = SolveWords {
+            water_km3: 3_000_000,
+            ..home_solve_words()
+        };
+        let lattice = MacroLattice::of(&moon).expect("a lattice");
+        let (state, facies, _) =
+            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
+        let climate =
+            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
+        let artifact = Artifact::of(&state, &facies, &climate, true);
+        let node = TileKey {
+            face: Face::NegX,
+            tx: 7 * TILE_NODES,
+            ty: TILE_NODES,
+        };
+        let mut book =
+            FineBook::new(FineLevel::L1, &moon, &lattice, artifact.sea_m).expect("a 128 m book");
+        assert_eq!(
+            solve_l2(&moon, &lattice, &artifact, &book, node).map(|t| t.side),
+            None
+        );
+        // The four 128 m tiles around the node's corner, solved side by side, each held as its own square.
+        let geom = LevelGeom::of(FineLevel::L1, &moon, &lattice).expect("the 128 m level");
+        let keys: Vec<TileKey> = [(6, 0), (7, 0), (6, 1), (7, 1)]
+            .into_iter()
+            .map(|(tx, ty)| TileKey {
+                face: node.face,
+                tx,
+                ty,
+            })
+            .collect();
+        let squares: Vec<(TileKey, Vec<Vec<i32>>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = keys
+                .iter()
+                .map(|&k| {
+                    let (moon, lattice, artifact) = (&moon, &lattice, &artifact);
+                    scope.spawn(move || {
+                        let t = solve_l1(moon, lattice, artifact, k).expect("a 128 m tile solves");
+                        let (w, m, n) = (t.side, geom.margin as usize, geom.side() as usize);
+                        let v: Vec<i32> = (0..n)
+                            .flat_map(|y| t.quarters[(m + y) * w + m..(m + y) * w + m + n].to_vec())
+                            .collect();
+                        let square = Field {
+                            gx0: i64::from(k.tx) * geom.side(),
+                            gy0: i64::from(k.ty) * geom.side(),
+                            w: n,
+                            h: n,
+                            v,
+                        };
+                        let mut levels = vec![square.v.clone()];
+                        levels.extend(
+                            mean_levels(
+                                &square,
+                                square.gx0,
+                                square.gy0,
+                                n,
+                                FineLevel::L1.mean_levels(),
+                            )
+                            .expect("the mean levels"),
+                        );
+                        (k, levels)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a 128 m solve"))
+                .collect()
+        });
+        for (k, levels) in squares {
+            assert!(book.insert(k, levels));
+        }
+        let tile = solve_l2(&moon, &lattice, &artifact, &book, node).expect("the 16 m tile solves");
+        // The tile (one node) and half its buffer each side, every cell given a height.
+        let shift4 = cells_per_node_shift(&moon, &lattice, L2_RUNG).expect("nests") as i32;
+        let half = (1i32 << shift4) >> (BUFFER_SHIFT + 1);
+        let side = (1usize << shift4) + 2 * half as usize;
+        assert_eq!((tile.side, tile.quarters.len()), (side, side * side));
+        assert_eq!(tile.quarters.iter().filter(|&&q| q == i32::MIN).count(), 0);
+        assert!(tile.passes[0] <= WARM_PASSES, "{:?}", tile.passes);
+        assert!(
+            (1..=STEADY_BOUND).contains(&tile.passes[1]),
+            "{:?}",
+            tile.passes
+        );
+        assert!(tile.detail_cm[1] > 0, "{:?}", tile.detail_cm);
+        // Every cell today's drawn ground plus at most the largest detail (its centimetre's floor, and the rounding).
+        let sea = Gf::from_i32(i32::from(artifact.sea_m));
+        let bound = Gf::from_i64((tile.detail_cm[1] + 1) * 4) / Gf::from_i64(100) + Gf::HALF;
+        let (i0, j0) = ((node.tx << shift4) - half, (node.ty << shift4) - half);
+        let mut beyond = 0usize;
+        for b in 0..side {
+            for a in 0..side {
+                let cell = CellId {
+                    face: node.face.index(),
+                    i: i0 + a as i32,
+                    j: j0 + b as i32,
+                };
+                let curve = drawn(&book, &cell, L2_RUNG, sea).expect("today's ground is held");
+                let q = Gf::from_i64(i64::from(tile.quarters[b * side + a]));
+                beyond += usize::from((q - curve * Gf::from_i64(4)).abs() > bound);
+            }
+        }
+        assert_eq!(beyond, 0);
+    }
+}

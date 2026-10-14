@@ -214,13 +214,9 @@ pub fn triangulate_on_face(pts: &[Dir], face: vd_seed::bend::Face, shift: u32) -
     build(&plane, Space::Plane)
 }
 
-/// The triangulation of `pts` read in `space` (see [`triangulate`] and [`triangulate_on_face`]).
-fn build(pts: &[Dir], space: Space) -> Option<Graph> {
-    let n = pts.len();
-    if n < 3 {
-        return None;
-    }
-    // The mean direction and a tangent frame there (integer cross products, normalised).
+/// The mean direction of `pts` on the sphere and a tangent frame there (integer cross products, normalised): the index of
+/// its least-aligned coordinate, and the three far vertices 30° from it, 120° apart.
+fn sphere_frame(pts: &[Dir]) -> (usize, [Dir; 3]) {
     let mut sum = [0i128; 3];
     for p in pts {
         let r = raw(p);
@@ -262,9 +258,26 @@ fn build(pts: &[Dir], space: Space) -> Option<Graph> {
         ])
     };
     let one = 1i128 << DIR_BITS;
+    (least, [far(one, 0), far(-half, q), far(-half, -q)])
+}
+
+/// The triangulation of `pts` read in `space` (see [`triangulate`] and [`triangulate_on_face`]).
+fn build(pts: &[Dir], space: Space) -> Option<Graph> {
+    let n = pts.len();
+    if n < 3 {
+        return None;
+    }
     let mut all: Vec<Dir> = pts.to_vec();
-    match space {
-        Space::Sphere => all.extend([far(one, 0), far(-half, q), far(-half, -q)]),
+    // ★ The insertion order reads the points' two least-aligned coordinates. On the sphere they come from the mean
+    // direction, which also places the three far vertices; on the plane the third word is nought, so it is the least
+    // aligned — and the mean direction is never taken there (a tile at a face's centre sums to nearly nothing, and its
+    // normalising never ends).
+    let least = match space {
+        Space::Sphere => {
+            let (least, far) = sphere_frame(pts);
+            all.extend(far);
+            least
+        }
         Space::Plane => {
             // A triangle around the points' box: twenty half-sides out each way below, twenty above.
             let (mut lo, mut hi) = ([i64::MAX; 2], [i64::MIN; 2]);
@@ -285,8 +298,9 @@ fn build(pts: &[Dir], space: Space) -> Option<Graph> {
                 at(cx + 20 * h, cy - 10 * h),
                 at(cx, cy + 20 * h),
             ]);
+            2
         }
-    }
+    };
     let (a, b, c) = (n as u32, n as u32 + 1, n as u32 + 2);
     let first = if orient_in(space, &all[a as usize], &all[b as usize], &all[c as usize]) > 0 {
         [a, b, c]
@@ -561,12 +575,15 @@ mod tests {
 
     /// ★ THE TRIANGULATION ON A FACE'S PLANE (the 16 m level): on an even and an odd face every triangle turns
     /// counter-clockwise seen from outside the sphere and its circle holds no other point; a shift reads the words as the
-    /// same points shifted; fewer than three points have no graph.
+    /// same points shifted; fewer than three points have no graph. The words are read over 2⁸ as the 16 m tile reads them:
+    /// the in-circle test multiplies four coordinate differences and the far triangle stands 20 half-sides out, so a
+    /// tile's coordinates must stay under about 2²⁷ — a 16 m tile's reach is 2²³ over 2⁸ (MEASURED: this grid read
+    /// unshifted, its coordinates 2³¹, overflows the 128-bit product).
     #[test]
     fn the_plane_triangulation_is_delaunay_and_turns_as_the_sphere_on_every_face() {
         for face in [Face::PosX, Face::NegY] {
             let pts = grid_on(face);
-            let graph = triangulate_on_face(&pts, face, 0).expect("a graph");
+            let graph = triangulate_on_face(&pts, face, 8).expect("a graph");
             assert!(graph.tris.len() > 200, "{}", graph.tris.len());
             let f = face.index();
             let axis = usize::from(f >> 1);
@@ -574,7 +591,10 @@ mod tests {
             if f & 1 == 1 {
                 core::mem::swap(&mut u, &mut v);
             }
-            let plane: Vec<Dir> = pts.iter().map(|p| [p[u], p[v], Gi::ZERO]).collect();
+            let plane: Vec<Dir> = pts
+                .iter()
+                .map(|p| [Gi::new(p[u].raw() >> 8), Gi::new(p[v].raw() >> 8), Gi::ZERO])
+                .collect();
             for t in &graph.tris {
                 let [a, b, c] = t.map(|k| k as usize);
                 assert!(orient(&pts[a], &pts[b], &pts[c]) > 0, "{face:?} {t:?}");
@@ -595,13 +615,10 @@ mod tests {
                 .iter()
                 .map(|p| p.map(|w| Gi::new(w.raw() >> 8)))
                 .collect();
-            assert_eq!(
-                triangulate_on_face(&pts, face, 8),
-                triangulate_on_face(&down, face, 0)
-            );
+            assert_eq!(Some(graph), triangulate_on_face(&down, face, 0));
         }
         assert_eq!(
-            triangulate_on_face(&grid_on(Face::PosX)[..2], Face::PosX, 0),
+            triangulate_on_face(&grid_on(Face::PosX)[..2], Face::PosX, 8),
             None
         );
     }

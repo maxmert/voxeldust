@@ -1294,7 +1294,32 @@ mod tests {
         );
         assert!(view.is_coarse(&lattice, at(0, 100)));
         assert!(ready(view.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).is_some());
-        assert!(ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(7, 1))).is_some());
+        // A rung over 6 is ready on the 128 m ground alone: the chunk (1, 1) at rung 7 reads the samples 59 … 127 both
+        // ways, the 128 m tiles (1 … 3, 1 … 3), all sent now.
+        for ty in 1..=3u32 {
+            for tx in 1..=3u32 {
+                rx.accept(BulkMsg::FineTilePart {
+                    realm: wet,
+                    level: 1,
+                    face: 2,
+                    tx,
+                    ty,
+                    part: 0,
+                    parts: 1,
+                    bytes: record.clone(),
+                });
+            }
+        }
+        let cache = rx.book().get(wet).cloned().expect("a cache");
+        let r7 = ChunkKey {
+            face,
+            rung: 7,
+            x: 1,
+            y: 1,
+            z: 0,
+        };
+        assert!(ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), r7)).is_some());
+        assert!(!cache.is_coarse(&lattice, r7));
         // The 16 m tile under the chunk (samples 384 … 394 at rung 4: the tile (12, 12) alone) lands; the chunk is ready
         // on it, and reads the 16 m ground.
         let finer = |tx: u32, bytes: &[u8]| BulkMsg::FineTilePart {
@@ -1343,11 +1368,17 @@ mod tests {
             ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(13, 0))).expect("ready");
         assert!(Arc::ptr_eq(&kept, &inner));
         assert!(ready(cache.with_fine(FieldPick::Waiting, at(0, 100))).is_none());
-        // The rung's field reads the fine ground too, at rungs it serves.
+        // The rung's field reads the fine ground too, at rungs it serves: the 16 m ground where its tile is held (the cell
+        // 778 at rung 3 lies on the 16 m tile (12, 12)), the 128 m ground where it is not (the cell 1 200: the 16 m tile
+        // (18, 18) is not here, the 128 m tile (2, 2) is).
         let near = cache.field_at_rung(&lattice, 3).expect("a field");
         assert_eq!(
             near.fine_z(face, 3, 3, 778, 778),
-            cache.fine().expect("a book").z(face, 3, 3, 778, 778)
+            cache.finer().expect("a 16 m book").z(face, 3, 3, 778, 778)
+        );
+        assert_eq!(
+            near.fine_z(face, 3, 3, 1_200, 1_200),
+            cache.fine().expect("a book").z(face, 3, 3, 1_200, 1_200)
         );
         // A dry realm's chunk stands on its pick, with or without a book.
         let dry = RealmId::Planet(78);

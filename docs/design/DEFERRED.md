@@ -12186,8 +12186,18 @@ generation alone), so a body solves once per generation on a machine, not once p
   (`fine::l2`, today's 128 m ground plus the law's finer detail), the planar triangulation on the cube face, the shard's fine
   work by level, the gateway's needs per level, the client's second book and its COARSE state. Compile- and lint-clean;
   no test run yet (B74).
-- 🟥 **THE 16 m SOLVE HAS NO UNIT TEST.** It needs a finished 128 m tile around it (nine 128 m solves first); HR5's 100 %
-  for `fine::l2` and the new branches elsewhere are owed with the coverage run, on the owner's word.
+- 🟨 **THE 16 m SOLVE'S UNIT TEST (2026-10-14).** Written and passing: a 16 m node of the wet moon where four held 128 m
+  tiles meet solves, and every one of its cells stands within the law's largest detail of today's drawn 128 m ground; with
+  no 128 m tile held it does not solve. HR5's 100 % for `fine::l2` and the new branches elsewhere are owed with the
+  coverage run, on the owner's word.
+- 🟩 **THE PLANAR TRIANGULATION COULD HANG (FOUND AND CURED 2026-10-14).** The triangulation took the points' mean
+  direction on the plane too, where the third word is nought: a set whose sum is nearly nothing (a 16 m tile at a cube
+  face's centre) never finished normalising it. The mean direction now serves the sphere alone (its arithmetic unchanged,
+  so the stored 128 m tiles stand); the plane takes its third word as the least aligned.
+- 🟥 **THE SOLVE TESTS CRAWL AT THE UTILITY CLASS (MEASURED 2026-10-14).** The bins crate's tests that solve the moon's
+  8 km ground (`artifact_boot`, `artifact_worker`, `solve_copy`'s control) ran 30 minutes and more at a tenth of a core
+  in the unoptimised build: the solve thread lowers itself to macOS's "utility" class (B91). Not run in the test round;
+  the cure (the class in a test build, or the tests' own solve thread) is owed before the next full suite.
 - 🟥 **THE 16 m TILES ARE NEVER ACKNOWLEDGED.** `ClientControlMsg::FineHeld` names 128 m tiles only (its tile carries no
   level), so after a shed send the gateway sends a client's 16 m tiles again — bytes only; the client drops what it holds.
   The cure reshapes the message (a level in its tile): an SL6 ask.

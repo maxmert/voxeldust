@@ -233,7 +233,14 @@ fn the_first_statement_stands_every_buried_or_touching_parked_child_on_its_groun
         .iter()
         .find(|(f, _)| *f == frame_for_realm(PAD, None).expect("a frame"))
         .expect("the pad's row");
-    close(pad_row.1.origin, DVec3::new(0.0, 0.0, 1_003.0));
+    // The row states a lattice cell and an offset inside it: the landed stand authors the centre again by its metres
+    // ([`RealmRegions::fold_lift`]), so the whole position is the two together.
+    let tier = world.resource::<RealmRegions>().own_frame(PLANET).tier();
+    close(
+        vd_core::pose::LatticePos::at(pad_row.1.origin_cell, pad_row.1.origin)
+            .delta_m(vd_core::pose::LatticePos::ORIGIN, tier),
+        DVec3::new(0.0, 0.0, 1_003.0),
+    );
     for (child, at, why) in [
         (HIGH, DVec3::new(1_500.0, 0.0, 0.0), "500 m up it hovers"),
         (CORE, DVec3::ZERO, "at the centre no ground is under it"),
@@ -271,11 +278,8 @@ fn a_standing_child_follows_its_ground_over_the_ramp_and_a_hovering_one_moves_on
     close(place(&world, HULL), start);
     tick(&mut world, 205);
     close(place(&world, HULL), start + DVec3::new(0.0, 5.0, 0.0));
-    assert_eq!(
-        lift(&world, HULL),
-        DVec3::new(0.0, 5.0, 0.0),
-        "mid-ramp the lift carries it"
-    );
+    // Mid-ramp the lift carries it (a float sum: within the stand tests' micrometre).
+    close(lift(&world, HULL), DVec3::new(0.0, 5.0, 0.0));
     tick(&mut world, 210);
     close(place(&world, HULL), start + DVec3::new(0.0, 10.0, 0.0));
     assert_eq!(lift(&world, HULL), DVec3::ZERO, "landed");
@@ -300,7 +304,8 @@ fn a_standing_child_follows_its_ground_over_the_ramp_and_a_hovering_one_moves_on
     tick(&mut world, 600);
     tick(&mut world, 610);
     assert!(stands(&world, DARK));
-    let need = GROUND_R + HULL_HALF.y + STAND_CLEARANCE_M;
+    // Parked in the planet's own axes at −Z, the dark hull's length lies along its up: it stands on its half length.
+    let need = GROUND_R + HULL_HALF.z + STAND_CLEARANCE_M;
     close(place(&world, DARK), DVec3::new(0.0, 0.0, -need));
     // A patch nobody stands over changes: nothing is read.
     sphere.changed.lock().expect("the ground's lock").push(99);

@@ -1792,3 +1792,14 @@ the 16 m law cuts a channel 10–13 m deep into the floor (the spawn moved down 
 warp by accident (adopted by the star system), hull 19 berthed broadside 40 m away on the channel's bank
 (`examples/valley_hull.rs`); the loading 3 min 45 s, 34 232 pieces; the owner: "Looks ok". OWED: the hand-over step
 measurement, the tests, the login race and the store's size (DEFERRED D-TERRAIN-12).
+- 2026-10-14 (later) — THE TEST ROUND (the owner: "Agree with your recommendations": the tests, the 16 m solve's own
+test, the old worktree removed, then the 2–4 m level in a new session in the main checkout). The unit tests of the six
+crates the 16 m level changed, run in the main checkout: the gateway's 283 passed at once; seven failures were found and
+cured — three in today's tests (the client's rung-7 chunk now holds the nine tiles it reads, and a rung's field reads the
+16 m ground where its tile is held; the triangulation test reads the words over 2⁸ as the 16 m tile does; the new 16 m
+solve test stands its node where four held 128 m tiles meet), ONE REAL DEFECT (the planar triangulation hung on a point
+set whose sum is nearly nothing — a 16 m tile at a cube face's centre; cured, DEFERRED D-TERRAIN-12) and three older test
+defects from the speed step and the parked hulls' stand (the band table's frame rows, an exact float, a row's cell and
+offset read apart, a hull lying along its up). Not run: the bins crate's three tests that solve the moon's 8 km ground
+crawl at the utility thread class (registered). NEXT: B5, the 2–4 m level, beginning with its cost and the near pieces'
+measurement (`examples/fine_steps.rs`).

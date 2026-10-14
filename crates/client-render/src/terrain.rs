@@ -5265,7 +5265,7 @@ mod band_table_tests {
 
     /// The row `index` of the table's rows (this frame's from 0, last frame's from the count).
     fn row(bytes: &[u8], index: usize) -> [f32; 4] {
-        let at = BAND_TABLE_STEP_AT + 48 + 16 * index;
+        let at = BAND_TABLE_FRAME_AT + 32 + 16 * index;
         [0, 4, 8, 12].map(|k| value(bytes, at + k))
     }
 
@@ -5289,7 +5289,7 @@ mod band_table_tests {
         let second = vec![[9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]];
         let mut table = BandTableWords::new([100, 512, 0, 0], first.clone());
         let b = &table.bytes;
-        assert_eq!(b.len(), BAND_TABLE_STEP_AT + 48 + 16 * 4 + 16);
+        assert_eq!(b.len(), BAND_TABLE_FRAME_AT + 32 + 16 * 4 + 16);
         assert_eq!(row(b, 4), [0.0; 4], "no snow line yet");
         assert_eq!([0, 4, 8, 12].map(|at| word(b, at)), [100, 512, 100, 2]);
         assert_eq!(step(b), RealmStep::IDENTITY.rows());
@@ -5330,7 +5330,7 @@ mod band_table_tests {
         table.fill([134, 512, 0, 0], three.clone());
         let b = &table.bytes;
         assert_eq!([0, 4, 8, 12].map(|at| word(b, at)), [134, 512, 117, 3]);
-        assert_eq!(b.len(), BAND_TABLE_STEP_AT + 48 + 16 * 6 + 16);
+        assert_eq!(b.len(), BAND_TABLE_FRAME_AT + 32 + 16 * 6 + 16);
         assert_eq!(row(b, 6), [4_000.0, -1_500.0, 900.0, 1.0]);
         assert_eq!((3..6).map(|i| row(b, i)).collect::<Vec<_>>(), three);
     }
