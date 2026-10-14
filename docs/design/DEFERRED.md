@@ -12179,3 +12179,39 @@ generation alone), so a body solves once per generation on a machine, not once p
   second login worked each time. Cause NOT MEASURED (the planet's boot with its stored tiles is a suspect).
 - 🟥 **LOWERING NEEDS NO GRAVITY YET, BUT A LANDED HULL IS NOT RE-STOOD.** A hull that flew and stopped is a drive state
   away from its parked place: it stands on nothing until the next boot re-plants it at its berth. Owed with the colliders.
+
+### D-TERRAIN-12 🟨 THE 16 m LEVEL IN THE GAME — built, what is still owed (rulings B95, B96, 2026-10-14)
+
+- 🟨 **BUILT, NOT RUN (2026-10-14).** The one tile machinery serves both levels (`vd_terrain::fine::level`): the 16 m solve
+  (`fine::l2`, today's 128 m ground plus the law's finer detail), the planar triangulation on the cube face, the shard's fine
+  work by level, the gateway's needs per level, the client's second book and its COARSE state. Compile- and lint-clean;
+  no test run yet (B74).
+- 🟥 **THE 16 m SOLVE HAS NO UNIT TEST.** It needs a finished 128 m tile around it (nine 128 m solves first); HR5's 100 %
+  for `fine::l2` and the new branches elsewhere are owed with the coverage run, on the owner's word.
+- 🟥 **THE 16 m TILES ARE NEVER ACKNOWLEDGED.** `ClientControlMsg::FineHeld` names 128 m tiles only (its tile carries no
+  level), so after a shed send the gateway sends a client's 16 m tiles again — bytes only; the client drops what it holds.
+  The cure reshapes the message (a level in its tile): an SL6 ask.
+- 🟥 **A COARSE CHUNK BESIDE A 16 m CHUNK.** Until the 16 m tiles land, a chunk built on the 128 m ground meets a neighbour
+  on the 16 m ground with the detail's step at their edge (the detail 2.2 m at the median, 25–29 m at most on the bench) —
+  the provisional state of B86 item 7's rough chunks, cured when the tiles land; send-ahead and the advance calculation
+  (B86 items 4 and 6) shorten it.
+- 🟥 **THE FRAME COST AND THE SOLVE'S PACE** with the 16 m level live (more chunks at rungs 0–6 rebuilt on landing; a 16 m
+  tile 3.7 s on one thread): unmeasured.
+- 🟥 **THE DISK CACHE AND THE ADVANCE CALCULATION** (B86 items 6–7) cover the 16 m level too.
+- 🟨 **THE PER-FRAME UPGRADE CHECK (2026-10-14).** Every frame the client asked every chunk on a coarser ground again
+  whether its tiles had landed (the field choice rebuilt for the chunk and its parents, twice). With the 16 m level many
+  thousands of chunks wait on the 128 m ground, and the first window on the 16 m level ran 0.5–3 s a frame with one frame
+  of 57 s (52.8 s of terrain work) on an overloaded machine. BUILT: a waiting chunk is asked again only when its realm's
+  artifact changed (`ChunkLane::waiting_at`). The 57 s frame's cause is NOT MEASURED (a profile owed).
+- 🟥 **THE NEAR PIECES ON THE 16 m GROUND.** The detail rule reads the 16 m law's steepest slope (1.25) on 16 m cells, so the
+  1–8 m rungs reach about 14 times farther than on the 128 m ground: 36 538 pieces at hull 17 against 9 982 the day before,
+  the login's loading 2 min 27 s against 2 min 15 s, the worst frame after loading 136 ms. The owner's choice (2026-10-14):
+  keep it, look, then measure if slow — the measurement of the real hand-over steps on the stored 16 m tiles
+  (`examples/fine_steps.rs`, read-only) is owed.
+- 🟥 **A LOGIN RIGHT AFTER THE SAME CLIENT'S SESSION ENDED IS NEVER TAKEN (MEASURED 2026-10-14).** A window started one second
+  after a headless client of the same account and node was stopped: the gateway ended the old session at that moment and
+  logged nothing for the new one; the window showed its authentication screen for 8 minutes and the shards shut down.
+  Cause NOT MEASURED (the suspect: the old connection's end crossing the new Hello). Waiting 10 s between the two avoids it.
+- 🟥 **THE HOME PLANET'S STORE IS 12.9 GB (MEASURED 2026-10-14)** after the logins at hull 17's hills and the valley (both
+  fine levels with their far copies). What fills it is NOT MEASURED; it bounds the server's disk and the player's disk cache
+  (B86 item 7).

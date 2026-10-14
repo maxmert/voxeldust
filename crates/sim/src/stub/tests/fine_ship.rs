@@ -20,7 +20,7 @@ const OTHER_GATEWAY: NodeId = NodeId(21);
 /// A level-nought part of the first tile: a quarter of a tick's pace, so four fill a tick.
 const LARGE: usize = FINE_BYTES_PER_TICK / 4;
 
-/// A stated provider of six levels: three tiles named under any direction off the centre — the first read at the level
+/// A stated provider of six levels (its tiles 128 m tiles, the fine level 1): three tiles named under any direction off the centre — the first read at the level
 /// `need0` (nought unless told), its level nought in ten [`LARGE`] parts and every other level in one small part; the
 /// second read at level 2, one small part a level; the third not finished. It counts its ticks and the ticks that held a
 /// store, keeps the tiles it was told to hold, and its first tile's parts vanish once told to. A part's first five bytes
@@ -44,9 +44,9 @@ impl FineTiles for Stated {
     fn want(&self, _dir: [f64; 3], radial_m: f64) -> Vec<(FineName, u8)> {
         assert!(radial_m > 0.0, "{radial_m}");
         vec![
-            ((2, 0, 0), self.need0.load(Ordering::SeqCst) as u8),
-            ((2, 1, 0), 2),
-            ((2, 2, 0), 0),
+            ((1, 2, 0, 0), self.need0.load(Ordering::SeqCst) as u8),
+            ((1, 2, 1, 0), 2),
+            ((1, 2, 2, 0), 0),
         ]
     }
     fn hold(&self, tiles: &[(FineName, u8)]) {
@@ -55,22 +55,23 @@ impl FineTiles for Stated {
             .expect("the held list")
             .extend(tiles.iter().map(|(tile, _)| *tile));
     }
-    fn levels(&self) -> u8 {
+    fn levels(&self, level: u8) -> u8 {
+        assert_eq!(level, 1, "the stated tiles are 128 m tiles");
         6
     }
     fn parts(&self, tile: FineName, lo: u8, hi: u8) -> Option<Arc<[crate::io::Bytes]>> {
         let count = match tile {
-            (2, 0, 0) if !self.vanish.load(Ordering::SeqCst) => {
+            (1, 2, 0, 0) if !self.vanish.load(Ordering::SeqCst) => {
                 if lo == 0 {
                     10u8
                 } else {
                     1
                 }
             }
-            (2, 1, 0) => 1,
+            (1, 2, 1, 0) => 1,
             _ => return None,
         };
-        let size = if (tile == (2, 0, 0)) & (lo == 0) {
+        let size = if (tile == (1, 2, 0, 0)) & (lo == 0) {
             LARGE
         } else {
             5
@@ -78,7 +79,7 @@ impl FineTiles for Stated {
         Some(
             (0..count)
                 .map(|k| {
-                    let mut part = vec![0xF0, tile.1 as u8, k, lo, hi];
+                    let mut part = vec![0xF0, tile.2 as u8, k, lo, hi];
                     part.resize(size, 0);
                     crate::io::bytes(part)
                 })
@@ -197,7 +198,7 @@ fn a_view_is_answered_by_distance_one_level_a_record_the_coarsest_first() {
     );
     assert_eq!(
         rig.world.resource::<ArtifactWants>().2[&GATEWAY].current,
-        Some(((2, 0, 0), 0, 4))
+        Some(((1, 2, 0, 0), 0, 4))
     );
     let out = bulks(&rig.tick(vec![]), &cache);
     assert_eq!(
@@ -226,7 +227,7 @@ fn a_view_is_answered_by_distance_one_level_a_record_the_coarsest_first() {
                 .iter()
                 .map(|(t, l)| (*t, *l))
                 .collect::<Vec<_>>(),
-            vec![((2, 0, 0), 0), ((2, 1, 0), 2)]
+            vec![((1, 2, 0, 0), 0), ((1, 2, 1, 0), 2)]
         );
         assert_eq!(record.current, None);
     }
@@ -257,7 +258,7 @@ fn a_view_is_answered_by_distance_one_level_a_record_the_coarsest_first() {
     let _ = rig.tick(vec![want(Some(1_000.0))]);
     assert_eq!(
         rig.world.resource::<ArtifactWants>().2[&GATEWAY].current,
-        Some(((2, 0, 0), 0, 4))
+        Some(((1, 2, 0, 0), 0, 4))
     );
     vanish.store(true, Ordering::SeqCst);
     assert_eq!(
@@ -301,7 +302,7 @@ fn a_gateways_views_are_answered_to_its_realm_cache_and_lapse_with_the_keep_aliv
     // Between beats the named tiles are held as reasons; the answer goes on.
     let out = bulks(&at_next_tick(&mut rig, vec![]), &cache);
     assert_eq!((out.len(), out[0].clone()), (4, vec![0xF0, 0, 4, 0, 1]));
-    assert!(held.lock().expect("the held list").contains(&(2, 0, 0)));
+    assert!(held.lock().expect("the held list").contains(&(1, 2, 0, 0)));
     // The views of a new beat replace the last's; the same tiles add nothing new.
     let _ = at_next_tick(&mut rig, vec![want(Some(2_000.0)), want(Some(2_500.0))]);
     assert_eq!(

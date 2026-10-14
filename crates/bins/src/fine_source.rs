@@ -15,9 +15,13 @@
 //! - **The shard's own book** holds the finished tiles of its reasons, decoded, for its own ground read; what no reason
 //!   names leaves memory (it stays in the store).
 //!
+//! - **Two levels, one machinery** (ruling B95): every map is keyed by the level and the tile; a 16 m tile is solved from
+//!   the finished 128 m tiles this provider holds (its book), and only once the 3 × 3 block of 128 m tiles around its
+//!   node is finished, so its solve never reads a hole.
+//!
 //! **Example.** A hull lands on the home planet's belt: the planet's shard names the 128 m tiles within its reach, the
 //! workers read the stored ones and solve the rest nearest first, each tile finishes once its eight neighbours are raw,
-//! and the finished record goes to the pilot in about thirteen parts.
+//! and the finished record goes to the pilot in about thirteen parts; the 16 m tiles under the hull follow from them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,11 +37,13 @@ use vd_sim::stub::fine_ship::{FineName, FineTiles, NONE_HELD};
 use vd_terrain::BodyDefinition;
 use vd_terrain::artifact::{Artifact, fine_needs};
 use vd_terrain::fine::finish::block_keys;
-use vd_terrain::fine::l1::{L1_RUNG, TileKey, cells_per_node_shift, solve_l1};
-use vd_terrain::fine::read::{FineBook, MEAN_LEVELS};
+use vd_terrain::fine::l1::{TileKey, solve_l1};
+use vd_terrain::fine::l2::solve_l2;
+use vd_terrain::fine::level::{FineLevel, LevelGeom};
+use vd_terrain::fine::read::FineBook;
 use vd_terrain::fine::stitch::Field;
 use vd_terrain::fine::tile::{
-    decode_levels, decode_raw, encode_levels, encode_raw, finish, input_word, range_record,
+    decode_levels, decode_raw, encode_levels, encode_raw, finish, input_word_of, range_record,
     raw_field,
 };
 use vd_terrain::macro_lattice::MacroLattice;
@@ -46,66 +52,87 @@ use vd_wire::channels::BulkMsg;
 /// The 128 m level's number on the wire (`BulkMsg::FineTilePart::level`).
 pub const LEVEL_L1: u8 = 1;
 
+/// A tile of a level: the key every map of the work holds.
+pub type LKey = (FineLevel, TileKey);
+
 /// A finish's nine raw fields with their tiles (NW … SE; none past a cube corner).
 type Block = Box<[Option<(TileKey, Arc<Field>)>; 9]>;
 
 /// One piece of work.
 enum Job {
-    /// Solve a raw tile.
-    Solve(TileKey),
+    /// Solve a raw tile (a 16 m tile with the finished 128 m book it refines).
+    Solve(LKey, Option<Arc<FineBook>>),
     /// Read a stored raw record back.
-    LoadRaw(TileKey, Vec<u8>),
+    LoadRaw(LKey, Vec<u8>),
     /// Finish a tile from its nine raw fields (NW … SE; none past a cube corner).
-    Finish(TileKey, Block),
+    Finish(LKey, Block),
     /// Read a stored finished record back.
-    LoadFinished(TileKey, Vec<u8>),
+    LoadFinished(LKey, Vec<u8>),
 }
 
 /// One answer: a raw field (and its record when freshly solved, to store), or a finished record and its levels (and
 /// whether to store it).
 enum Answer {
-    Raw(TileKey, Option<Arc<Field>>, Option<Vec<u8>>),
-    Finished(TileKey, Option<(Vec<u8>, Vec<Vec<i32>>)>, bool),
+    Raw(LKey, Option<Arc<Field>>, Option<Vec<u8>>),
+    Finished(LKey, Option<(Vec<u8>, Vec<Vec<i32>>)>, bool),
 }
 
-/// What a worker reads: the body, its lattice, its artifact, and the level's numbers.
+/// What a worker reads: the body, its lattice, its artifact, and each level's numbers.
 struct Ctx {
     body: BodyDefinition,
     lattice: MacroLattice,
     artifact: Arc<Artifact>,
-    /// Rung 7's cells to a node, as a shift.
-    shift: u32,
-    /// A tile's side in rung-7 cells, as a shift.
-    ts: u32,
-    /// Rung 7's cells along a face's edge.
-    n7: i32,
+    /// The 128 m level's numbers and the 16 m level's.
+    geoms: [LevelGeom; 2],
+}
+
+impl Ctx {
+    fn geom(&self, level: FineLevel) -> LevelGeom {
+        match level {
+            FineLevel::L1 => self.geoms[0],
+            FineLevel::L2 => self.geoms[1],
+        }
+    }
 }
 
 /// ★ ONE JOB'S WORK, the same on any thread and any host.
 fn work(ctx: &Ctx, job: Job) -> Answer {
     match job {
-        Job::Solve(key) => {
-            let raw = solve_l1(&ctx.body, &ctx.lattice, &ctx.artifact, key)
-                .map(|t| raw_field(key, t, ctx.shift));
-            let record = raw.as_ref().and_then(|f| encode_raw(f, ctx.shift));
-            Answer::Raw(key, raw.map(Arc::new), record)
+        Job::Solve(lk @ (level, key), book) => {
+            let geom = ctx.geom(level);
+            let raster = match (level, book) {
+                (FineLevel::L1, _) => solve_l1(&ctx.body, &ctx.lattice, &ctx.artifact, key)
+                    .map(|t| (t.side, t.quarters)),
+                (FineLevel::L2, Some(book)) => {
+                    solve_l2(&ctx.body, &ctx.lattice, &ctx.artifact, &book, key)
+                        .map(|t| (t.side, t.quarters))
+                }
+                (FineLevel::L2, None) => None,
+            };
+            let raw = raster.map(|(side, quarters)| raw_field(key, geom, side, quarters));
+            let record = raw.as_ref().and_then(|f| encode_raw(f, geom.shift));
+            Answer::Raw(lk, raw.map(Arc::new), record)
         }
-        Job::LoadRaw(key, bytes) => {
-            Answer::Raw(key, decode_raw(&bytes, key, ctx.n7).map(Arc::new), None)
-        }
-        Job::Finish(key, block) => {
+        Job::LoadRaw(lk @ (level, key), bytes) => Answer::Raw(
+            lk,
+            decode_raw(&bytes, key, ctx.geom(level)).map(Arc::new),
+            None,
+        ),
+        Job::Finish(lk @ (level, _), block) => {
+            let geom = ctx.geom(level);
             let slots: [Option<(TileKey, &Field)>; 9] =
                 std::array::from_fn(|k| block[k].as_ref().map(|(t, f)| (*t, &**f)));
-            let levels = finish(slots, ctx.shift, ctx.n7);
+            let levels = finish(slots, geom);
             let out = levels
-                .and_then(|levels| encode_levels(&levels, ctx.ts).map(|record| (record, levels)));
-            Answer::Finished(key, out, true)
+                .and_then(|levels| encode_levels(&levels, geom.ts).map(|record| (record, levels)));
+            Answer::Finished(lk, out, true)
         }
-        Job::LoadFinished(key, bytes) => {
-            let levels = decode_levels(&bytes)
-                .filter(|(ts, _)| *ts == ctx.ts)
+        Job::LoadFinished(lk @ (level, _), bytes) => {
+            let ts = ctx.geom(level).ts;
+            let levels = decode_levels(&bytes, level)
+                .filter(|(t, _)| *t == ts)
                 .map(|(_, levels)| levels);
-            Answer::Finished(key, levels.map(|levels| (bytes, levels)), false)
+            Answer::Finished(lk, levels.map(|levels| (bytes, levels)), false)
         }
     }
 }
@@ -139,7 +166,7 @@ pub struct FineMeter {
 /// [`work`], timed into `meter` by the job's kind.
 fn timed_work(ctx: &Ctx, job: Job, meter: &FineMeter) -> Answer {
     let (done, nanos) = match &job {
-        Job::Solve(_) => (&meter.raw_solved, Some(&meter.raw_solve_nanos)),
+        Job::Solve(..) => (&meter.raw_solved, Some(&meter.raw_solve_nanos)),
         Job::LoadRaw(..) => (&meter.raw_loaded, None),
         Job::Finish(..) => (&meter.finished_made, Some(&meter.finish_nanos)),
         Job::LoadFinished(..) => (&meter.finished_loaded, None),
@@ -171,30 +198,40 @@ struct State {
     pool: Pool,
     /// Held raw fields, finished records, their levels' wire parts as sessions asked for them (by the first level and the
     /// level past the last), and the shard's own book of finished levels.
-    raw: BTreeMap<TileKey, Arc<Field>>,
-    finished: BTreeMap<TileKey, Arc<Vec<u8>>>,
-    wire: BTreeMap<(TileKey, u8, u8), Arc<[Bytes]>>,
-    book: Arc<FineBook>,
-    /// The tiles that joined or left the book since the realm's ground last read it (ruling B81 Q6).
-    book_changed: BTreeSet<TileKey>,
+    raw: BTreeMap<LKey, Arc<Field>>,
+    finished: BTreeMap<LKey, Arc<Vec<u8>>>,
+    wire: BTreeMap<(LKey, u8, u8), Arc<[Bytes]>>,
+    /// The 128 m book and the 16 m book.
+    books: [Arc<FineBook>; 2],
+    /// The tiles that joined or left a book since the realm's ground last read it (ruling B81 Q6).
+    book_changed: BTreeSet<LKey>,
     /// Work in flight: `(tile, finished?)`.
-    in_flight: BTreeSet<(TileKey, bool)>,
+    in_flight: BTreeSet<(LKey, bool)>,
     /// Records the store does not hold: `(tile, finished?)`.
-    unstored: BTreeSet<(TileKey, bool)>,
+    unstored: BTreeSet<(LKey, bool)>,
     /// Tiles whose solve or finish answered nothing: `(tile, finished?)`.
-    refused: BTreeSet<(TileKey, bool)>,
+    refused: BTreeSet<(LKey, bool)>,
     /// This tick's lists, by occupant, each tile with whether its view reads it WHOLE (level 0), and the merged order of
     /// the last with the tiles some view reads whole — served first; a far copy only when none of them waits (ruling B92).
-    named: Vec<Vec<(TileKey, bool)>>,
-    reasons: Vec<TileKey>,
-    whole: BTreeSet<TileKey>,
+    named: Vec<Vec<(LKey, bool)>>,
+    reasons: Vec<LKey>,
+    whole: BTreeSet<LKey>,
+}
+
+/// A book's slot in [`State::books`].
+fn slot(level: FineLevel) -> usize {
+    match level {
+        FineLevel::L1 => 0,
+        FineLevel::L2 => 1,
+    }
 }
 
 /// ★ THE PROVIDER over one realm's artifact (see the module's head).
 pub struct FineWork {
     realm: RealmId,
     ctx: Arc<Ctx>,
-    input: u64,
+    /// Each level's input word (the 128 m level's, the 16 m level's).
+    inputs: [u64; 2],
     /// The head's three numbers the reach reads — the drawn ground's lowest and highest metres and the sea (rulings
     /// B55, B87): the gateway reads the same off the head, so both name the same tiles at the same levels.
     head_band: (i32, i32, i16),
@@ -213,15 +250,21 @@ impl GroundBook {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The book as it stands (a pointer: no tile is copied).
+    /// The 128 m book as it stands (a pointer: no tile is copied).
     #[must_use]
     pub fn book(&self) -> Arc<FineBook> {
-        Arc::clone(&self.lock().book)
+        Arc::clone(&self.lock().books[0])
     }
 
-    /// The tiles that joined or left the book since the last call.
+    /// The 16 m book as it stands.
     #[must_use]
-    pub fn take_changed(&self) -> Vec<TileKey> {
+    pub fn finer(&self) -> Arc<FineBook> {
+        Arc::clone(&self.lock().books[1])
+    }
+
+    /// The tiles that joined or left a book since the last call.
+    #[must_use]
+    pub fn take_changed(&self) -> Vec<LKey> {
         std::mem::take(&mut self.lock().book_changed)
             .into_iter()
             .collect()
@@ -239,8 +282,12 @@ impl FineWork {
         threads: usize,
     ) -> Option<FineWork> {
         let lattice = body.macro_lattice()?;
-        let shift = cells_per_node_shift(&body, &lattice, L1_RUNG)?;
-        let book = FineBook::new(&body, &lattice, artifact.sea_m)?;
+        let geoms = [
+            LevelGeom::of(FineLevel::L1, &body, &lattice)?,
+            LevelGeom::of(FineLevel::L2, &body, &lattice)?,
+        ];
+        let book = FineBook::new(FineLevel::L1, &body, &lattice, artifact.sea_m)?;
+        let finer = FineBook::new(FineLevel::L2, &body, &lattice, artifact.sea_m)?;
         if !vd_terrain::fine::read::applies(artifact.sea_m) {
             return None;
         }
@@ -250,9 +297,7 @@ impl FineWork {
             body,
             lattice,
             artifact: Arc::clone(&artifact),
-            shift,
-            ts: book.side_shift(),
-            n7: (lattice.edge << shift) as i32,
+            geoms,
         });
         let meter = Arc::new(FineMeter::default());
         let pool = if threads == 0 {
@@ -289,14 +334,17 @@ impl FineWork {
         Some(FineWork {
             realm,
             ctx,
-            input: input_word(artifact.digest()),
+            inputs: [
+                input_word_of(FineLevel::L1, artifact.digest()),
+                input_word_of(FineLevel::L2, artifact.digest()),
+            ],
             head_band,
             state: Arc::new(Mutex::new(State {
                 pool,
                 raw: BTreeMap::new(),
                 finished: BTreeMap::new(),
                 wire: BTreeMap::new(),
-                book: Arc::new(book),
+                books: [Arc::new(book), Arc::new(finer)],
                 book_changed: BTreeSet::new(),
                 in_flight: BTreeSet::new(),
                 unstored: BTreeSet::new(),
@@ -323,10 +371,10 @@ impl FineWork {
         (state.raw.len(), state.finished.len(), state.in_flight.len())
     }
 
-    /// The shard's own book of finished tiles (its ground read), as it stands.
+    /// The shard's own book of finished 128 m tiles (its ground read), as it stands.
     #[must_use]
     pub fn book(&self) -> FineBook {
-        (*self.lock().book).clone()
+        (*self.lock().books[0]).clone()
     }
 
     /// The book as the realm's ground reads it (ruling B81 Q6).
@@ -341,15 +389,15 @@ impl FineWork {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn at(&self, key: TileKey, finished: bool) -> FineAt {
+    fn at(&self, (level, key): LKey, finished: bool) -> FineAt {
         FineAt {
             form: if finished {
                 FineForm::Finished
             } else {
                 FineForm::Raw
             },
-            input: self.input,
-            level: LEVEL_L1,
+            input: self.inputs[slot(level)],
+            level: level.id(),
             face: key.face.index(),
             tx: key.tx as u32,
             ty: key.ty as u32,
@@ -357,7 +405,7 @@ impl FineWork {
     }
 
     /// The finished record's wire parts, cut at the store's own size.
-    fn wire_parts(&self, key: TileKey, record: &[u8]) -> Arc<[Bytes]> {
+    fn wire_parts(&self, (level, key): LKey, record: &[u8]) -> Arc<[Bytes]> {
         let parts = record.len().div_ceil(FINE_PART_BYTES).max(1);
         (0..parts)
             .map(|part| {
@@ -365,7 +413,7 @@ impl FineWork {
                 let end = (start + FINE_PART_BYTES).min(record.len());
                 let msg = BulkMsg::FineTilePart {
                     realm: self.realm,
-                    level: LEVEL_L1,
+                    level: level.id(),
                     face: key.face.index(),
                     tx: key.tx as u32,
                     ty: key.ty as u32,
@@ -380,14 +428,36 @@ impl FineWork {
             .collect()
     }
 
-    /// The tiles around `key` (NW … SE) on any face; none past a cube corner (B2's face-edge cut: every tile finishes).
-    fn block_of(&self, key: TileKey) -> [Option<TileKey>; 9] {
-        block_keys(key, self.ctx.shift, self.ctx.n7)
+    /// The tiles around `key` (NW … SE) on any face, at its level; none past a cube corner (B2's face-edge cut: every
+    /// tile finishes).
+    fn block_of(&self, (level, key): LKey) -> [Option<LKey>; 9] {
+        block_keys(key, self.ctx.geom(level)).map(|k| k.map(|k| (level, k)))
     }
 
-    /// Hands `job` to the workers (or runs it, inline).
-    /// A named tile the work can still make: not finished, its finish not refused, and no raw field of its block refused.
-    fn workable(&self, state: &State, key: TileKey) -> bool {
+    /// ★ WHAT A 16 m TILE'S SOLVE READS (ruling B95): the 3 × 3 block of finished 128 m tiles around the 128 m tile that
+    /// holds its node — its 128 m flow reaches a few nodes past the node, never past that block. Nothing for a 128 m
+    /// tile.
+    fn reads(&self, (level, key): LKey) -> Vec<LKey> {
+        match level {
+            FineLevel::L1 => Vec::new(),
+            FineLevel::L2 => {
+                let down = FineLevel::L1.tile_nodes_shift();
+                let holder = TileKey {
+                    face: key.face,
+                    tx: key.tx >> down,
+                    ty: key.ty >> down,
+                };
+                self.block_of((FineLevel::L1, holder))
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            }
+        }
+    }
+
+    /// A named tile the work can still make: not finished, its finish not refused, no raw field of its block refused,
+    /// and every finished tile its solve reads held.
+    fn workable(&self, state: &State, key: LKey) -> bool {
         !state.finished.contains_key(&key)
             && !state.refused.contains(&(key, true))
             && !self
@@ -395,8 +465,13 @@ impl FineWork {
                 .iter()
                 .flatten()
                 .any(|b| state.refused.contains(&(*b, false)))
+            && self
+                .reads(key)
+                .iter()
+                .all(|r| state.finished.contains_key(r))
     }
 
+    /// Hands `job` to the workers (or runs it, inline).
     fn submit(state: &mut State, ctx: &Ctx, meter: &FineMeter, job: Job) {
         match &mut state.pool {
             Pool::Threads { jobs, .. } => {
@@ -449,7 +524,7 @@ impl FineTiles for FineWork {
                                 wrote = true;
                             }
                             state.finished.insert(key, Arc::new(record));
-                            Arc::make_mut(&mut state.book).insert(key, levels);
+                            Arc::make_mut(&mut state.books[slot(key.0)]).insert(key.1, levels);
                             state.book_changed.insert(key);
                         }
                         None => {
@@ -493,7 +568,7 @@ impl FineTiles for FineWork {
             .reasons
             .iter()
             .any(|&key| state.whole.contains(&key) && self.workable(state, key));
-        let serving: BTreeSet<TileKey> = state
+        let serving: BTreeSet<LKey> = state
             .reasons
             .iter()
             .copied()
@@ -505,21 +580,28 @@ impl FineTiles for FineWork {
         // ★ WHAT NO REASON NAMES LEAVES MEMORY (it stays in the store): the finished tiles outside the reasons, and the
         // raw fields no served tile's block reads — the rule that serves a tile is the rule that keeps its block, so a
         // raw field is never dropped before its finish starts.
-        let wanted: BTreeSet<TileKey> = state.reasons.iter().copied().collect();
-        let keep_raw: BTreeSet<TileKey> = serving
+        let wanted: BTreeSet<LKey> = state.reasons.iter().copied().collect();
+        let keep_raw: BTreeSet<LKey> = serving
             .iter()
             .flat_map(|&key| self.block_of(key).into_iter().flatten())
             .collect();
         state.finished.retain(|key, _| wanted.contains(key));
         state.wire.retain(|(key, _, _), _| wanted.contains(key));
-        let gone: Vec<TileKey> = state
-            .book
-            .keys()
-            .filter(|key| !wanted.contains(key))
+        // A 128 m tile a wanted 16 m tile's solve reads stays in memory too.
+        let wanted: BTreeSet<LKey> = wanted
+            .iter()
+            .flat_map(|&key| std::iter::once(key).chain(self.reads(key)))
             .collect();
-        for key in gone {
-            Arc::make_mut(&mut state.book).remove(key);
-            state.book_changed.insert(key);
+        state.finished.retain(|key, _| wanted.contains(key));
+        for level in FineLevel::ALL {
+            let gone: Vec<TileKey> = state.books[slot(level)]
+                .keys()
+                .filter(|key| !wanted.contains(&(level, *key)))
+                .collect();
+            for key in gone {
+                Arc::make_mut(&mut state.books[slot(level)]).remove(key);
+                state.book_changed.insert((level, key));
+            }
         }
         state.raw.retain(|key, _| keep_raw.contains(key));
         // ★ THE NEXT WORK, nearest first, never more in flight than threads (the order follows the newest reasons).
@@ -561,7 +643,7 @@ impl FineTiles for FineWork {
             let block = self.block_of(key);
             if block.iter().flatten().all(|b| state.raw.contains_key(b)) {
                 let slots =
-                    block.map(|b| b.and_then(|b| state.raw.get(&b).map(|f| (b, Arc::clone(f)))));
+                    block.map(|b| b.and_then(|b| state.raw.get(&b).map(|f| (b.1, Arc::clone(f)))));
                 state.in_flight.insert((key, true));
                 Self::submit(
                     state,
@@ -592,7 +674,8 @@ impl FineTiles for FineWork {
                     }
                     None => {
                         state.unstored.insert((raw, false));
-                        Self::submit(state, &self.ctx, &self.meter, Job::Solve(raw));
+                        let book = (raw.0 == FineLevel::L2).then(|| Arc::clone(&state.books[0]));
+                        Self::submit(state, &self.ctx, &self.meter, Job::Solve(raw, book));
                     }
                 }
             }
@@ -627,52 +710,74 @@ impl FineTiles for FineWork {
             .unwrap_or(ctx.body)
             .ground_range_m()
             .1;
-        let named = fine_needs(
-            &ctx.lattice,
-            dir,
-            radial_m,
-            (ground_m, ground_m),
-            relief_m,
-            pixel_rad,
-        );
+        let needs = |level: FineLevel| -> Vec<(FineName, u8)> {
+            fine_needs(
+                level,
+                &ctx.lattice,
+                dir,
+                radial_m,
+                (ground_m, ground_m),
+                relief_m,
+                pixel_rad,
+            )
+            .into_iter()
+            .map(|((f, tx, ty), k)| ((level.id(), f, tx, ty), k))
+            .collect()
+        };
+        // ★ THE ORDER (ruling B95): the 128 m tiles nearest first, then the 16 m tiles nearest first. The 128 m ground is
+        // the ground in view (the login's loading screen waits for it alone, ruling B86 item 5), and every 16 m tile reads
+        // the 128 m tiles around it. MEASURED (2026-10-14, hull 17's login): with the 16 m tiles before the outer 128 m
+        // ring, the 16 m solves (19 s each on the solve's share) held every work slot, and the ring's STORED tiles — a
+        // read of milliseconds — waited behind them with the loading screen.
+        let named: Vec<(FineName, u8)> = needs(FineLevel::L1)
+            .into_iter()
+            .chain(needs(FineLevel::L2))
+            .collect();
         self.hold(&named);
         named
     }
 
     fn hold(&self, tiles: &[(FineName, u8)]) {
-        let keys: Vec<(TileKey, bool)> = tiles
+        let keys: Vec<(LKey, bool)> = tiles
             .iter()
-            .map(|&((f, tx, ty), level)| {
-                (
-                    TileKey {
-                        face: Face::from_index(f).unwrap_or(Face::PosX),
-                        tx: tx as i32,
-                        ty: ty as i32,
-                    },
-                    level == 0,
-                )
+            .filter_map(|&((l, f, tx, ty), k)| {
+                Some((
+                    (
+                        FineLevel::from_id(l)?,
+                        TileKey {
+                            face: Face::from_index(f)?,
+                            tx: tx as i32,
+                            ty: ty as i32,
+                        },
+                    ),
+                    k == 0,
+                ))
             })
             .collect();
         self.lock().named.push(keys);
     }
 
-    fn levels(&self) -> u8 {
-        (MEAN_LEVELS + 1) as u8
+    fn levels(&self, level: u8) -> u8 {
+        FineLevel::from_id(level).map_or(0, |l| (l.mean_levels() + 1) as u8)
     }
 
     fn parts(&self, tile: FineName, lo: u8, hi: u8) -> Option<Arc<[Bytes]>> {
-        let key = TileKey {
-            face: Face::from_index(tile.0)?,
-            tx: tile.1 as i32,
-            ty: tile.2 as i32,
-        };
+        let level = FineLevel::from_id(tile.0)?;
+        let key = (
+            level,
+            TileKey {
+                face: Face::from_index(tile.1)?,
+                tx: tile.2 as i32,
+                ty: tile.3 as i32,
+            },
+        );
         let mut state = self.lock();
         if let Some(parts) = state.wire.get(&(key, lo, hi)) {
             return Some(Arc::clone(parts));
         }
         // ★ THE LEVELS A SESSION LACKS (ruling B86 item 3): `lo` up to the finest it holds, cut from the finished record.
         let record = Arc::clone(state.finished.get(&key)?);
-        let top = MEAN_LEVELS + 1;
+        let top = level.mean_levels() + 1;
         let end = if hi == NONE_HELD {
             top
         } else {

@@ -50,8 +50,9 @@ use crate::runtime::{ClockSample, OutboundBox};
 /// one goes every tick.
 pub const FINE_BYTES_PER_TICK: usize = 256 * 1024;
 
-/// A fine tile's name on this side of the seam: its face and its index there (the provider's own level).
-pub type FineName = (u8, u32, u32);
+/// A fine tile's name on this side of the seam: its fine level's number (the record's `level` byte: 1 the 128 m level, 2
+/// the 16 m level), its face and its index there (ruling B95: one machinery for every level).
+pub type FineName = (u8, u8, u32, u32);
 
 /// The level a gateway holds nothing of a tile from: past the coarsest.
 pub const NONE_HELD: u8 = u8::MAX;
@@ -68,8 +69,8 @@ pub trait FineTiles: Send + Sync {
     /// reads it at — level 0 is the tile read whole, a coarser level only its far copies (which the provider serves when
     /// stored and never solves, send-ahead's first rule).
     fn hold(&self, tiles: &[(FineName, u8)]);
-    /// The coarsest level a finished tile carries plus one (the level count).
-    fn levels(&self) -> u8;
+    /// The mean levels a finished tile of the fine level `level` (its number) carries, plus one (the level count).
+    fn levels(&self, level: u8) -> u8;
     /// The parts of one finished tile's levels `lo` up to (not including) `hi` — `hi` [`NONE_HELD`] for the levels to
     /// the coarsest — each encoded as the wire's `BulkMsg::FineTilePart`; `None` while the tile is not finished.
     fn parts(&self, tile: FineName, lo: u8, hi: u8) -> Option<Arc<[Bytes]>>;
@@ -122,13 +123,10 @@ fn answer(
     current: &mut Option<(FineName, u8, usize)>,
     send: &mut dyn FnMut(Bytes),
 ) -> u64 {
-    let levels = source.levels();
     let mut budget = FINE_BYTES_PER_TICK;
     let mut finished = 0u64;
     while budget > 0 {
-        let Some((tile, level, from)) = current
-            .take()
-            .or_else(|| next_record(source, named, sent, levels))
+        let Some((tile, level, from)) = current.take().or_else(|| next_record(source, named, sent))
         else {
             break;
         };
@@ -161,10 +159,13 @@ fn next_record(
     source: &dyn FineTiles,
     named: &[(FineName, u8)],
     sent: &BTreeMap<FineName, u8>,
-    levels: u8,
 ) -> Option<(FineName, u8, usize)> {
     named.iter().find_map(|&(tile, need)| {
-        let next = sent.get(&tile).copied().unwrap_or(levels).checked_sub(1)?;
+        let next = sent
+            .get(&tile)
+            .copied()
+            .unwrap_or_else(|| source.levels(tile.0))
+            .checked_sub(1)?;
         (next >= need)
             .then(|| source.parts(tile, next, next + 1))
             .flatten()

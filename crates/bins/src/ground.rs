@@ -17,6 +17,7 @@ use vd_terrain::BodyDefinition;
 use vd_terrain::artifact::{Artifact, ZField};
 use vd_terrain::chunk::CHUNK_EDGE;
 use vd_terrain::fine::l1::TileKey;
+use vd_terrain::fine::level::FineLevel;
 use vd_terrain::fine::read::FineField;
 use vd_terrain::height::height_field_m;
 
@@ -54,9 +55,10 @@ impl ShardGround {
     }
 }
 
-/// A tile as an opaque patch id: its face, then its two indices.
-fn patch_id(key: TileKey) -> u64 {
-    (u64::from(key.face.index()) << 58)
+/// A tile of a level as an opaque patch id: its level, its face, then its two indices.
+fn patch_id((level, key): (FineLevel, TileKey)) -> u64 {
+    (u64::from(level.id()) << 61)
+        | (u64::from(key.face.index()) << 58)
         | ((u64::from(key.tx as u32) & 0x1FFF_FFFF) << 29)
         | (u64::from(key.ty as u32) & 0x1FFF_FFFF)
 }
@@ -65,13 +67,17 @@ impl vd_sim::stub::stand::Ground for ShardGround {
     fn radius_m(&self, dir: DVec3) -> Option<f64> {
         let d = dir.to_array();
         if let Some(fine) = &self.fine {
-            let field = FineField {
-                inner: Arc::clone(&self.artifact) as Arc<dyn ZField + Send + Sync>,
-                book: fine.book(),
-            };
-            // The fine ground where its tiles are held; a missing tile answers nothing, and the coarser ground stands.
-            if let Some(r) = height_field_m(&self.body, &field, d, 0) {
-                return Some(r);
+            // ★ THE FINEST GROUND HELD (ruling B95): the 16 m tiles where held, else the 128 m tiles; a missing tile
+            // answers nothing, and the next coarser ground stands.
+            for finer in [Some(fine.finer()), None] {
+                let field = FineField {
+                    inner: Arc::clone(&self.artifact) as Arc<dyn ZField + Send + Sync>,
+                    book: fine.book(),
+                    finer,
+                };
+                if let Some(r) = height_field_m(&self.body, &field, d, 0) {
+                    return Some(r);
+                }
             }
         }
         height_field_m(&self.body, &*self.artifact, d, 0)
@@ -83,10 +89,15 @@ impl vd_sim::stub::stand::Ground for ShardGround {
         };
         let (face, i, j) = self.cell0(dir.to_array());
         let edge = CHUNK_EDGE as i32;
-        fine.book()
-            .tiles_of_chunk(face, 0, i.div_euclid(edge), j.div_euclid(edge))
-            .into_iter()
-            .map(patch_id)
+        let (x, y) = (i.div_euclid(edge), j.div_euclid(edge));
+        [fine.book(), fine.finer()]
+            .iter()
+            .flat_map(|book| {
+                let level = book.level();
+                book.tiles_of_chunk(face, 0, x, y)
+                    .into_iter()
+                    .map(move |key| patch_id((level, key)))
+            })
             .collect()
     }
 

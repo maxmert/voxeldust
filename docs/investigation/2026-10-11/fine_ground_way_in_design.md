@@ -159,6 +159,13 @@ nothing (A1).
   at its switch), L2's own swaps 41–42 m; two tiles and one joint solve AGREE EXACTLY in the overlap (each height depends
   only on its own catchment between two channels): L2 is seamless by construction.
 
+**B96 (2026-10-14) — L2 IS TODAY'S L1 GROUND PLUS THE LAW'S FINER DETAIL (amends the hold by slopes above).** Benched
+on hull 17's hills, the hold fought L1's ground (two laws at two levels) and made walls. L2's law is now solved ALONE —
+the steady form under L1's channels, settled by B93's rule one level down (the drainage built again every second pass,
+stopped when no L1 cell's mean moves 1 m) — and the stored raster is L1's drawn curve plus the law's raster less its own
+L1 version (its box means over each L1 cell, read back by the same Catmull-Rom). MEASURED: each L1 cell's mean within
+5.1 m of L1's, 1.49 % of the links over 35°, the joins 12 m at the 99th percentile after the one cut, 3.7 s a tile.
+
 Revision 3's text: **The mean hold** makes every level's mean over each coarser cell equal that cell's value: L1 over
 each macro node equals the node's row; L2 over each L1 cell equals that L1 cell. It is solved, never iterated by a knob
 (B-B4):
@@ -234,6 +241,9 @@ planet; on the fastest belt `ℓc` is 24–30 m, above the 16 m points.
 
 - **L1** where the macro solve's water exists (the joint law's `Q > 0`). A body with no water (an airless moon) has no
   fluvial level; its ground stays today's until its own families (craters, Neukum & Ivanov) exist (B79 Q4).
+- **AMENDED by B95 item 3 (2026-10-13): L2 ON ALL LAND A PLAYER WALKS ON** — a still plain and old hills get their 16 m
+  gullies by the same law (each node's rate read back from L1's ground by the joint law); the cost stays local (solved
+  around occupants and their arrival places). The paragraph below is the superseded rule.
 - **L2** in every tile where the present rise is above zero ANYWHERE in its domain. The rise is read from the map by
   the same smooth weights as `V` (§3.3), so it falls to zero smoothly toward the still ground, and the LAW fades the
   gullies with it (B81: no line where the gullies stop). A tile whose whole domain is still is not solved: its L2 is
@@ -559,6 +569,12 @@ division by a whole number replaced by a multiplication by its reciprocal writte
    `ChunkLane::upgrade`), replacing §4.5's waiting rule for the fine level; (3) far copies first — each tile shipped as
    the range of its levels from the finest its view reads (`fine::tile::range_record`, PROTO_MINOR 38), the finer
    levels following when the occupant nears (measured at the stand: 702 tiles in ~15 s, 1 776 parts against ~9 100).
+   **B3 built (2026-10-14, not run; B96):** the level descriptor (`vd_terrain::fine::level`) and every tile path by level —
+   the 16 m tile one node, its raster 64 cells past it, two mean levels (rungs 4–6); the planar triangulation on the cube
+   face for its points (`delaunay::triangulate_on_face`: the sphere's in-circle test is at the directions' rounding at
+   16 m); the shard's fine work keyed by level, a 16 m tile solved once its 3 × 3 finished L1 tiles are held; the gateway's
+   needs per level; the client's second book and the COARSE state (a chunk on the L1 ground until its 16 m tiles land,
+   built again then).
 6. **B5 — L3:** the law at 2–4 m in a small ring around a walker (its cost measured first).
 
 ## 10. The reviews' findings and their answers (revision 1 → 2)

@@ -41,9 +41,11 @@ use super::{GatewayConfig, GatewaySessions, GatewayStats, Session, SessionPhase}
 
 /// ★ The minor a session must have negotiated to read a fine record (the levels' record, minor 38; ruling B86 item 3).
 pub(crate) const FINE_MINOR: u16 = 38;
-/// The fine levels a finished tile carries (its square and five mean levels): a session that holds none of a tile
-/// holds "from past the coarsest".
-const FINE_LEVELS: u8 = vd_terrain::fine::read::MEAN_LEVELS as u8 + 1;
+/// The levels a finished tile of the fine level `level` (its number) carries — its square and its mean levels: a session
+/// that holds none of a tile holds "from past the coarsest" (ruling B95: each fine level its own count).
+fn fine_levels(level: u8) -> u8 {
+    vd_terrain::fine::level::FineLevel::from_id(level).map_or(0, |l| l.mean_levels() as u8 + 1)
+}
 
 /// How many artifact bytes one beat may carry to one client, over every realm it draws: a
 /// megabyte a beat (thirty-two parts of 32 KB), the sky's own pace — a pace, never a cap. A beat
@@ -141,11 +143,11 @@ pub(crate) struct GatewayArtifact {
     /// own part messages in order, shared by every session that draws the realm; and the record assembling now, by tile
     /// (its level, read off its first part, and its parts so far).
     pub(crate) fine: BTreeMap<(FineTile, u8), Vec<Vec<u8>>>,
-    fine_assembling: BTreeMap<(u8, u32, u32), FineAssembling>,
+    fine_assembling: BTreeMap<FineTile, FineAssembling>,
 }
 
-/// A fine tile's name: its face and its index there.
-pub(crate) type FineTile = (u8, u32, u32);
+/// A fine tile's name: its fine level's number (ruling B95), its face and its index there.
+pub(crate) type FineTile = (u8, u8, u32, u32);
 
 /// One fine record assembling on the gateway: its level once its first part is here, and its parts so far.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -318,13 +320,13 @@ pub(crate) fn cache_artifact_part(
         // count, for a realm with no head, or from another node is a stray.
         Ok(BulkMsg::FineTilePart {
             realm: named,
+            level: fine_level,
             face,
             tx,
             ty,
             part,
             parts,
             bytes: piece,
-            ..
         }) if named == realm => {
             let Some(cache) = sessions.artifacts.get_mut(&realm) else {
                 stats.artifact_parts_stray += 1;
@@ -334,7 +336,7 @@ pub(crate) fn cache_artifact_part(
                 stats.artifact_parts_stray += 1;
                 return;
             }
-            let tile = (face, tx, ty);
+            let tile = (fine_level, face, tx, ty);
             let assembling = cache.fine_assembling.entry(tile).or_default();
             if assembling.parts.len() != parts as usize || part == 0 {
                 // A record's first part, or another cut: the record starts over.
@@ -680,18 +682,34 @@ pub(crate) fn serve_artifacts(
                     .find_map(|w| w.ingest.look_of(*realm))
                 && let Some(body) = body_of_bag(bag)
             {
-                let needs = vd_terrain::artifact::fine_needs_of_head(
-                    &body,
-                    cache.band,
-                    view.dir,
-                    view.radial_m,
-                    pixel_rad,
-                );
+                // Each fine level by the one call, in the shard's own order (`vd_bins::fine_source`): the 128 m tiles
+                // around the eye, then the 16 m tiles, then the rest of the 128 m ring.
+                let of = |level: vd_terrain::fine::level::FineLevel| -> Vec<(FineTile, u8)> {
+                    vd_terrain::artifact::fine_needs_of_head(
+                        level,
+                        &body,
+                        cache.band,
+                        view.dir,
+                        view.radial_m,
+                        pixel_rad,
+                    )
+                    .into_iter()
+                    .map(|((f, tx, ty), k)| ((level.id(), f, tx, ty), k))
+                    .collect()
+                };
+                let l1 = of(vd_terrain::fine::level::FineLevel::L1);
+                let near = l1.len().min(9);
+                let needs: Vec<(FineTile, u8)> = l1[..near]
+                    .iter()
+                    .copied()
+                    .chain(of(vd_terrain::fine::level::FineLevel::L2))
+                    .chain(l1[near..].iter().copied())
+                    .collect();
                 fine_needs.insert((*sid, *realm), needs);
             }
         }
     }
-    let read: BTreeSet<(RealmId, (u8, u32, u32))> = fine_needs
+    let read: BTreeSet<(RealmId, FineTile)> = fine_needs
         .iter()
         .flat_map(|((_, realm), needs)| needs.iter().map(move |(t, _)| (*realm, *t)))
         .collect();
@@ -825,7 +843,10 @@ pub(crate) fn serve_artifacts(
                 let sent = session.fine_sent.entry(realm).or_default();
                 sent.retain(|tile, _| named.contains(tile));
                 for &(tile, need) in needs {
-                    let mut held = sent.get(&tile).copied().unwrap_or(FINE_LEVELS);
+                    let mut held = sent
+                        .get(&tile)
+                        .copied()
+                        .unwrap_or_else(|| fine_levels(tile.0));
                     while (budget > 0) & (held > need) {
                         let Some(record) = cache.fine.get(&(tile, held - 1)) else {
                             break;

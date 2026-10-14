@@ -17,7 +17,15 @@ const SHIFT: u32 = 4;
 const SIDE: i64 = 128;
 const NODE: i64 = 16;
 const N: i32 = 384;
-const BAND: i64 = NODE - BLEND;
+const BAND: i64 = NODE - crate::fine::stitch::BLEND;
+/// The small cube's 128 m level: eight-node tiles of sixteen-cell nodes, the raw raster a node past its tile.
+const GEOM: LevelGeom = LevelGeom {
+    level: crate::fine::level::FineLevel::L1,
+    shift: SHIFT,
+    ts: SHIFT + 3,
+    margin: NODE,
+    n: N,
+};
 
 /// A cell's direction at twenty fraction bits.
 fn dir(c: CellId) -> [i64; 3] {
@@ -120,7 +128,7 @@ fn rasters(offsets: bool) -> BTreeMap<TileKey, Field> {
 }
 
 fn block(key: TileKey, raws: &BTreeMap<TileKey, Field>) -> [Option<(TileKey, &Field)>; 9] {
-    block_keys(key, SHIFT, N).map(|k| k.map(|k| (k, &raws[&k])))
+    block_keys(key, GEOM).map(|k| k.map(|k| (k, &raws[&k])))
 }
 
 #[test]
@@ -133,8 +141,7 @@ fn the_nine_tiles_around_a_tile_cross_faces_and_skip_the_place_past_a_cube_corne
             tx: 1,
             ty: 1,
         },
-        SHIFT,
-        N,
+        GEOM,
     );
     assert_eq!(inner[0], k(Face::PosX, 0, 0));
     assert_eq!(inner[8], k(Face::PosX, 2, 2));
@@ -145,8 +152,7 @@ fn the_nine_tiles_around_a_tile_cross_faces_and_skip_the_place_past_a_cube_corne
             tx: 0,
             ty: 0,
         },
-        SHIFT,
-        N,
+        GEOM,
     );
     assert_eq!(corner[0], None);
     assert_eq!(corner.iter().flatten().count(), 8);
@@ -164,7 +170,7 @@ fn inside_a_face_the_finish_is_the_b85_finish_to_the_integer() {
         let fields: [&Field; 9] =
             std::array::from_fn(|s| b[s].map(|(_, f)| f).expect("an inner tile's nine"));
         assert_eq!(
-            finished_square(b, SHIFT, N),
+            finished_square(b, GEOM),
             finished_tile(fields, 1, 1, SIDE, BAND),
             "{face:?}"
         );
@@ -175,7 +181,7 @@ fn inside_a_face_the_finish_is_the_b85_finish_to_the_integer() {
 fn rasters_that_agree_finish_into_their_own_ground_on_every_tile_of_the_cube() {
     let raws = rasters(false);
     for key in every_tile() {
-        let square = finished_square(block(key, &raws), SHIFT, N).expect("finishes");
+        let square = finished_square(block(key, &raws), GEOM).expect("finishes");
         for y in 0..SIDE {
             for x in 0..SIDE {
                 let (i, j) = (
@@ -209,7 +215,7 @@ fn both_sides_of_every_side_draw_the_same_ground_across_faces() {
         .map(|k| {
             (
                 k,
-                finished_square(block(k, &raws), SHIFT, N).expect("every tile finishes"),
+                finished_square(block(k, &raws), GEOM).expect("every tile finishes"),
             )
         })
         .collect();
@@ -220,7 +226,7 @@ fn both_sides_of_every_side_draw_the_same_ground_across_faces() {
     };
     let (mut compared, mut across_faces) = (0usize, 0usize);
     for key in every_tile() {
-        let p = prepare(block(key, &raws), SHIFT, N).expect("prepares");
+        let p = prepare(block(key, &raws), GEOM).expect("prepares");
         let [x0, y0, x1, y1] = p.square;
         let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)];
         let near_three = |x: i64, y: i64| {
@@ -276,7 +282,7 @@ fn a_block_that_does_not_fit_the_cube_finishes_nothing() {
     // No tile in the middle.
     let mut b = block(key, &raws);
     b[4] = None;
-    assert!(finished_square(b, SHIFT, N).is_none());
+    assert!(finished_square(b, GEOM).is_none());
     // A neighbour from the opposite face: no chart of the tile holds it.
     let far = TileKey {
         face: Face::NegX,
@@ -285,7 +291,7 @@ fn a_block_that_does_not_fit_the_cube_finishes_nothing() {
     };
     let mut b = block(key, &raws);
     b[5] = Some((far, &raws[&far]));
-    assert!(finished_square(b, SHIFT, N).is_none());
+    assert!(finished_square(b, GEOM).is_none());
     // A neighbour that does not touch the tile.
     let apart = TileKey {
         face: Face::PosX,
@@ -299,5 +305,5 @@ fn a_block_that_does_not_fit_the_cube_finishes_nothing() {
     };
     let mut b = block(apart, &raws);
     b[5] = Some((corner, &raws[&corner]));
-    assert!(finished_square(b, SHIFT, N).is_none());
+    assert!(finished_square(b, GEOM).is_none());
 }

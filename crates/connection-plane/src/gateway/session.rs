@@ -380,14 +380,14 @@ pub(crate) struct Session {
     /// from the realm's cache by the session's own distance, whatever realm it stands in; evicted with the realm.
     pub(crate) fine_sent: std::collections::BTreeMap<
         vd_core::pose::RealmId,
-        std::collections::BTreeMap<(u8, u32, u32), u8>,
+        std::collections::BTreeMap<super::artifact::FineTile, u8>,
     >,
     /// ★ THE FINE LEVELS THIS SESSION'S CLIENT STATED IT HOLDS per realm (ruling B81 Q3,
     /// `ClientControlMsg::FineHeld`): what a re-drive after a shed send keeps, so only the levels the client lacks go
     /// again.
     pub(crate) fine_acked: std::collections::BTreeMap<
         vd_core::pose::RealmId,
-        std::collections::BTreeMap<(u8, u32, u32), u8>,
+        std::collections::BTreeMap<super::artifact::FineTile, u8>,
     >,
     /// ★ THE EYE IN THE REALM THIS SESSION STANDS IN (ruling B88): the avatar and where the realm's own snapshot
     /// last put it ([`SessionEye`]) — what the ground's pieces of that realm are chosen from, by the same call as every

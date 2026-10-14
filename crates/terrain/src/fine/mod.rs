@@ -15,6 +15,8 @@ pub mod delaunay;
 pub mod finish;
 pub mod geometry;
 pub mod l1;
+pub mod l2;
+pub mod level;
 pub mod points;
 pub mod read;
 pub mod stitch;

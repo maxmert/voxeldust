@@ -2415,3 +2415,43 @@ come from the 8 km world. The owner: *"Ok, please proceed with your plan"*.
 2. **STEP 2, THE 8 km WORLD'S VALLEYS (generator 27)**: on the copy of the macro solve, whether the dry world's cure (B78)
    makes the 8 km rivers cut valleys into the plains (41 km relief toward Earth's 96–129 m); the world moves once, on the
    owner's word.
+
+## B95 (2026-10-13) — hills as hills; the 16 m level now, on all land a player walks on
+
+THE LOOK (status file, 2026-10-13 later): the owner flew aboard hull 17 over the home planet's day-side hills (the whole
+land tile (NegY, 18, 4), picked by one rule — `planet_stand sunlit`: its nodes' median 25 km relief nearest Germany's
+175 m among the tiles where the star stands 25–60° up — its 128 m tiles solved before the login): *"Actually it looked
+very good! Hills as hills."* The bench round before it (`planet_stand forms`, `evolve`) found the 128 m ground Earth's in
+its amount of relief, its branching and its hypsometry, two to three times rougher at 250–650 m; no embedding variant,
+the forward method or the soil slope changed the look. Asked what a WALKER sees (today a smooth curve between samples
+128 m apart, rungs 0–6 reading the 128 m raster by Catmull-Rom), the owner: *"What about really fine ground? Do we do
+that? Because when players will walk around, the quality should be amazing on all levels"* — and to the two questions
+(build the 16 m level now; on all land or only where the land rises): *"Yes, let's proceed please"*.
+
+1. **THE 128 m LEVEL'S FORM IS ACCEPTED** where the 8 km world holds Earth-like relief; its roughness at 250–650 m stays a
+   registered reading, not a stop. What looked flat near the old berth is the 8 km world's flat patches (B94 step 2).
+2. **THE 16 m LEVEL IS BUILT NOW** (the way-in design's build step B3, revision 4: the steady form under the 128 m
+   level's channels, held per 128 m cell by its slopes, its two owed cures — cells with no slope left to the law, the
+   rung 4 → 5 worst point), through the ONE generic tile machinery (B81), seamless (G-SEAM), the same bytes on every host
+   (SL10), the final ground from the first frame (B86); then the 2–4 m level (B5).
+3. **THE 16 m LEVEL APPLIES ON ALL LAND A PLAYER WALKS ON** — AMENDS the design's §3.6 ("L2 only where the present rise is
+   above zero"): a still plain and old hills get their 16 m gullies by the same law; its cost stays local (solved around
+   occupants and their arrival places, B86/B87), never a body-wide bake.
+4. **THE FIRST LOOK ON FOOT** at hull 17's hills, in the window on the owner's word, judged from the side (B93 item 2).
+
+## B96 (2026-10-14) — the 16 m level is today's ground plus the law's finer detail; the pipeline built
+
+THE BENCH (status file, 2026-10-14): the 16 m law held per 128 m cell fought today's 128 m ground — two laws at two
+levels (the 128 m ground is the river law alone; the creep at its own rate wants far gentler ground) — and left walls
+(9–12 % of the 16 m links over 35°). The owner: *"Can you adjust the formula and law, so we don't break what we already
+have today?"* The adjusted form, benched on hull 17's hills (each 128 m cell's mean within 5.1 m of today's, 1.49 % of the
+links over 35°, no needle or cliff, the joins 12 m at the 99th after the stitch, 3.7 s a tile), was shown with the
+pipeline as the next step. The owner: *"Go"*.
+
+1. **THE 16 m GROUND IS TODAY'S DRAWN 128 m GROUND PLUS THE LAW'S DETAIL FINER THAN 128 m** — AMENDS B95 item 2's hold:
+   the 16 m law (rivers and creep under the 128 m channels, the steady form settled by B93's rule one level down) is solved
+   ALONE, with no hold; its raster less its own 128 m version (the box means over each 128 m cell, read back by the same
+   Catmull-Rom that draws today's ground) is added to today's curve. Today's ground is kept at every scale the 128 m level
+   draws; the law adds only what is finer.
+2. **THE PIPELINE IS BUILT END TO END** through the one tile machinery (B81 item 4): the generator, the shard's fine work,
+   the gateway's needs, the client's books — then the first look on foot (B95 item 4), on the owner's word.

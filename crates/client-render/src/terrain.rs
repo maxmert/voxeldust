@@ -2641,6 +2641,7 @@ fn geometry_part(
         field_level: geometry.field_level,
         built_on: geometry.built_on,
         rough: geometry.rough,
+        coarse: geometry.coarse,
         bounds: geometry.bounds,
     }
 }
@@ -3677,9 +3678,10 @@ pub(crate) fn sync_terrain(
                             asked.insert((*realm, col));
                         }
                     }
-                } else if lane.upgradable(*realm, *key) {
-                    // ★ A ROUGH CHUNK WHOSE FINE TILES HAVE LANDED (ruling B86 item 7) is built again on the fine
-                    // ground; the rough one stands until it lands.
+                } else {
+                    // ★ A ROUGH OR COARSE CHUNK WHOSE TILES HAVE LANDED (ruling B86 item 7; ruling B95) is built again
+                    // on the finer ground; the one standing stays until it lands. The lane asks a waiting chunk again
+                    // only when its realm's artifact changed.
                     lane.upgrade(*realm, *key, ladder.wanted.priority_of(index, *key));
                 }
             }

@@ -26,7 +26,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use super::l1::{L1_RUNG, TILE_NODES, TileKey, cells_per_node_shift};
+use super::l1::TileKey;
+use super::level::{FineLevel, LevelGeom};
 use super::points::chart_cell;
 use crate::artifact::{DRY_M, Side, ZField};
 use crate::body::BodyDefinition;
@@ -39,9 +40,9 @@ use vd_recipe::noise::NOISE_BITS;
 use vd_seed::bend::Face;
 
 /// The coarsest rung L1 serves: rung 7's raster and its five mean levels (B83 item 2); rung 13 reads the node's row.
-pub const L1_TOP_RUNG: u8 = 12;
-/// The mean levels a finished tile carries over its raster.
-pub const MEAN_LEVELS: u32 = (L1_TOP_RUNG - L1_RUNG) as u32;
+pub const L1_TOP_RUNG: u8 = FineLevel::L1.top_rung();
+/// The mean levels a finished 128 m tile carries over its raster.
+pub const MEAN_LEVELS: u32 = FineLevel::L1.mean_levels();
 /// Gap steps a quarter metre: the raster's unit in the height's.
 const QUARTER_STEPS: i64 = STEPS_PER_M >> 2;
 
@@ -57,15 +58,13 @@ pub enum FineZ {
     Outside,
 }
 
-/// ★ THE BOOK of the finished 128 m tiles a host holds, and the one read over them.
+/// ★ THE BOOK of the finished tiles of ONE level a host holds, and the one read over them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FineBook {
     /// The body's sea, in the height's unit: the rasters stand over it.
     sea: Gi,
-    /// A tile's side in rung-7 cells, as a shift (9 on the home planet).
-    ts: u32,
-    /// Rung 7's cells along a face's edge.
-    n7: i32,
+    /// The level's numbers on the body (its rung, a tile's side, the cells along a face's edge).
+    geom: LevelGeom,
     /// Each held tile's levels, shared by pointer: a book handed on (a copy-on-write cache, a field a builder holds)
     /// never copies a tile's heights.
     tiles: BTreeMap<TileKey, Arc<HeldLevels>>,
@@ -89,32 +88,44 @@ pub fn applies(sea_m: i16) -> bool {
 }
 
 impl FineBook {
-    /// An empty book for `body`, its sea at `sea_m` metres (the artifact's). `None` where rung 7's cells do not nest in
-    /// the macro nodes by a power of two, or a tile is too small to carry the five mean levels.
+    /// An empty book of `level` for `body`, its sea at `sea_m` metres (the artifact's). `None` where the level's cells
+    /// do not nest in the macro nodes by a power of two, or a tile is too small to carry its mean levels.
     #[must_use]
-    pub fn new(body: &BodyDefinition, lattice: &MacroLattice, sea_m: i16) -> Option<FineBook> {
-        let shift = cells_per_node_shift(body, lattice, L1_RUNG)?;
-        FineBook::with_side(lattice.edge, shift + TILE_NODES.trailing_zeros(), sea_m)
+    pub fn new(
+        level: FineLevel,
+        body: &BodyDefinition,
+        lattice: &MacroLattice,
+        sea_m: i16,
+    ) -> Option<FineBook> {
+        FineBook::of_geom(LevelGeom::of(level, body, lattice)?, sea_m)
     }
 
-    /// An empty book from the numbers a host holds without the body: the macro lattice's edge (the artifact's head), a
-    /// tile's side in rung-7 cells as a shift (a tile record states it), and the sea. `None` where a tile is too small to
-    /// carry the five mean levels or smaller than its nodes.
+    /// An empty book of `level` from the numbers a host holds without the body: the macro lattice's edge (the artifact's
+    /// head), a tile's side in the level's cells as a shift (a tile record states it), and the sea. `None` where a tile
+    /// is too small to carry the level's mean levels or smaller than its nodes.
     #[must_use]
-    pub fn with_side(edge: u32, ts: u32, sea_m: i16) -> Option<FineBook> {
-        let node_shift = ts.checked_sub(TILE_NODES.trailing_zeros())?;
-        (ts >= MEAN_LEVELS).then(|| FineBook {
+    pub fn with_side(level: FineLevel, edge: u32, ts: u32, sea_m: i16) -> Option<FineBook> {
+        FineBook::of_geom(LevelGeom::from_side(level, ts, edge)?, sea_m)
+    }
+
+    fn of_geom(geom: LevelGeom, sea_m: i16) -> Option<FineBook> {
+        (geom.ts >= geom.level.mean_levels()).then(|| FineBook {
             sea: Gi::new(i64::from(sea_m) * STEPS_PER_M) << LENGTH_BITS,
-            ts,
-            n7: (edge << node_shift) as i32,
+            geom,
             tiles: BTreeMap::new(),
         })
     }
 
-    /// A tile's side in rung-7 cells, as a shift.
+    /// The book's level.
+    #[must_use]
+    pub fn level(&self) -> FineLevel {
+        self.geom.level
+    }
+
+    /// A tile's side in the level's cells, as a shift.
     #[must_use]
     pub fn side_shift(&self) -> u32 {
-        self.ts
+        self.geom.ts
     }
 
     /// How many tiles are held.
@@ -134,16 +145,16 @@ impl FineBook {
         self.tiles.keys().copied()
     }
 
-    /// A finished tile's side in rung-7 cells.
+    /// A finished tile's side in the level's cells.
     #[must_use]
     pub fn side(&self) -> usize {
-        1usize << self.ts
+        1usize << self.geom.ts
     }
 
     /// Holds the finished tile `key`: `levels[0]` its square, `levels[k]` its `2^k` means, each `side >> k` squared.
     /// `false` (and nothing held) where a level has another size or a level is missing.
     pub fn insert(&mut self, key: TileKey, levels: Vec<Vec<i32>>) -> bool {
-        if levels.len() != MEAN_LEVELS as usize + 1 {
+        if levels.len() != self.geom.level.mean_levels() as usize + 1 {
             return false;
         }
         self.insert_from(key, 0, levels)
@@ -154,7 +165,7 @@ impl FineBook {
     /// (and nothing changed) where a level has another size, the levels stop short of the coarsest the book needs, or a
     /// gap would stand between them and the levels held.
     pub fn insert_from(&mut self, key: TileKey, lo: u32, levels: Vec<Vec<i32>>) -> bool {
-        let top = MEAN_LEVELS + 1;
+        let top = self.geom.level.mean_levels() + 1;
         let hi = lo + levels.len() as u32;
         let sized = (lo < top)
             && (hi <= top)
@@ -204,12 +215,13 @@ impl FineBook {
     /// `face` (a column passes its own rung twice; a float direction passes rung 0's cell).
     #[must_use]
     pub fn z(&self, face: Face, draw_rung: u8, cell_rung: u8, i: i32, j: i32) -> FineZ {
-        if draw_rung > L1_TOP_RUNG {
+        let level = self.geom.level;
+        if draw_rung > level.top_rung() {
             return FineZ::Outside;
         }
-        let k = u32::from(draw_rung.saturating_sub(L1_RUNG));
-        let (x, ta) = sample_and_fraction(k, cell_rung, i);
-        let (y, tb) = sample_and_fraction(k, cell_rung, j);
+        let k = u32::from(draw_rung.saturating_sub(level.rung()));
+        let (x, ta) = sample_and_fraction(level.rung(), k, cell_rung, i);
+        let (y, tb) = sample_and_fraction(level.rung(), k, cell_rung, j);
         let mut words = [Gi::ZERO; 16];
         for row in 0..4i64 {
             for col in 0..4i64 {
@@ -238,7 +250,7 @@ impl FineBook {
     /// The tile that holds the level-`k` sample `(x, y)` of `face`'s chart, and the sample's index in that level: a
     /// sample off the face by the chart's one crossing rule, a cube corner's diagonal region the face's nearest cell.
     fn locate(&self, face: Face, k: u32, x: i64, y: i64) -> (TileKey, usize) {
-        let n = self.n7 >> k;
+        let n = self.geom.n >> k;
         let (x, y) = (
             x.clamp(-i64::from(n), 2 * i64::from(n)) as i32,
             y.clamp(-i64::from(n), 2 * i64::from(n)) as i32,
@@ -247,7 +259,7 @@ impl FineBook {
             Some(c) => (Face::from_index(c.face).unwrap_or(face), c.i, c.j),
             None => (face, x.clamp(0, n - 1), y.clamp(0, n - 1)),
         };
-        let s = self.ts - k;
+        let s = self.geom.ts - k;
         let mask = (1i32 << s) - 1;
         (
             TileKey {
@@ -265,16 +277,17 @@ impl FineBook {
     /// serves.
     #[must_use]
     pub fn tiles_of_chunk(&self, face: Face, rung: u8, x: i32, y: i32) -> Vec<TileKey> {
-        if rung > L1_TOP_RUNG {
+        let level = self.geom.level;
+        if rung > level.top_rung() {
             return Vec::new();
         }
-        let k = u32::from(rung.saturating_sub(L1_RUNG));
+        let k = u32::from(rung.saturating_sub(level.rung()));
         let e = CHUNK_EDGE as i32;
-        let lo = |c: i32| sample_and_fraction(k, rung, c * e - 1).0 - 2;
-        let hi = |c: i32| sample_and_fraction(k, rung, c * e + e).0 + 3;
+        let lo = |c: i32| sample_and_fraction(level.rung(), k, rung, c * e - 1).0 - 2;
+        let hi = |c: i32| sample_and_fraction(level.rung(), k, rung, c * e + e).0 + 3;
         let (x0, x1, y0, y1) = (lo(x), hi(x), lo(y), hi(y));
-        let n = i64::from(self.n7 >> k);
-        let s = self.ts - k;
+        let n = i64::from(self.geom.n >> k);
+        let s = self.geom.ts - k;
         let mut keys = BTreeSet::new();
         // On the face: the tiles over the rectangle clipped to it.
         for ty in (y0.max(0) >> s)..=(y1.min(n - 1) >> s) {
@@ -303,22 +316,24 @@ impl FineBook {
     /// Whether every tile of `keys` is held at the level a chunk at `rung` reads (its level or a finer one).
     #[must_use]
     pub fn holds_all(&self, keys: &[TileKey], rung: u8) -> bool {
-        let k = u32::from(rung.saturating_sub(L1_RUNG));
+        let k = u32::from(rung.saturating_sub(self.geom.level.rung()));
         keys.iter()
             .all(|key| self.tiles.get(key).is_some_and(|h| h.lo <= k))
     }
 }
 
-/// ★ A MACRO FIELD WITH ITS FINE GROUND (B2): the one field a chunk and the shard's ground read on a body where the 128 m
-/// level applies — every macro word from `inner` (the whole artifact, its tiles, or a pyramid level), the fine ground from
-/// the book.
+/// ★ A MACRO FIELD WITH ITS FINE GROUND (B2; ruling B95): the one field a chunk and the shard's ground read on a body
+/// where the fine levels apply — every macro word from `inner` (the whole artifact, its tiles, or a pyramid level), the
+/// fine ground from the 128 m book, and under the 16 m level's top rung from the 16 m book when the field carries one.
 ///
-/// **Example.** The client's chunk at rung 9 over the belt reads the artifact's tiles for the rock province and the
-/// book's 512 m means for its height; the shard reads its whole artifact and the same book under a landing hull.
+/// **Example.** The client's chunk at rung 9 over the belt reads the artifact's tiles for the rock province and the 128 m
+/// book's 512 m means for its height; the chunk at rung 2 under a walker's feet reads the 16 m book's raster by the curve.
 #[derive(Clone)]
 pub struct FineField {
     pub inner: Arc<dyn ZField + Send + Sync>,
     pub book: Arc<FineBook>,
+    /// The finer level's book (the 16 m level), read for the rungs it serves; `None` reads the 128 m book alone.
+    pub finer: Option<Arc<FineBook>>,
 }
 
 impl ZField for FineField {
@@ -337,16 +352,29 @@ impl ZField for FineField {
     fn water_side(&self, node: u32) -> Option<Side> {
         self.inner.water_side(node)
     }
+    /// ★ THE FINEST LEVEL THAT HOLDS THE READ (ruling B95): the 16 m ground where the 16 m level serves the rung and its
+    /// tiles are here, else the 128 m ground — so a reader of a rung's field (the eye's ground, a vertex's coarser
+    /// surface) never falls to the 8 km ground where a 16 m tile is still on its way. A chunk is only built on the 16 m
+    /// ground once every 16 m tile its stencils read is here, so this read never mixes the levels inside a chunk.
     fn fine_z(&self, face: Face, draw_rung: u8, cell_rung: u8, i: i32, j: i32) -> FineZ {
+        if let Some(f) = self
+            .finer
+            .as_ref()
+            .filter(|f| draw_rung <= f.level().top_rung())
+            && let held @ FineZ::Held(_) = f.z(face, draw_rung, cell_rung, i, j)
+        {
+            return held;
+        }
         self.book.z(face, draw_rung, cell_rung, i, j)
     }
 }
 
-/// The level-`k` sample at or before the centre of cell `i` of `cell_rung` along one axis, and the fraction past it at
-/// [`NOISE_BITS`]: the centre in half rung-0 cells less the first sample's, by the samples' spacing as a shift.
+/// The level-`k` sample of a level at `rung` at or before the centre of cell `i` of `cell_rung` along one axis, and the
+/// fraction past it at [`NOISE_BITS`]: the centre in half rung-0 cells less the first sample's, by the samples' spacing
+/// as a shift.
 #[must_use]
-pub fn sample_and_fraction(k: u32, cell_rung: u8, i: i32) -> (i64, Gi) {
-    let bits = u32::from(L1_RUNG) + 1 + k;
+pub fn sample_and_fraction(rung: u8, k: u32, cell_rung: u8, i: i32) -> (i64, Gi) {
+    let bits = u32::from(rung) + 1 + k;
     let centre = (i64::from(i) << (u32::from(cell_rung) + 1)) + (1i64 << cell_rung);
     let rel = centre - (1i64 << (bits - 1));
     (
@@ -397,13 +425,13 @@ mod tests {
     #[test]
     fn a_cell_centre_finds_the_sample_before_it_and_the_fraction_past_it() {
         // A rung-7 cell and a rung-12 cell stand on their own samples.
-        assert_eq!(sample_and_fraction(0, 7, 5), (5, Gi::ZERO));
-        assert_eq!(sample_and_fraction(5, 12, 3), (3, Gi::ZERO));
+        assert_eq!(sample_and_fraction(7, 0, 7, 5), (5, Gi::ZERO));
+        assert_eq!(sample_and_fraction(7, 5, 12, 3), (3, Gi::ZERO));
         // Rung 0's cell 64 stands half a metre past sample 0's centre (64 m): 1/256 of a 128 m cell.
-        assert_eq!(sample_and_fraction(0, 0, 64), (0, Gi::new(1 << 20)));
+        assert_eq!(sample_and_fraction(7, 0, 0, 64), (0, Gi::new(1 << 20)));
         // The face's first metre lies before sample 0: sample −1, 129/256 past it; at level 2, 513/1024.
-        assert_eq!(sample_and_fraction(0, 0, 0), (-1, Gi::new(129 << 20)));
-        assert_eq!(sample_and_fraction(2, 0, 0), (-1, Gi::new(513 << 18)));
+        assert_eq!(sample_and_fraction(7, 0, 0, 0), (-1, Gi::new(129 << 20)));
+        assert_eq!(sample_and_fraction(7, 2, 0, 0), (-1, Gi::new(513 << 18)));
     }
 
     #[test]
@@ -412,14 +440,16 @@ mod tests {
         let n = body.ladder().n;
         // A node of one cell: rung 7's cells do not nest in it.
         let one = MacroLattice::with_edge(&body, n).expect("a lattice");
-        assert_eq!(FineBook::new(&body, &one, 0), None);
+        assert_eq!(FineBook::new(FineLevel::L1, &body, &one, 0), None);
         // A node of 128 cells: one rung-7 cell a node, an 8-cell tile, too small for five mean levels.
         let small = MacroLattice::with_edge(&body, n >> 7).expect("a lattice");
-        assert_eq!(FineBook::new(&body, &small, 0), None);
+        assert_eq!(FineBook::new(FineLevel::L1, &body, &small, 0), None);
         // The home planet's own lattice: 512-cell tiles.
         let lattice = MacroLattice::of(&body).expect("a lattice");
         assert_eq!(
-            FineBook::new(&body, &lattice, 0).expect("a book").side(),
+            FineBook::new(FineLevel::L1, &body, &lattice, 0)
+                .expect("a book")
+                .side(),
             512
         );
     }
@@ -450,7 +480,7 @@ mod tests {
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
         let sea_m = -100i16;
-        let mut book = FineBook::new(&body, &lattice, sea_m).expect("a book");
+        let mut book = FineBook::new(FineLevel::L1, &body, &lattice, sea_m).expect("a book");
         let face = Face::from_index(0).expect("a face");
         for ty in 3..=5 {
             for tx in 2..=4 {
@@ -494,7 +524,7 @@ mod tests {
     fn a_tile_with_a_level_missing_or_missized_is_not_held() {
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
-        let mut book = FineBook::new(&body, &lattice, 0).expect("a book");
+        let mut book = FineBook::new(FineLevel::L1, &body, &lattice, 0).expect("a book");
         let key = TileKey {
             face: Face::from_index(1).expect("a face"),
             tx: 0,
@@ -516,12 +546,12 @@ mod tests {
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
         assert_eq!(
-            FineBook::with_side(lattice.edge, 9, -100),
-            FineBook::new(&body, &lattice, -100)
+            FineBook::with_side(FineLevel::L1, lattice.edge, 9, -100),
+            FineBook::new(FineLevel::L1, &body, &lattice, -100)
         );
         // Smaller than its eight nodes, or too small for five mean levels.
-        assert_eq!(FineBook::with_side(lattice.edge, 2, 0), None);
-        assert_eq!(FineBook::with_side(lattice.edge, 4, 0), None);
+        assert_eq!(FineBook::with_side(FineLevel::L1, lattice.edge, 2, 0), None);
+        assert_eq!(FineBook::with_side(FineLevel::L1, lattice.edge, 4, 0), None);
         // The level applies where the solve's water exists.
         assert_eq!(
             [applies(DRY_M), applies(0), applies(-3_000)],
@@ -533,7 +563,7 @@ mod tests {
     fn a_chunk_names_the_tiles_its_stencils_read_inside_a_face_and_across_its_edge() {
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
-        let book = FineBook::new(&body, &lattice, 0).expect("a book");
+        let book = FineBook::new(FineLevel::L1, &body, &lattice, 0).expect("a book");
         let face = Face::from_index(0).expect("a face");
         // A rung-12 chunk reads level 5 (16 samples a tile): samples 121 … 189 by 183 … 251, tiles 7 … 11 by 11 … 15.
         let keys = book.tiles_of_chunk(face, 12, 2, 3);
@@ -573,7 +603,7 @@ mod tests {
         // B86 item 3: the tile (3, 4) arrives with its levels 3 … 5 only; a rung-10 chunk reads it, a rung-9 one waits.
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
-        let mut book = FineBook::new(&body, &lattice, 0).expect("a book");
+        let mut book = FineBook::new(FineLevel::L1, &body, &lattice, 0).expect("a book");
         let face = Face::from_index(0).expect("a face");
         let key = TileKey { face, tx: 3, ty: 4 };
         let all = plane(3, 4);
@@ -583,7 +613,7 @@ mod tests {
         assert!(!book.insert_from(key, 6, Vec::new()));
         assert!(book.insert_from(key, 3, all[3..].to_vec()));
         assert_eq!(book.held_from(key), Some(3));
-        let mut whole = FineBook::new(&body, &lattice, 0).expect("a book");
+        let mut whole = FineBook::new(FineLevel::L1, &body, &lattice, 0).expect("a book");
         assert!(whole.insert(key, all.clone()));
         let (i, j) = ((3 * 64 + 10) << 3, (4 * 64 + 20) << 3);
         assert_eq!(
@@ -625,7 +655,7 @@ mod tests {
     fn a_held_tile_is_shared_counted_and_let_go_and_a_fine_field_reads_its_book() {
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
-        let mut book = FineBook::new(&body, &lattice, 0).expect("a book");
+        let mut book = FineBook::new(FineLevel::L1, &body, &lattice, 0).expect("a book");
         let face = Face::from_index(0).expect("a face");
         assert_eq!(
             (book.len(), book.is_empty(), book.side_shift()),
@@ -647,6 +677,7 @@ mod tests {
         let field = FineField {
             inner: Arc::new(test_field::OneFineRead(FineZ::Outside)),
             book: Arc::new(book.clone()),
+            finer: None,
         };
         assert_eq!(
             (
@@ -663,6 +694,55 @@ mod tests {
             book.z(face, 7, 7, 3 * 512 + 10, 4 * 512 + 20)
         );
         assert_eq!(field.fine_z(face, 13, 13, 0, 0), FineZ::Outside);
+        // ★ THE 16 m BOOK UNDER IT (ruling B95): the field reads the finer book for the rungs it serves (rungs 0–6) and the
+        // 128 m book above them; the 16 m book's own levels are the rung-4 raster and its means at rungs 5 and 6.
+        let mut fine = FineBook::new(FineLevel::L2, &body, &lattice, 0).expect("a 16 m book");
+        assert_eq!(
+            (fine.level(), fine.side_shift(), fine.side()),
+            (FineLevel::L2, 9, 512)
+        );
+        let node = TileKey {
+            face,
+            tx: 40,
+            ty: 33,
+        };
+        let levels: Vec<Vec<i32>> = (0..=2u32)
+            .map(|k| vec![100 * (k as i32 + 1); 1 << (2 * (9 - k))])
+            .collect();
+        assert!(!fine.insert(node, levels[..2].to_vec()));
+        assert!(fine.insert(node, levels));
+        let both = FineField {
+            inner: Arc::new(test_field::OneFineRead(FineZ::Outside)),
+            book: Arc::new(book.clone()),
+            finer: Some(Arc::new(fine.clone())),
+        };
+        let (i, j) = (40 * 512 + 100, 33 * 512 + 100);
+        assert_eq!(both.fine_z(face, 4, 4, i, j), FineZ::Held(gap(100)));
+        assert_eq!(
+            both.fine_z(face, 6, 6, i >> 2, j >> 2),
+            FineZ::Held(gap(300))
+        );
+        assert_eq!(
+            both.fine_z(face, 7, 7, 3 * 512 + 10, 4 * 512 + 20),
+            book.z(face, 7, 7, 3 * 512 + 10, 4 * 512 + 20)
+        );
+        assert_eq!(fine.z(face, 7, 7, i >> 3, j >> 3), FineZ::Outside);
+        // Where the 16 m tile is not here yet the field reads the 128 m ground under it, never nothing.
+        let (oi, oj) = ((3 * 512 + 10) << 3, (4 * 512 + 20) << 3);
+        assert_eq!(
+            fine.z(face, 4, 4, oi, oj),
+            FineZ::Missing(TileKey {
+                face,
+                tx: 24,
+                ty: 32
+            })
+        );
+        assert_eq!(both.fine_z(face, 4, 4, oi, oj), book.z(face, 4, 4, oi, oj));
+        assert!(matches!(both.fine_z(face, 4, 4, oi, oj), FineZ::Held(_)));
+        // The rung-4 chunk (332, 274) and its stencil lie inside the node's tile.
+        assert_eq!(fine.tiles_of_chunk(face, 4, 332, 274), vec![node]);
+        assert!(fine.holds_all(&[node], 4));
+        assert_eq!(fine.tiles_of_chunk(face, 7, 0, 0), Vec::new());
         // Letting a tile go.
         assert!(book.remove(TileKey { face, tx: 2, ty: 4 }));
         assert!(!book.remove(TileKey { face, tx: 2, ty: 4 }));
@@ -673,7 +753,7 @@ mod tests {
     fn a_read_past_the_face_edge_names_the_partner_face_tile_and_a_cube_corner_the_face_own() {
         let body = home_planet();
         let lattice = MacroLattice::of(&body).expect("a lattice");
-        let book = FineBook::new(&body, &lattice, 0).expect("a book");
+        let book = FineBook::new(FineLevel::L1, &body, &lattice, 0).expect("a book");
         let face = Face::from_index(0).expect("a face");
         let n7 = (lattice.edge << 6) as i32;
         // The stencil's first sample of the face's first column lies on the partner face.

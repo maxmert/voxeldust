@@ -14181,17 +14181,17 @@ fn a_realm_with_no_view_this_beat_keeps_its_fine_cache() {
     const UNVIEWED: RealmId = RealmId::Planet(2);
     let records = || {
         BTreeMap::from([
-            (((2, 0, 0), 0u8), vec![vec![1u8]]),
-            (((2, 1, 0), 0u8), vec![vec![2u8]]),
+            (((1, 2, 0, 0), 0u8), vec![vec![1u8]]),
+            (((1, 2, 1, 0), 0u8), vec![vec![2u8]]),
         ])
     };
-    let read = BTreeSet::from([(VIEWED, (2, 0, 0))]);
+    let read = BTreeSet::from([(VIEWED, (1, 2, 0, 0))]);
     let viewed = BTreeSet::from([VIEWED]);
     let mut fine = records();
     super::artifact::trim_fine_cache(VIEWED, &mut fine, &read, &viewed);
     assert_eq!(
         fine.keys().copied().collect::<Vec<_>>(),
-        vec![((2, 0, 0), 0)],
+        vec![((1, 2, 0, 0), 0)],
         "a viewed realm keeps what its views read"
     );
     let mut fine = records();

@@ -139,23 +139,45 @@ pub fn domain(
     rung: u8,
     key: TileKey,
 ) -> Option<Domain> {
+    domain_nodes(
+        body,
+        lattice,
+        artifact,
+        rung,
+        key.face,
+        (
+            key.tx * TILE_NODES - BUFFER_NODES,
+            key.ty * TILE_NODES - BUFFER_NODES,
+        ),
+        TILE_NODES + 2 * BUFFER_NODES,
+    )
+}
+
+/// ★ THE DOMAIN OVER ANY SQUARE OF NODES: the `side × side` macro nodes of `face`'s chart from the node `(ni0, nj0)`, at
+/// `rung` — [`domain`]'s rule for a tile, and the 16 m level's view of the 128 m ground's flow
+/// ([`super::l2`]). `None` as [`domain`].
+#[must_use]
+pub fn domain_nodes(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    rung: u8,
+    face: Face,
+    (ni0, nj0): (i32, i32),
+    side: i32,
+) -> Option<Domain> {
     let n_r = body.ladder().cells_per_edge(rung);
     let shift = cells_per_node_shift(body, lattice, rung)?;
     let level = Level::new(body.seed(), rung, n_r)?;
     let r_m = Gf::from_f64(body.radius_m());
     let node_m = Gf::from_f64(lattice.node_m());
     let edge = lattice.edge as i32;
-    let (ni0, nj0) = (
-        key.tx * TILE_NODES - BUFFER_NODES,
-        key.ty * TILE_NODES - BUFFER_NODES,
-    );
-    let side = TILE_NODES + 2 * BUFFER_NODES;
     // The domain's nodes, in chart order.
     let mut nodes = Vec::new();
     let mut local: BTreeMap<u32, u32> = BTreeMap::new();
     for b in nj0..nj0 + side {
         for a in ni0..ni0 + side {
-            if let Some(c) = chart_cell(key.face, a, b, edge) {
+            if let Some(c) = chart_cell(face, a, b, edge) {
                 let node = lattice.index(Face::from_index(c.face)?, c.i, c.j);
                 local.entry(node).or_insert_with(|| {
                     nodes.push(node);
@@ -171,7 +193,7 @@ pub fn domain(
     let held: Vec<bool> = node_z.iter().map(|&z| z > Gf::ZERO).collect();
     let pts = domain_points(
         &level,
-        key.face,
+        face,
         ni0 << shift,
         nj0 << shift,
         side << shift,
@@ -327,7 +349,7 @@ pub fn domain(
         let rim = |c: &CellId| -> bool {
             let (a, b) = (c.i - (ni0 << shift), c.j - (nj0 << shift));
             let s = side << shift;
-            (c.face == key.face.index()) & ((a == 0) | (b == 0) | (a == s - 1) | (b == s - 1))
+            (c.face == face.index()) & ((a == 0) | (b == 0) | (a == s - 1) | (b == s - 1))
         };
         let low = (0..n).filter(|&p| rim(&cells[p])).min_by(|&a, &b| {
             base[a]

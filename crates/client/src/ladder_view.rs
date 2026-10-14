@@ -316,10 +316,19 @@ pub const CURVE_OVERSHOOT: f64 = 1.5;
 ///
 /// **Example.** On the home planet the 1 m rung hands over to the 2 m rung with a step of about 12 cm, so the ladder's
 /// own tolerance holds it from 56 m; under the old rule the 1 m ring reached 869 m.
+///
+/// ★ THE 16 m LEVEL (ruling B95): where the 16 m level draws, the rungs under it (0–3) read the curve through ITS points
+/// — 16 m apart, never steeper than the soil's critical slope (`vd_terrain::surface::SOIL_CRITICAL_SLOPE`, B82) — so the
+/// same rule with that level's cell and bound.
 #[must_use]
-pub fn curve_step_m(rung: u8) -> f64 {
-    let fine_cell = f64::from(cell_m(vd_terrain::fine::l1::L1_RUNG));
-    let slope = vd_terrain::body::TAN_REPOSE * CURVE_OVERSHOOT;
+pub fn curve_step_m(level: vd_terrain::fine::level::FineLevel, rung: u8) -> f64 {
+    use vd_terrain::fine::level::FineLevel;
+    let fine_cell = f64::from(cell_m(level.rung()));
+    let bound = match level {
+        FineLevel::L1 => vd_terrain::body::TAN_REPOSE,
+        FineLevel::L2 => vd_terrain::surface::SOIL_CRITICAL_SLOPE,
+    };
+    let slope = bound * CURVE_OVERSHOOT;
     let bend = 6.0 * slope / fine_cell;
     let miss = |d: f64| (bend * d * d / 2.0).min(slope * d * std::f64::consts::FRAC_1_SQRT_2);
     let d = f64::from(cell_m(rung));
@@ -671,11 +680,11 @@ impl AskBound {
             .unwrap_or_else(|| switch_m(rung))
     }
 
-    /// ★ THE SAME BOUND ON THE FINE GROUND (ruling B89, the speed step): where the realm draws its finished 128 m tiles
-    /// (`fine`), every rung finer than the fine level hands over at the step its curve makes ([`curve_step_m`]) — the
-    /// handover's own step (ruling T7), held within the ladder's tolerance by the T7 floor — and never farther out than
-    /// the tier rule's own distance. The rungs from the fine level up keep the body's row. Without the fine ground the
-    /// bound is unchanged.
+    /// ★ THE SAME BOUND ON THE FINE GROUND (ruling B89, the speed step; ruling B95): where the realm draws its finished
+    /// fine tiles (`fine`), every rung finer than the finest fine level (the 16 m level's rung 4) hands over at the step
+    /// its curve makes ([`curve_step_m`]) — the handover's own step (ruling T7), held within the ladder's tolerance by the
+    /// T7 floor — and never farther out than the tier rule's own distance. The rungs from that level up keep the body's
+    /// row. Without the fine ground the bound is unchanged.
     ///
     /// **Example.** On the home planet with its tiles held, the 1, 2, 4 and 8 m rungs hand over at about 56 m, 225 m,
     /// 0.9 km and 3.6 km instead of 0.87, 1.7, 3.5 and 7 km, so the near ground holds a few hundred chunks where it held
@@ -685,12 +694,13 @@ impl AskBound {
         if !fine {
             return self;
         }
-        let top = vd_terrain::fine::l1::L1_RUNG.min(rungs.saturating_sub(1));
+        let finest = vd_terrain::fine::level::FineLevel::L2;
+        let top = finest.rung().min(rungs.saturating_sub(1));
         let mut base = Vec::with_capacity(usize::from(rungs));
         let mut rung = 0u8;
         while rung < rungs {
             let own = if rung < top {
-                let step = curve_step_m(rung);
+                let step = curve_step_m(finest, rung);
                 if let Some(s) = self.steps_m.get_mut(usize::from(rung)) {
                     *s = step;
                 }
@@ -1465,10 +1475,12 @@ pub fn column_span(
     let on = |field: &dyn vd_terrain::artifact::ZField| {
         vd_terrain::digest::surface_column_field(body, field, col.face, col.rung, col.x, col.y)
     };
+    // ★ THE 16 m GROUND (ruling B95): where its tiles have not landed the rung's field reads the 128 m ground under it,
+    // so the span is provisional and read again until they land.
     if let Some(field) = artifact.field_at_rung(&lattice, col.rung)
         && let Some(span) = on(&*field)
     {
-        return (span, false);
+        return (span, artifact.finer_waits(col.face, col.rung, col.x, col.y));
     }
     // ★ THE ROUGH GROUND (ruling B86 item 7): where the fine ground's tiles have not landed, the column's chunks are built
     // on the field under it — so its span is read there too, provisional, and read again until the tiles land.

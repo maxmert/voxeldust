@@ -3,7 +3,7 @@
 Multiplayer voxel planet MMO — "Star Citizen meets Minecraft". Spherical voxel planets,
 player-built ships you walk inside while flying, Newtonian physics, distributed shard
 architecture. **This worktree is the approved total-greenfield rebuild** (June 2026);
-since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at Step 25); the old code lives on `ecs-system` as reference/spec ONLY.
+since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at Step 25); since 2026-10-14 `main` is fast-forwarded from the `game` worktree and THE WORK CONTINUES IN THE MAIN CHECKOUT (dev-cluster slot 52); the old code lives on `ecs-system` as reference/spec ONLY.
 
 ## THE binding specs — read before designing anything
 
@@ -460,6 +460,13 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     leave at the node MEAN, so no valley cuts below it (exits 100 / 300 m lower: Kansas- / Tennessee-like numbers);
     STEP 1 the fine level's BASE LEVEL by a PUBLISHED LAW (Earth measures and checks it, gives no constant; FINE_VERSION
     4); STEP 2 the 8 km world's valleys (B78's dry-world cure on the macro copy, generator 27, on the owner's word).
+    ★★ B95 (2026-10-13, the owner on the day-side hills: "Actually it looked very good! Hills as hills." — then "the
+    quality should be amazing on all levels" → "Yes, let's proceed please"): THE 128 m FORM ACCEPTED (its roughness a
+    reading); THE 16 m LEVEL BUILT NOW (design step B3, the generic tile machinery, seamless, the same bytes) ON ALL LAND A
+    PLAYER WALKS ON (amends §3.6's "only where the land rises"); then the 2–4 m level; the first look on foot at hull 17.
+    ★ B96 (2026-10-14, the owner: "Can you adjust the formula and law, so we don't break what we already have today?" →
+    "Go"): THE 16 m GROUND = TODAY'S DRAWN 128 m GROUND + THE LAW'S DETAIL FINER THAN 128 m (the law solved alone, no hold;
+    amends B95 item 2); THE PIPELINE BUILT END TO END through the one tile machinery, then the first look on foot.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

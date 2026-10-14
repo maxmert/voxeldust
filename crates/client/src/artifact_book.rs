@@ -30,6 +30,7 @@ use vd_terrain::artifact::{
 };
 use vd_terrain::chunk::ChunkKey;
 use vd_terrain::fine::l1::TileKey;
+use vd_terrain::fine::level::FineLevel;
 use vd_terrain::fine::read::{FineBook, FineField, L1_TOP_RUNG, applies};
 use vd_terrain::macro_lattice::MacroLattice;
 use vd_wire::channels::BulkMsg;
@@ -75,6 +76,11 @@ pub enum FieldPick {
     /// rough view ([`ArtifactCache::rough_view`]), and again when the tiles land: the rough ground stands only where no
     /// fine ground has arrived, never over it.
     Rough(SharedField),
+    /// ★ THE 128 m GROUND UNDER THE 16 m LEVEL (ruling B95): the 16 m level serves this chunk but a 16 m tile it reads
+    /// has not landed, while every 128 m tile it reads has. Build now on today's 128 m ground (the cache's coarse view,
+    /// [`ArtifactCache::coarse_view`]) and again when the 16 m tiles land — never the 8 km ground, and never a reason for
+    /// the login's loading screen to wait.
+    Coarse(SharedField),
     /// The level is still assembling, or a tile the stencil reads has not arrived: the coarser
     /// rung stands.
     Waiting,
@@ -85,6 +91,7 @@ impl std::fmt::Debug for FieldPick {
         match self {
             FieldPick::Ready(field) => write!(f, "Ready(level {})", field.level()),
             FieldPick::Rough(field) => write!(f, "Rough(level {})", field.level()),
+            FieldPick::Coarse(field) => write!(f, "Coarse(level {})", field.level()),
             FieldPick::Waiting => write!(f, "Waiting"),
         }
     }
@@ -109,9 +116,14 @@ pub struct ArtifactCache {
     /// ★ THE FINE TILES (the fine ground's way in, B2): the finished 128 m tiles the realm's shard shipped, `None` until
     /// the first lands (it states the tile's side). Shared by pointer; each tile's heights by pointer inside it.
     fine: Option<Arc<FineBook>>,
+    /// ★ THE 16 m TILES (ruling B95): the finished 16 m tiles the realm's shard shipped, `None` until the first lands.
+    finer: Option<Arc<FineBook>>,
     /// ★ A ROUGH VIEW (B86 item 7): the fine level is off — every rung reads the field under the fine ground. A chunk
     /// whose fine tiles have not landed is built on this view and built again on the whole cache when they land.
     rough: bool,
+    /// ★ A COARSE VIEW (ruling B95): the 16 m level is off — every rung reads the 128 m ground at most. A chunk whose 16 m
+    /// tiles have not landed is built on this view and built again on the whole cache when they land.
+    coarse: bool,
     /// Bumped on every accepted change, so a reader tells a changed cache from the one it read.
     pub epoch: u64,
 }
@@ -123,10 +135,17 @@ impl ArtifactCache {
         self.fine.as_ref()
     }
 
-    /// ★ THE FINE GROUND OVER A PICKED FIELD (B2): on a body where the 128 m level applies, a chunk at rungs 0–12 reads
-    /// its height from the fine tiles once every tile its stencils read is here, and until then is ROUGH (ruling B86
-    /// item 7: built on the field under the fine ground, and again when the tiles land); any other pick, and every pick
-    /// of a rough view, stands as it is.
+    /// The 16 m tiles held, if any has landed.
+    #[must_use]
+    pub fn finer(&self) -> Option<&Arc<FineBook>> {
+        self.finer.as_ref()
+    }
+
+    /// ★ THE FINE GROUND OVER A PICKED FIELD (B2; ruling B95): on a body where the fine levels apply, a chunk at rungs
+    /// 0–12 reads its height from the 128 m tiles once every tile its stencils read is here, and until then is ROUGH
+    /// (ruling B86 item 7: built on the field under the fine ground, and again when the tiles land); at the rungs the 16 m
+    /// level serves (0–6) it reads the 16 m tiles once every one its stencils read is here, and until then is COARSE
+    /// (built on the 128 m ground, and again when they land). Any other pick, and every pick of a rough view, stands.
     fn with_fine(&self, pick: FieldPick, key: ChunkKey) -> FieldPick {
         if self.rough || !applies(self.head.sea_m) || key.rung > L1_TOP_RUNG {
             return pick;
@@ -134,19 +153,28 @@ impl ArtifactCache {
         let FieldPick::Ready(inner) = pick else {
             return pick;
         };
-        match &self.fine {
-            Some(book)
-                if book.holds_all(
-                    &book.tiles_of_chunk(key.face, key.rung, key.x, key.y),
-                    key.rung,
-                ) =>
-            {
-                FieldPick::Ready(Arc::new(FineField {
-                    inner,
-                    book: Arc::clone(book),
-                }) as SharedField)
-            }
-            _ => FieldPick::Rough(inner),
+        let holds = |book: &FineBook| {
+            book.holds_all(
+                &book.tiles_of_chunk(key.face, key.rung, key.x, key.y),
+                key.rung,
+            )
+        };
+        let Some(book) = self.fine.as_ref().filter(|b| holds(b)) else {
+            return FieldPick::Rough(inner);
+        };
+        let field = |finer: Option<Arc<FineBook>>| {
+            Arc::new(FineField {
+                inner: Arc::clone(&inner),
+                book: Arc::clone(book),
+                finer,
+            }) as SharedField
+        };
+        if self.coarse || key.rung > FineLevel::L2.top_rung() {
+            return FieldPick::Ready(field(None));
+        }
+        match self.finer.as_ref().filter(|f| holds(f)) {
+            Some(finer) => FieldPick::Ready(field(Some(Arc::clone(finer)))),
+            None => FieldPick::Coarse(field(None)),
         }
     }
 
@@ -157,9 +185,50 @@ impl ArtifactCache {
     pub fn rough_view(&self) -> ArtifactCache {
         ArtifactCache {
             fine: None,
+            finer: None,
             rough: true,
             ..self.clone()
         }
+    }
+
+    /// ★ THE COARSE VIEW of this cache (ruling B95): the same cache with the 16 m level off — what a chunk whose 16 m
+    /// tiles have not landed is built on, so its own field, its parents' and its morph's are the one 128 m ground.
+    #[must_use]
+    pub fn coarse_view(&self) -> ArtifactCache {
+        ArtifactCache {
+            finer: None,
+            coarse: true,
+            ..self.clone()
+        }
+    }
+
+    /// Whether this cache is a coarse view.
+    #[must_use]
+    pub fn is_coarse_view(&self) -> bool {
+        self.coarse
+    }
+
+    /// ★ THE 16 m GROUND IS NOT HERE YET (ruling B95): whether the 16 m level serves the column `(face, rung, x, y)` of a
+    /// whole cache on a body where the fine levels apply, and one of the 16 m tiles its stencils read has not landed — a
+    /// span read for it now stands on the 128 m ground, provisional, and is read again until they land.
+    #[must_use]
+    pub fn finer_waits(&self, face: vd_seed::bend::Face, rung: u8, x: i32, y: i32) -> bool {
+        let serves = !self.rough
+            & !self.coarse
+            & applies(self.head.sea_m)
+            & (rung <= FineLevel::L2.top_rung());
+        let held = self
+            .finer
+            .as_ref()
+            .is_some_and(|b| b.holds_all(&b.tiles_of_chunk(face, rung, x, y), rung));
+        serves & !held
+    }
+
+    /// Whether a chunk built now on this cache would stand on the 128 m ground under the 16 m level: a coarse view, or
+    /// the 16 m level serving the chunk with one of its 16 m tiles not landed.
+    #[must_use]
+    pub fn is_coarse(&self, lattice: &MacroLattice, key: ChunkKey) -> bool {
+        self.coarse || matches!(self.field_for(lattice, key), FieldPick::Coarse(_))
     }
 
     /// Whether this cache is a rough view.
@@ -188,7 +257,9 @@ impl ArtifactCache {
             coast: None,
             counts: None,
             fine: None,
+            finer: None,
             rough: false,
+            coarse: false,
             epoch: 1,
         }
     }
@@ -301,11 +372,18 @@ impl ArtifactCache {
         // was kept as final; where the fine ground stood 1.1 km lower, 3 843 of 3 989 chunks were empty and 1 480 columns
         // were holes.
         let serves = !self.rough & applies(self.head.sea_m) & (rung <= L1_TOP_RUNG);
+        // The 16 m book under the rungs it serves, where it has landed and the view is not coarse (ruling B95).
+        let finer = self
+            .finer
+            .as_ref()
+            .filter(|_| !self.coarse & (rung <= FineLevel::L2.top_rung()))
+            .map(Arc::clone);
         match (serves, self.fine.as_ref()) {
             (false, _) => Some(field),
             (true, Some(book)) => Some(Arc::new(FineField {
                 inner: field,
                 book: Arc::clone(book),
+                finer,
             }) as SharedField),
             (true, None) => None,
         }
@@ -451,7 +529,7 @@ pub struct ArtifactReceiver {
     /// never dropped (each tile is shipped once) and never applied unchecked.
     parked: BTreeMap<RealmId, Vec<ParkedTile>>,
     /// ★ THE FINE TILES ASSEMBLING (B2): each tile's parts by realm and key, `None` for a part not here.
-    fine_parts: BTreeMap<(RealmId, TileKey), Vec<Option<Vec<u8>>>>,
+    fine_parts: BTreeMap<FinePartsKey, Vec<Option<Vec<u8>>>>,
     /// Whole fine tiles that arrived before their head: decoded, parked, bounded as the tiles are.
     fine_parked: BTreeMap<RealmId, Vec<ParkedFine>>,
     /// ★ THE FINE TILES HELD, NOT YET STATED (ruling B81 Q3): each tile's finest level once it is held, for the client
@@ -460,11 +538,14 @@ pub struct ArtifactReceiver {
     pub counters: ArtifactCounters,
 }
 
+/// A fine tile's parts are kept by its realm, its level and its key.
+type FinePartsKey = (RealmId, FineLevel, TileKey);
+
 /// A parked tile: its face, its column and row in tiles, and its rows' bytes.
 type ParkedTile = (u8, u32, u32, Vec<u8>);
 
-/// A parked fine tile: its key, its side's shift, its first level and its decoded levels from it.
-type ParkedFine = (TileKey, u32, u32, Vec<Vec<i32>>);
+/// A parked fine tile: its fine level, its key, its side's shift, its first level and its decoded levels from it.
+type ParkedFine = (FineLevel, TileKey, u32, u32, Vec<Vec<i32>>);
 
 /// How many tiles a realm may park before its head arrives: the pace ships four a tick, so this
 /// is over a minute of tiles; past it the oldest is dropped and counted.
@@ -485,7 +566,7 @@ impl ArtifactReceiver {
         self.assembling.retain(|(r, _), _| *r != realm);
         self.coasts.remove(&realm);
         self.parked.remove(&realm);
-        self.fine_parts.retain(|(r, _), _| *r != realm);
+        self.fine_parts.retain(|(r, _, _), _| *r != realm);
         self.fine_parked.remove(&realm);
     }
 
@@ -610,8 +691,8 @@ impl ArtifactReceiver {
             let landed = self.accept_tile(realm, face, tx, ty, &rows);
             self.count(landed);
         }
-        for (key, ts, lo, levels) in self.fine_parked.remove(&realm).unwrap_or_default() {
-            if self.hold_fine(realm, key, ts, lo, levels) {
+        for (level, key, ts, lo, levels) in self.fine_parked.remove(&realm).unwrap_or_default() {
+            if self.hold_fine(realm, level, key, ts, lo, levels) {
                 self.counters.fine_tiles += 1;
             } else {
                 self.counters.shape += 1;
@@ -830,10 +911,10 @@ impl ArtifactReceiver {
         ArtifactIngest::Tile
     }
 
-    /// ★ ONE FINE PART IN (B2): kept until the record's parts are all here, then the record decoded and its levels held
-    /// (ruling B86 item 3: a far tile's coarse levels first, its finer ones joining them later) — or parked until its
-    /// realm's head. A level other than the 128 m one, a part past its count or a record that does not decode is refused
-    /// by shape.
+    /// ★ ONE FINE PART IN (B2; ruling B95): kept until the record's parts are all here, then the record decoded and its
+    /// levels held in its fine level's book (ruling B86 item 3: a far tile's coarse levels first, its finer ones joining
+    /// them later) — or parked until its realm's head. A fine level no book holds, a part past its count or a record that
+    /// does not decode is refused by shape.
     fn accept_fine(
         &mut self,
         realm: RealmId,
@@ -842,7 +923,10 @@ impl ArtifactReceiver {
         (part, parts): (u32, u32),
         bytes: Vec<u8>,
     ) -> ArtifactIngest {
-        let Some(face) = vd_seed::bend::Face::from_index(face).filter(|_| level == 1) else {
+        let (Some(face), Some(level)) = (
+            vd_seed::bend::Face::from_index(face),
+            FineLevel::from_id(level),
+        ) else {
             return ArtifactIngest::Shape;
         };
         if (part >= parts)
@@ -859,7 +943,7 @@ impl ArtifactReceiver {
         };
         let slots = self
             .fine_parts
-            .entry((realm, key))
+            .entry((realm, level, key))
             .or_insert_with(|| vec![None; parts as usize]);
         if slots.len() != parts as usize {
             // A tile shipped again under another cut starts over.
@@ -874,13 +958,13 @@ impl ArtifactReceiver {
         }
         let record: Vec<u8> = self
             .fine_parts
-            .remove(&(realm, key))
+            .remove(&(realm, level, key))
             .unwrap_or_default()
             .into_iter()
             .flatten()
             .flatten()
             .collect();
-        let Some((ts, lo, levels)) = vd_terrain::fine::tile::decode_range(&record) else {
+        let Some((ts, lo, levels)) = vd_terrain::fine::tile::decode_range(&record, level) else {
             return ArtifactIngest::Shape;
         };
         if !self.book.realms.contains_key(&realm) {
@@ -889,22 +973,24 @@ impl ArtifactReceiver {
                 parked.remove(0);
                 self.counters.parked_dropped += 1;
             }
-            parked.push((key, ts, lo, levels));
+            parked.push((level, key, ts, lo, levels));
             return ArtifactIngest::FineParked;
         }
-        if self.hold_fine(realm, key, ts, lo, levels) {
+        if self.hold_fine(realm, level, key, ts, lo, levels) {
             ArtifactIngest::FineTile
         } else {
             ArtifactIngest::Shape
         }
     }
 
-    /// One fine tile's levels from `lo` into its realm's book, the book made with the head's own numbers on the first
-    /// tile; `false` where the tile's side is not the book's, its levels are not the side's, or they do not join the
-    /// levels held.
+    /// One fine tile's levels from `lo` into its realm's book of its fine level, the book made with the head's own numbers
+    /// on the first tile; `false` where the tile's side is not the book's, its levels are not the side's, or they do not
+    /// join the levels held. A 128 m tile is stated as held (`ClientControlMsg::FineHeld` names 128 m tiles; the 16 m
+    /// tiles' statement is owed a wire step, SL6).
     fn hold_fine(
         &mut self,
         realm: RealmId,
+        level: FineLevel,
         key: TileKey,
         ts: u32,
         lo: u32,
@@ -913,9 +999,12 @@ impl ArtifactReceiver {
         let Some(cache) = Arc::make_mut(&mut self.book).realms.get_mut(&realm) else {
             return false;
         };
-        let fresh = || FineBook::with_side(cache.head.edge, ts, cache.head.sea_m);
-        let Some(mut book) = cache
-            .fine
+        let fresh = || FineBook::with_side(level, cache.head.edge, ts, cache.head.sea_m);
+        let slot = match level {
+            FineLevel::L1 => &mut cache.fine,
+            FineLevel::L2 => &mut cache.finer,
+        };
+        let Some(mut book) = slot
             .as_deref()
             .cloned()
             .or_else(fresh)
@@ -927,12 +1016,14 @@ impl ArtifactReceiver {
             return false;
         }
         let held = book.held_from(key).unwrap_or(lo) as u8;
-        cache.fine = Some(Arc::new(book));
+        *slot = Some(Arc::new(book));
         cache.epoch += 1;
-        self.fine_held.push((
-            realm,
-            (key.face.index(), key.tx as u32, key.ty as u32, held),
-        ));
+        if level == FineLevel::L1 {
+            self.fine_held.push((
+                realm,
+                (key.face.index(), key.tx as u32, key.ty as u32, held),
+            ));
+        }
         true
     }
 
@@ -1000,21 +1091,39 @@ mod tests {
         }
     }
 
-    /// A fine tile's record `2^ts` cells wide, every level one height.
+    /// A 128 m tile's record `2^ts` cells wide, every level one height.
     fn fine_record(ts: u32) -> Vec<u8> {
-        let levels: Vec<Vec<i32>> = (0..=vd_terrain::fine::read::MEAN_LEVELS)
-            .map(|k| vec![100 + k as i32; (1usize << (ts - k)) * (1usize << (ts - k))])
+        fine_record_of(ts, vd_terrain::fine::read::MEAN_LEVELS)
+    }
+
+    /// A fine tile's record `2^ts` cells wide with `means` mean levels, level `k` the height `100 + k` (a 16 m tile's
+    /// `200 + k`, so a read tells the two levels apart).
+    fn fine_record_of(ts: u32, means: u32) -> Vec<u8> {
+        let base = if means == vd_terrain::fine::read::MEAN_LEVELS {
+            100
+        } else {
+            200
+        };
+        let levels: Vec<Vec<i32>> = (0..=means)
+            .map(|k| vec![base + k as i32; (1usize << (ts - k)) * (1usize << (ts - k))])
             .collect();
         let whole = vd_terrain::fine::tile::encode_levels(&levels, ts).expect("codes");
-        vd_terrain::fine::tile::range_record(&whole, 0, vd_terrain::fine::read::MEAN_LEVELS + 1)
-            .expect("a range")
+        vd_terrain::fine::tile::range_record(&whole, 0, means + 1).expect("a range")
     }
 
     /// The field a pick hands a build on the fine ground, or none while it waits or stands on the rough ground.
     fn ready(pick: FieldPick) -> Option<SharedField> {
         match pick {
             FieldPick::Ready(field) => Some(field),
-            FieldPick::Rough(_) | FieldPick::Waiting => None,
+            FieldPick::Rough(_) | FieldPick::Coarse(_) | FieldPick::Waiting => None,
+        }
+    }
+
+    /// The field a pick hands a build on the 128 m ground under the 16 m level.
+    fn coarse(pick: FieldPick) -> Option<SharedField> {
+        match pick {
+            FieldPick::Coarse(field) => Some(field),
+            FieldPick::Ready(_) | FieldPick::Rough(_) | FieldPick::Waiting => None,
         }
     }
 
@@ -1022,7 +1131,7 @@ mod tests {
     fn rough(pick: FieldPick) -> Option<SharedField> {
         match pick {
             FieldPick::Rough(field) => Some(field),
-            FieldPick::Ready(_) | FieldPick::Waiting => None,
+            FieldPick::Ready(_) | FieldPick::Coarse(_) | FieldPick::Waiting => None,
         }
     }
 
@@ -1058,8 +1167,8 @@ mod tests {
             rx.accept(part(1, 2, &record[half..])),
             ArtifactIngest::FineParked
         );
-        // By shape: another level, a face past six, a part past its count, a count past the bound, a record that is
-        // no record.
+        // By shape: a level no level holds, a face past six, a part past its count, a count past the bound, a record
+        // that is no record.
         let shaped =
             |level: u8, face: u8, part: u32, parts: u32, bytes: Vec<u8>| BulkMsg::FineTilePart {
                 realm: wet,
@@ -1072,7 +1181,7 @@ mod tests {
                 bytes,
             };
         for msg in [
-            shaped(2, 2, 0, 1, record.clone()),
+            shaped(3, 2, 0, 1, record.clone()),
             shaped(1, 6, 0, 1, record.clone()),
             shaped(1, 2, 1, 1, record.clone()),
             shaped(1, 2, 0, MAX_FINE_PARTS + 1, record.clone()),
@@ -1163,10 +1272,56 @@ mod tests {
             y: 100,
             z: 0,
         };
-        let wrapped = ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100)))
-            .expect("ready");
+        // ★ THE 16 m LEVEL (ruling B95): with no 16 m tile here the chunk is COARSE — built on the 128 m ground, and the
+        // cache's coarse view reads the same chunk on it as ready; a rung over 6 is ready on the 128 m ground alone.
+        let wrapped = coarse(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100)))
+            .expect("coarse");
         assert!(!Arc::ptr_eq(&wrapped, &inner));
         assert_eq!(
+            wrapped.fine_z(face, 0, 0, 6_230, 6_230),
+            cache.fine().expect("a book").z(face, 0, 0, 6_230, 6_230)
+        );
+        let lattice = MacroLattice::of(&home_moon()).expect("a lattice");
+        // Its span waits for the 16 m ground; a rung over 6 and the rough and coarse views do not.
+        assert!(cache.finer_waits(face, 0, 100, 100));
+        assert!(!cache.finer_waits(face, 7, 1, 100));
+        assert!(!cache.rough_view().finer_waits(face, 0, 100, 100));
+        assert!(!cache.coarse_view().finer_waits(face, 0, 100, 100));
+        let view = cache.coarse_view();
+        assert_eq!(
+            (view.is_coarse_view(), cache.is_coarse_view()),
+            (true, false)
+        );
+        assert!(view.is_coarse(&lattice, at(0, 100)));
+        assert!(ready(view.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100))).is_some());
+        assert!(ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(7, 1))).is_some());
+        // The 16 m tile under the chunk (samples 384 … 394 at rung 4: the tile (12, 12) alone) lands; the chunk is ready
+        // on it, and reads the 16 m ground.
+        let finer = |tx: u32, bytes: &[u8]| BulkMsg::FineTilePart {
+            realm: wet,
+            level: 2,
+            face: 2,
+            tx,
+            ty: 12,
+            part: 0,
+            parts: 1,
+            bytes: bytes.to_vec(),
+        };
+        assert_eq!(
+            rx.accept(finer(12, &fine_record_of(5, 2))),
+            ArtifactIngest::FineTile
+        );
+        // A 16 m record that carries the 128 m level's count of levels is refused by shape.
+        assert_eq!(rx.accept(finer(13, &record)), ArtifactIngest::Shape);
+        let cache = rx.book().get(wet).cloned().expect("a cache");
+        assert!(!cache.finer_waits(face, 0, 100, 100));
+        let wrapped = ready(cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100)))
+            .expect("ready");
+        assert_eq!(
+            wrapped.fine_z(face, 0, 0, 6_230, 6_230),
+            cache.finer().expect("a book").z(face, 0, 0, 6_230, 6_230)
+        );
+        assert_ne!(
             wrapped.fine_z(face, 0, 0, 6_230, 6_230),
             cache.fine().expect("a book").z(face, 0, 0, 6_230, 6_230)
         );
@@ -1189,7 +1344,6 @@ mod tests {
         assert!(Arc::ptr_eq(&kept, &inner));
         assert!(ready(cache.with_fine(FieldPick::Waiting, at(0, 100))).is_none());
         // The rung's field reads the fine ground too, at rungs it serves.
-        let lattice = MacroLattice::of(&home_moon()).expect("a lattice");
         let near = cache.field_at_rung(&lattice, 3).expect("a field");
         assert_eq!(
             near.fine_z(face, 3, 3, 778, 778),
@@ -1205,6 +1359,7 @@ mod tests {
         let kept = ready(dry_cache.with_fine(FieldPick::Ready(Arc::clone(&inner)), at(0, 100)))
             .expect("ready");
         assert!(Arc::ptr_eq(&kept, &inner));
+        assert!(!dry_cache.finer_waits(face, 0, 100, 100));
         // A wet realm with no tile yet waits, and its fine rungs' field is not here yet (a reader stands on a coarser level
         // and reads again); over rung 12 the plain field answers.
         let bare = RealmId::Planet(79);

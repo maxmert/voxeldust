@@ -941,6 +941,7 @@ fn main() {
         let drawn = artifact.drawn_range_m(&lattice);
         let body = body.with_sea_m(artifact.sea());
         let needs = vd_terrain::artifact::fine_needs_of_head(
+            vd_terrain::fine::level::FineLevel::L1,
             &body,
             (drawn.0, drawn.1, artifact.sea_m),
             dir,
@@ -974,6 +975,12 @@ fn main() {
         use vd_terrain::fine::tile::{finish, raw_field};
         let shift = cells_per_node_shift(&body, &lattice, 7).expect("nests");
         let n7 = (lattice.edge << shift) as i32;
+        let geom = vd_terrain::fine::level::LevelGeom::of(
+            vd_terrain::fine::level::FineLevel::L1,
+            &body,
+            &lattice,
+        )
+        .expect("a level");
         let side = i64::from(TILE_NODES) << shift;
         let ts = shift + TILE_NODES.trailing_zeros();
         let edge = lattice.edge as i32;
@@ -1028,7 +1035,7 @@ fn main() {
         }
         let raw_keys: Vec<TileKey> = fin_keys
             .iter()
-            .flat_map(|&k| block_keys(k, shift, n7).into_iter().flatten())
+            .flat_map(|&k| block_keys(k, geom).into_iter().flatten())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -1049,14 +1056,10 @@ fn main() {
                     .map(|&key| {
                         let (body, lattice, artifact) = (&body, &lattice, &artifact);
                         scope.spawn(move || {
-                            (
-                                key,
-                                raw_field(
-                                    key,
-                                    solve_l1(body, lattice, artifact, key).expect("solves"),
-                                    shift,
-                                ),
-                            )
+                            (key, {
+                                let t = solve_l1(body, lattice, artifact, key).expect("solves");
+                                raw_field(key, geom, t.side, t.quarters)
+                            })
                         })
                     })
                     .collect();
@@ -1071,7 +1074,7 @@ fn main() {
         );
         let mut fin: BTreeMap<TileKey, Vec<i32>> = BTreeMap::new();
         for &k in &fin_keys {
-            let block = block_keys(k, shift, n7).map(|b| b.map(|b| (b, &raw[&b])));
+            let block = block_keys(k, geom).map(|b| b.map(|b| (b, &raw[&b])));
             let kind = match block
                 .iter()
                 .flatten()
@@ -1084,7 +1087,7 @@ fn main() {
                 _ => "at the cube corner",
             };
             let t = Instant::now();
-            let levels = finish(block, shift, n7).unwrap_or_else(|| panic!("{k:?} finishes"));
+            let levels = finish(block, geom).unwrap_or_else(|| panic!("{k:?} finishes"));
             println!(
                 "B2 THE FACE'S EDGE: {k:?} {kind} finished in {:.3} s",
                 t.elapsed().as_secs_f64()
@@ -1281,7 +1284,12 @@ fn main() {
         // B2: the generator's own forms — `finish` gives the same square, and the record decodes back exactly.
         {
             use vd_terrain::fine::tile::{decode_levels, encode_levels, finish};
-            let n7 = (lattice.edge << shift) as i32;
+            let geom = vd_terrain::fine::level::LevelGeom::of(
+                vd_terrain::fine::level::FineLevel::L1,
+                &body,
+                &lattice,
+            )
+            .expect("a level");
             let block: [Option<(TileKey, &Field)>; 9] = std::array::from_fn(|s| {
                 let (dx, dy) = (s as i32 % 3 - 1, s as i32 / 3 - 1);
                 Some((
@@ -1293,7 +1301,7 @@ fn main() {
                     at(dx, dy),
                 ))
             });
-            let levels = finish(block, shift as u32, n7).expect("finishes");
+            let levels = finish(block, geom).expect("finishes");
             let ts = side.trailing_zeros();
             let record = encode_levels(&levels, ts).expect("codes");
             println!(
@@ -1304,7 +1312,9 @@ fn main() {
                     "NOT"
                 },
                 record.len() as f64 / 1_000.0,
-                if decode_levels(&record) == Some((ts, levels)) {
+                if decode_levels(&record, vd_terrain::fine::level::FineLevel::L1)
+                    == Some((ts, levels))
+                {
                     "exactly"
                 } else {
                     "NOT"
@@ -1347,7 +1357,13 @@ fn main() {
         {
             use vd_terrain::fine::read::{FineBook, FineZ, MEAN_LEVELS};
             use vd_terrain::fine::stitch::mean_levels;
-            let mut book = FineBook::new(&body, &lattice, artifact.sea_m).expect("a book");
+            let mut book = FineBook::new(
+                vd_terrain::fine::level::FineLevel::L1,
+                &body,
+                &lattice,
+                artifact.sea_m,
+            )
+            .expect("a book");
             for (f, (dx, dy)) in fin.iter().zip([(0, 0), (1, 0), (0, 1), (1, 1)]) {
                 let mut levels = vec![f.v.clone()];
                 levels.extend(mean_levels(f, f.gx0, f.gy0, f.w, MEAN_LEVELS).expect("the means"));
@@ -1700,8 +1716,13 @@ fn main() {
             held.len(),
             &named[..3.min(named.len())]
         );
-        let book =
-            vd_terrain::fine::read::FineBook::new(&body, &lattice, artifact.sea_m).expect("a book");
+        let book = vd_terrain::fine::read::FineBook::new(
+            vd_terrain::fine::level::FineLevel::L1,
+            &body,
+            &lattice,
+            artifact.sea_m,
+        )
+        .expect("a book");
         let key = ChunkKey {
             face: Face::from_index(k[0] as u8).expect("a face"),
             rung: k[1] as u8,
@@ -1790,7 +1811,12 @@ fn main() {
             centre.dot(sun).asin().to_degrees()
         );
         // The 5 × 5 raw block, then the 3 × 3 finished around the centre (the centre's own stencil reads one more).
-        let shift = vd_terrain::fine::l1::cells_per_node_shift(&body, &lattice, 7).expect("nests");
+        let geom = vd_terrain::fine::level::LevelGeom::of(
+            vd_terrain::fine::level::FineLevel::L1,
+            &body,
+            &lattice,
+        )
+        .expect("a level");
         let keys: Vec<TileKey> = (-2..=2)
             .flat_map(|dy| {
                 (-2..=2).map(move |dx| TileKey {
@@ -1809,14 +1835,19 @@ fn main() {
                     scope.spawn(move || {
                         let t = vd_terrain::fine::l1::solve_l1(body, lattice, artifact, k)
                             .expect("solves");
-                        vd_terrain::fine::tile::raw_field(k, t, shift)
+                        vd_terrain::fine::tile::raw_field(k, geom, t.side, t.quarters)
                     })
                 })
                 .collect();
             hs.into_iter().map(|h| h.join().expect("a tile")).collect()
         });
-        let mut book =
-            vd_terrain::fine::read::FineBook::new(&body, &lattice, artifact.sea_m).expect("a book");
+        let mut book = vd_terrain::fine::read::FineBook::new(
+            vd_terrain::fine::level::FineLevel::L1,
+            &body,
+            &lattice,
+            artifact.sea_m,
+        )
+        .expect("a book");
         let at = |dx: i32, dy: i32| &raw[((dy + 2) * 5 + dx + 2) as usize];
         for (dx, dy) in (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy))) {
             let k = TileKey {
@@ -1824,7 +1855,6 @@ fn main() {
                 tx: key.tx + dx,
                 ty: key.ty + dy,
             };
-            let n7 = (lattice.edge << shift) as i32;
             let block: [Option<(TileKey, &Field)>; 9] = std::array::from_fn(|s| {
                 let (sx, sy) = (s as i32 % 3 - 1, s as i32 / 3 - 1);
                 Some((
@@ -1836,7 +1866,7 @@ fn main() {
                     at(dx + sx, dy + sy),
                 ))
             });
-            let levels = vd_terrain::fine::tile::finish(block, shift, n7).expect("finishes");
+            let levels = vd_terrain::fine::tile::finish(block, geom).expect("finishes");
             assert!(book.insert(k, levels));
         }
         println!(
@@ -2068,7 +2098,7 @@ fn main() {
                 .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
                 .all(|(dx, dy)| {
                     work.parts(
-                        (k[0] as u8, (k[1] + dx) as u32, (k[2] + dy) as u32),
+                        (1, k[0] as u8, (k[1] + dx) as u32, (k[2] + dy) as u32),
                         0,
                         vd_sim::stub::fine_ship::NONE_HELD,
                     )
@@ -2096,7 +2126,7 @@ fn main() {
         let (raw, fin, fly) = work.progress();
         let parts = work
             .parts(
-                (k[0] as u8, k[1] as u32, k[2] as u32),
+                (1, k[0] as u8, k[1] as u32, k[2] as u32),
                 0,
                 vd_sim::stub::fine_ship::NONE_HELD,
             )

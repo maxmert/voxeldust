@@ -277,13 +277,16 @@ pub(crate) fn on_client_control(
             }
         }
         // ★ THE FINE TILES HELD (ruling B81 Q3): the finest level of each tile the client holds, kept on the session
-        // so a re-drive re-sends only what the client lacks.
+        // so a re-drive re-sends only what the client lacks. The message names 128 m tiles (its shape carries no fine
+        // level; the 16 m tiles' acknowledgement is owed a wire step, SL6), so a 16 m tile is never acknowledged and a
+        // re-drive sends it again.
         ClientControlMsg::FineHeld { realm, tiles } => {
             let session_id = sessions.by_client.get(&client).copied();
             if let Some(session) = session_id.and_then(|id| sessions.by_session.get_mut(&id)) {
                 let acked = session.fine_acked.entry(realm).or_default();
+                let l1 = vd_terrain::fine::level::FineLevel::L1.id();
                 for (face, tx, ty, level) in tiles {
-                    let held = acked.entry((face, tx, ty)).or_insert(level);
+                    let held = acked.entry((l1, face, tx, ty)).or_insert(level);
                     *held = (*held).min(level);
                     stats.fine_held_stated += 1;
                 }

@@ -170,6 +170,10 @@ pub struct ChunkGeometry {
     /// the field under the fine ground because a fine tile had not landed. The lane builds it again once every tile
     /// it and its parents read is here ([`ChunkLane::upgradable`]).
     pub rough: bool,
+    /// ★ BUILT ON THE 128 m GROUND UNDER THE 16 m LEVEL (ruling B95): the chunk, or a parent its morph read, stood on the
+    /// 128 m ground because a 16 m tile had not landed. Built again once they land; never a reason for the login's
+    /// loading screen to wait.
+    pub coarse: bool,
     /// THE BOX that holds every vertex, its morph target and its sunk position — wherever the
     /// vertex stage can put a vertex, so the engine culls by it. Built by the worker (refutation
     /// P-8: on the main thread it cost two square roots a vertex in the harvest loop). Zero for an
@@ -402,11 +406,37 @@ impl ChunkWorkers for InlineWorkers {
 /// finer surface shadowed it (34 dark specks on the hill at 950 m, 1.9 km and 3.8 km). Two
 /// finer neighbours read one and the same parent surface for the vertex they share, because
 /// every crossing of the parent's box is in it, owned or not.
+/// ★ THE GROUND A READER'S PARENT MUST STAND ON (B86 item 7; ruling B95): any (a reader on the rough ground), the 128 m
+/// ground or finer (a reader on the 128 m ground under the 16 m level), or the whole fine ground.
+///
+/// **Example.** A rung-2 chunk under hull 17 whose 16 m tiles have not landed is built on the 128 m ground; its rung-3
+/// parent may stand on the 128 m ground, never on the 8 km ground under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParentGround {
+    Any,
+    Coarse,
+    Fine,
+}
+
+impl ParentGround {
+    /// Whether a held parent mesh stands on this ground or a finer one.
+    fn takes(self, mesh: &ParentMesh) -> bool {
+        match self {
+            ParentGround::Any => true,
+            ParentGround::Coarse => !mesh.rough,
+            ParentGround::Fine => !(mesh.rough | mesh.coarse),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ParentMesh {
     key: ChunkKey,
     /// ★ Built on the rough ground (B86 item 7): a fine reader builds it again once the parent's fine tiles land.
     rough: bool,
+    /// ★ Built on the 128 m ground under the 16 m level (ruling B95): a fine reader builds it again once the parent's
+    /// 16 m tiles land.
+    coarse: bool,
     /// The mesh's origin in the body's frame, in metres: the centre of the parent's middle cell.
     /// Positions are `f32` from it (step 5, D-TERRAIN-5 item 10): a chunk of 248 m at rung 2
     /// rounds to 15 µm, the coarsest of 127 km to 8 mm — under a hundredth of a pixel at any
@@ -500,6 +530,9 @@ impl ParentMesh {
         let rough = artifact
             .zip(body.macro_lattice())
             .is_some_and(|(a, lattice)| a.is_rough(&lattice, key));
+        let coarse = artifact
+            .zip(body.macro_lattice())
+            .is_some_and(|(a, lattice)| a.is_coarse(&lattice, key));
         let samples = sample_box(body, field.as_deref().map(|f| f as &dyn ZField), key)?;
         // The parent's surface with its sealed hollows as rock, as the drawn chunk reads its own.
         let samples = sealed_hollows(body, &samples).unwrap_or(samples);
@@ -584,6 +617,7 @@ impl ParentMesh {
         Some(ParentMesh {
             key,
             rough,
+            coarse,
             origin,
             positions,
             normals,
@@ -874,12 +908,21 @@ impl ParentCache {
         artifact: Option<&ArtifactCache>,
         key: ChunkKey,
     ) -> Option<Arc<ParentMesh>> {
-        // ★ A ROUGH MESH IS NOT A FINE READER'S (B86 item 7): where the parent's fine tiles are all here now, a mesh
-        // built on the rough ground before is built again.
-        let fine = artifact
-            .zip(body.macro_lattice())
-            .is_some_and(|(a, lattice)| !a.is_rough(&lattice, key));
-        match self.claim_for(realm, key, fine) {
+        // ★ A ROUGH MESH IS NOT A FINE READER'S (B86 item 7; ruling B95): the parent stands on the ground the reader's
+        // view reads there — a mesh built on a coarser ground before is built again.
+        let ground =
+            artifact
+                .zip(body.macro_lattice())
+                .map_or(ParentGround::Any, |(a, lattice)| {
+                    if a.is_rough(&lattice, key) {
+                        ParentGround::Any
+                    } else if a.is_coarse(&lattice, key) {
+                        ParentGround::Coarse
+                    } else {
+                        ParentGround::Fine
+                    }
+                });
+        match self.claim_for(realm, key, ground) {
             Claim::Hit(found) => Some(found),
             Claim::Build(guard) => {
                 let built = ParentMesh::build(body, artifact, key).map(Arc::new);
@@ -892,19 +935,19 @@ impl ParentCache {
     /// Claim `key`: a hit returns at once (and refreshes its use); a miss another reader builds
     /// WAITS, then reads a hit; a miss nobody builds is claimed, and the guard must `finish`.
     pub fn claim(&self, realm: RealmId, key: ChunkKey) -> Claim<'_> {
-        self.claim_for(realm, key, false)
+        self.claim_for(realm, key, ParentGround::Any)
     }
 
-    /// [`ParentCache::claim`] for a reader that wants the parent on the fine ground when `fine`: a held mesh built on
-    /// the rough ground is then a miss, built again in its place.
-    pub fn claim_for(&self, realm: RealmId, key: ChunkKey, fine: bool) -> Claim<'_> {
+    /// [`ParentCache::claim`] for a reader that wants the parent on `ground` at least: a held mesh built on a coarser
+    /// ground is then a miss, built again in its place.
+    pub fn claim_for(&self, realm: RealmId, key: ChunkKey, ground: ParentGround) -> Claim<'_> {
         let mut store = self.lock();
         let mut waited = false;
         loop {
             let usable = store
                 .map
                 .get(&(realm, key))
-                .is_some_and(|e| !(fine & e.mesh.rough));
+                .is_some_and(|e| ground.takes(&e.mesh));
             if usable {
                 let found = touch(&mut store, realm, key);
                 store.stats.hits += 1;
@@ -1187,6 +1230,21 @@ pub fn geometry_of(body: &BodyDefinition, key: ChunkKey) -> Option<ChunkGeometry
     geometry_with(body, None, RealmId::Planet(0), key, &ParentCache::default())
 }
 
+/// ★ THE VIEW A CHUNK IS BUILT ON (ruling B86 item 7; ruling B95): the rough view where a fine tile its stencils read
+/// has not landed, the coarse view where a 16 m tile has not, else the whole cache — so its own field, its parents' and
+/// its morph's are one ground.
+fn build_view(
+    artifact: &Arc<ArtifactCache>,
+    body: &BodyDefinition,
+    key: ChunkKey,
+) -> Arc<ArtifactCache> {
+    match body.macro_lattice() {
+        Some(lattice) if artifact.is_rough(&lattice, key) => Arc::new(artifact.rough_view()),
+        Some(lattice) if artifact.is_coarse(&lattice, key) => Arc::new(artifact.coarse_view()),
+        _ => Arc::clone(artifact),
+    }
+}
+
 /// ★ THE FIELD A CHUNK READS (slice 8c stage C4c): `Some(None)` without an artifact (the recipe's
 /// own coarse relief), `Some(Some(field))` when the artifact's field for this chunk is whole, and
 /// `None` while it is not — the build makes nothing, and the coarser rung stands (ruling F9). A
@@ -1204,7 +1262,9 @@ pub fn field_of(
         return Some(None);
     };
     match artifact.field_for(&lattice, key) {
-        FieldPick::Ready(field) | FieldPick::Rough(field) => Some(Some(field)),
+        FieldPick::Ready(field) | FieldPick::Rough(field) | FieldPick::Coarse(field) => {
+            Some(Some(field))
+        }
         FieldPick::Waiting => None,
     }
 }
@@ -1334,6 +1394,9 @@ pub fn geometry_with(
     geometry.rough |= artifact
         .zip(body.macro_lattice())
         .is_some_and(|(a, lattice)| a.is_rough(&lattice, key));
+    geometry.coarse |= artifact
+        .zip(body.macro_lattice())
+        .is_some_and(|(a, lattice)| a.is_coarse(&lattice, key));
     Some(geometry)
 }
 
@@ -1379,6 +1442,9 @@ pub fn geometry_from(
     // ★ ROUGH (B86 item 7): built on a rough view, or a parent's mesh stood on the rough ground.
     let rough =
         artifact.is_some_and(ArtifactCache::is_rough_view) | parent_meshes.iter().any(|p| p.rough);
+    // ★ COARSE (ruling B95): built on a coarse view, or a parent's mesh stood on the 128 m ground under the 16 m level.
+    let coarse = artifact.is_some_and(ArtifactCache::is_coarse_view)
+        | parent_meshes.iter().any(|p| p.coarse);
     // How far the coarser surface can stand from this vertex: the sink of the coarser rung.
     let reach_m = sink_m(body, coarser);
     let mut fallbacks = 0u32;
@@ -1510,6 +1576,7 @@ pub fn geometry_from(
         field_level: NO_FIELD,
         built_on: None,
         rough,
+        coarse,
     };
     let drop_m = skirt_drop_m(body, key.rung);
     let ceiling_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
@@ -1870,7 +1937,14 @@ pub struct ChunkLane {
     empty_resident: BTreeMap<(RealmId, ChunkKey), u32>,
     /// ★ THE RESIDENT CHUNKS BUILT ON THE ROUGH GROUND (B86 item 7), and those of them building again on the fine ground.
     rough: BTreeSet<(RealmId, ChunkKey)>,
+    /// ★ THE RESIDENT CHUNKS BUILT ON THE 128 m GROUND UNDER THE 16 m LEVEL (ruling B95).
+    coarse: BTreeSet<(RealmId, ChunkKey)>,
     upgrading: BTreeSet<(RealmId, ChunkKey)>,
+    /// ★ THE ARTIFACT'S EPOCH AT WHICH A ROUGH OR COARSE CHUNK WAS LAST FOUND WAITING (ruling B95): whether it may be built
+    /// again depends on its realm's artifact alone, so the check is made again only when that changed — never on every
+    /// frame for every waiting chunk (the 16 m level leaves many thousands of chunks on the 128 m ground until its tiles
+    /// land).
+    waiting_at: BTreeMap<(RealmId, ChunkKey), u64>,
     /// The parent meshes the workers share.
     parents: Arc<ParentCache>,
 }
@@ -1896,7 +1970,9 @@ impl ChunkLane {
             missing_hist: BTreeMap::new(),
             empty_frame: Vec::new(),
             rough: BTreeSet::new(),
+            coarse: BTreeSet::new(),
             upgrading: BTreeSet::new(),
+            waiting_at: BTreeMap::new(),
             empty_resident: BTreeMap::new(),
             parents: Arc::new(ParentCache::default()),
         }
@@ -2290,10 +2366,7 @@ impl ChunkLane {
         }
         // ★ A CHUNK WHOSE FINE TILES HAVE NOT LANDED IS BUILT ON THE ROUGH VIEW (ruling B86 item 7): its field, its
         // parents' and its morph's are the one ground under the fine ground; it is built again when they land.
-        let artifact = match (artifact, body.macro_lattice()) {
-            (Some(a), Some(lattice)) if a.is_rough(&lattice, key) => Some(Arc::new(a.rough_view())),
-            (artifact, _) => artifact,
-        };
+        let artifact = artifact.map(|a| build_view(&a, body, key));
         self.pending.insert((realm, key), priority);
         *self.held.entry(realm).or_insert(0) += 1;
         self.counters.submitted += 1;
@@ -2307,11 +2380,15 @@ impl ChunkLane {
         });
     }
 
-    /// ★ WHETHER A ROUGH CHUNK MAY BE BUILT AGAIN ON THE FINE GROUND (ruling B86 item 7): resident on the rough ground,
-    /// not building again already, and every fine tile it and its parents read is here now.
+    /// ★ WHETHER A CHUNK MAY BE BUILT AGAIN ON A FINER GROUND (ruling B86 item 7; ruling B95): not building again
+    /// already, and either resident on the rough ground with every 128 m tile it and its parents read here now (it is
+    /// built again on the 128 m ground, or on the 16 m ground where that is here too), or resident on the 128 m ground
+    /// under the 16 m level with every 16 m tile here now. So the login's loading screen, which waits for the rough
+    /// chunks alone, never waits for a 16 m tile.
     #[must_use]
     pub fn upgradable(&self, realm: RealmId, key: ChunkKey) -> bool {
-        if !self.rough.contains(&(realm, key)) | self.upgrading.contains(&(realm, key)) {
+        let rough = self.rough.contains(&(realm, key));
+        if !(rough | self.coarse.contains(&(realm, key))) | self.upgrading.contains(&(realm, key)) {
             return false;
         }
         let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm))
@@ -2319,18 +2396,30 @@ impl ChunkLane {
             return false;
         };
         body.macro_lattice().is_some_and(|lattice| {
-            std::iter::once(key)
-                .chain(parent_keys(body, key))
-                .all(|k| !artifact.is_rough(&lattice, k))
+            std::iter::once(key).chain(parent_keys(body, key)).all(|k| {
+                !artifact.is_rough(&lattice, k) && (rough || !artifact.is_coarse(&lattice, k))
+            })
         })
     }
 
-    /// Build a rough chunk again on the fine ground, at `priority`: the rough one stays resident and drawn until the
-    /// fine one lands in its place. Nothing for a chunk [`ChunkLane::upgradable`] refuses.
+    /// Build a rough or coarse chunk again on a finer ground, at `priority`: the one standing stays resident and drawn
+    /// until the new one lands in its place. Nothing for a chunk [`ChunkLane::upgradable`] refuses; a chunk found waiting
+    /// is asked again only when its realm's artifact changed.
     pub fn upgrade(&mut self, realm: RealmId, key: ChunkKey, priority: u32) {
-        if !self.upgradable(realm, key) {
+        if !(self.rough.contains(&(realm, key)) | self.coarse.contains(&(realm, key))) {
             return;
         }
+        let epoch = self.artifacts.get(&realm).map(|a| a.epoch);
+        if epoch.is_some() & (self.waiting_at.get(&(realm, key)) == epoch.as_ref()) {
+            return;
+        }
+        if !self.upgradable(realm, key) {
+            if let Some(epoch) = epoch {
+                self.waiting_at.insert((realm, key), epoch);
+            }
+            return;
+        }
+        self.waiting_at.remove(&(realm, key));
         let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm))
         else {
             return;
@@ -2344,7 +2433,7 @@ impl ChunkLane {
             key,
             parents: Arc::clone(&self.parents),
             priority,
-            artifact: Some(Arc::clone(artifact)),
+            artifact: Some(build_view(artifact, body, key)),
         });
     }
 
@@ -2412,6 +2501,12 @@ impl ChunkLane {
             } else {
                 self.rough.remove(&(ready.realm, ready.geometry.key));
             }
+            if ready.geometry.coarse {
+                self.coarse.insert((ready.realm, ready.geometry.key));
+            } else {
+                self.coarse.remove(&(ready.realm, ready.geometry.key));
+            }
+            self.waiting_at.remove(&(ready.realm, ready.geometry.key));
             if ready.geometry.triangles.is_empty() {
                 self.counters.empty_chunks += 1;
                 self.empty_resident.insert(
@@ -2437,7 +2532,9 @@ impl ChunkLane {
         let was_resident = self.resident.remove(&(realm, key));
         self.empty_resident.remove(&(realm, key));
         self.rough.remove(&(realm, key));
+        self.coarse.remove(&(realm, key));
         self.upgrading.remove(&(realm, key));
+        self.waiting_at.remove(&(realm, key));
         let was_pending = self.pending.remove(&(realm, key)).is_some();
         if was_pending {
             self.workers.cancel(realm, key);
@@ -4079,6 +4176,7 @@ mod tests {
         let (bucket_start, bucket_tris) = one_bucket(0, 0, vec![0, 1]);
         let pm = ParentMesh {
             rough: false,
+            coarse: false,
             key: ChunkKey {
                 face: Face::PosX,
                 rung: 1,
@@ -4100,6 +4198,7 @@ mod tests {
         // The same triangles the other way round meet the same tie the same way.
         let swapped = ParentMesh {
             rough: false,
+            coarse: false,
             key: pm.key,
             origin: DVec3::ZERO,
             positions: vec![far[0], far[1], far[2], near[0], near[1], near[2]],
@@ -4771,6 +4870,7 @@ mod tests {
             field_level: NO_FIELD,
             built_on: None,
             rough: false,
+            coarse: false,
         };
         assert_eq!(wide.upload_bytes(), 70_000 * UPLOAD_VERTEX_BYTES + 12);
         wide.vertices.truncate(3);
@@ -4989,6 +5089,7 @@ mod tests {
             field_level: NO_FIELD,
             built_on: None,
             rough: false,
+            coarse: false,
         };
         assert_eq!(empty.measure_bounds(), ([0.0; 3], [0.0; 3]));
         assert!(empty.morph_targets().is_empty());
@@ -5174,6 +5275,7 @@ mod tests {
                 field_level: NO_FIELD,
                 built_on: None,
                 rough: false,
+                coarse: false,
             };
             add_skirts(&mut g, 5.0, 2.0);
             g

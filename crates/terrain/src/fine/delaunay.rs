@@ -74,6 +74,46 @@ pub fn in_circle(a: &Dir, b: &Dir, c: &Dir, d: &Dir) -> i128 {
         + w[2] * (u[0] * v[1] - u[1] * v[0])
 }
 
+/// `orient` on the plane: positive when `(a, b, c)` turn counter-clockwise (the third word is not read).
+fn orient_plane(a: &Dir, b: &Dir, c: &Dir) -> i128 {
+    let (a, b, c) = (raw(a), raw(b), raw(c));
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// `in_circle` on the plane: positive when `d` lies inside the circle through the counter-clockwise `a`, `b`, `c`.
+fn in_circle_plane(a: &Dir, b: &Dir, c: &Dir, d: &Dir) -> i128 {
+    let (a, b, c, d) = (raw(a), raw(b), raw(c), raw(d));
+    let row = |p: [i128; 3]| {
+        let (x, y) = (p[0] - d[0], p[1] - d[1]);
+        [x, y, x * x + y * y]
+    };
+    let (u, v, w) = (row(a), row(b), row(c));
+    u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+        + u[2] * (v[0] * w[1] - v[1] * w[0])
+}
+
+/// Where a triangulation's predicates are read: on the sphere (the directions themselves) or on a plane (two words of
+/// each point, the third nought).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Space {
+    Sphere,
+    Plane,
+}
+
+fn orient_in(space: Space, a: &Dir, b: &Dir, c: &Dir) -> i128 {
+    match space {
+        Space::Sphere => orient(a, b, c),
+        Space::Plane => orient_plane(a, b, c),
+    }
+}
+
+fn in_circle_in(space: Space, a: &Dir, b: &Dir, c: &Dir, d: &Dir) -> i128 {
+    match space {
+        Space::Sphere => in_circle(a, b, c, d),
+        Space::Plane => in_circle_plane(a, b, c, d),
+    }
+}
+
 /// A triangle: its three vertices counter-clockwise from outside, and across each vertex's opposite edge the
 /// neighbouring triangle ([`NONE`] at the hull).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +178,44 @@ fn unit(v: [i128; 3]) -> Dir {
 /// ★ THE TRIANGULATION of `pts` (each a direction): `None` for fewer than three points.
 #[must_use]
 pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
+    build(pts, Space::Sphere)
+}
+
+/// ★ THE TRIANGULATION OF A FINE LEVEL TOO FINE FOR THE SPHERE'S TEST (ruling B95, the 16 m level): the points seen on
+/// the plane of the cube's `face` — each direction less its component along the face's normal (the other two words in
+/// the face's own turn, so a triangle counter-clockwise on the plane is counter-clockwise from outside), each word
+/// shifted down by `shift` bits (a floor, the same for every tile of the level). The sphere's in-circle test reads how
+/// far a fourth point stands off the plane of three; at 16 m that is about three units of the directions' 40-bit
+/// words, the size of their rounding, so the points are not on one sphere and the flips can turn for ever. On the
+/// plane the test is exact with room to spare, and every tile of a face sees the same points the same way, so two
+/// tiles build the same edges where they overlap. The lengths and areas the law reads stay the sphere's
+/// ([`super::geometry`]). `None` for fewer than three points.
+///
+/// **Example.** The 16 m tile under hull 17 on the home planet: about 590 000 points over 12.3 km of face 5 (−Z), each
+/// seen as its `(y, x)` words over 2⁸, about 8 000 units between neighbours; about six neighbours a point.
+#[must_use]
+pub fn triangulate_on_face(pts: &[Dir], face: vd_seed::bend::Face, shift: u32) -> Option<Graph> {
+    let f = face.index();
+    let axis = usize::from(f >> 1);
+    let (mut u, mut v) = (NEXT[axis], PREV[axis]);
+    if f & 1 == 1 {
+        core::mem::swap(&mut u, &mut v);
+    }
+    let plane: Vec<Dir> = pts
+        .iter()
+        .map(|p| {
+            [
+                Gi::new(p[u].raw() >> shift),
+                Gi::new(p[v].raw() >> shift),
+                Gi::ZERO,
+            ]
+        })
+        .collect();
+    build(&plane, Space::Plane)
+}
+
+/// The triangulation of `pts` read in `space` (see [`triangulate`] and [`triangulate_on_face`]).
+fn build(pts: &[Dir], space: Space) -> Option<Graph> {
     let n = pts.len();
     if n < 3 {
         return None;
@@ -185,12 +263,32 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
     };
     let one = 1i128 << DIR_BITS;
     let mut all: Vec<Dir> = pts.to_vec();
-    let s0 = far(one, 0);
-    let s1 = far(-half, q);
-    let s2 = far(-half, -q);
-    all.extend([s0, s1, s2]);
+    match space {
+        Space::Sphere => all.extend([far(one, 0), far(-half, q), far(-half, -q)]),
+        Space::Plane => {
+            // A triangle around the points' box: twenty half-sides out each way below, twenty above.
+            let (mut lo, mut hi) = ([i64::MAX; 2], [i64::MIN; 2]);
+            for p in pts {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(p[k].raw());
+                    hi[k] = hi[k].max(p[k].raw());
+                }
+            }
+            let h = ((hi[0] - lo[0]).max(hi[1] - lo[1]) >> 1).max(1);
+            let (cx, cy) = (
+                lo[0] + ((hi[0] - lo[0]) >> 1),
+                lo[1] + ((hi[1] - lo[1]) >> 1),
+            );
+            let at = |x: i64, y: i64| [Gi::new(x), Gi::new(y), Gi::ZERO];
+            all.extend([
+                at(cx - 20 * h, cy - 10 * h),
+                at(cx + 20 * h, cy - 10 * h),
+                at(cx, cy + 20 * h),
+            ]);
+        }
+    }
     let (a, b, c) = (n as u32, n as u32 + 1, n as u32 + 2);
-    let first = if orient(&all[a as usize], &all[b as usize], &all[c as usize]) > 0 {
+    let first = if orient_in(space, &all[a as usize], &all[b as usize], &all[c as usize]) > 0 {
         [a, b, c]
     } else {
         [a, c, b]
@@ -240,7 +338,7 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
             on_edge = usize::MAX;
             for e in 0..3 {
                 let (x, y) = (tv[NEXT[e]], tv[PREV[e]]);
-                let o = orient(&all[x as usize], &all[y as usize], &pd);
+                let o = orient_in(space, &all[x as usize], &all[y as usize], &pd);
                 if o < 0 {
                     t = tris[t as usize].n[e];
                     continue 'walk;
@@ -340,7 +438,8 @@ pub fn triangulate(pts: &[Dir]) -> Option<Graph> {
                 .find(|&j| nv[j] != x && nv[j] != y)
                 .expect("the opposite vertex");
             let d = nv[m];
-            if in_circle(
+            if in_circle_in(
+                space,
                 &all[pv as usize],
                 &all[x as usize],
                 &all[y as usize],
@@ -423,5 +522,87 @@ fn relink(tris: &mut [Tri], t: u32, from: u32, to: u32) {
         if tris[t as usize].n[k] == from {
             tris[t as usize].n[k] = to;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vd_seed::bend::Face;
+
+    /// A jittered 12 × 12 grid of points near the centre of `face`, every point's normal word the face's own.
+    fn grid_on(face: Face) -> Vec<Dir> {
+        let f = face.index();
+        let axis = usize::from(f >> 1);
+        let normal = if f & 1 == 1 {
+            -(1i64 << 40)
+        } else {
+            1i64 << 40
+        };
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut jitter = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 38) as i64) & ((1 << 26) - 1)
+        };
+        let mut pts = Vec::with_capacity(144);
+        for j in -6..6i64 {
+            for i in -6..6i64 {
+                let mut d = [Gi::ZERO; 3];
+                d[axis] = Gi::new(normal);
+                d[NEXT[axis]] = Gi::new((i << 28) + jitter());
+                d[PREV[axis]] = Gi::new((j << 28) + jitter());
+                pts.push(d);
+            }
+        }
+        pts
+    }
+
+    /// ★ THE TRIANGULATION ON A FACE'S PLANE (the 16 m level): on an even and an odd face every triangle turns
+    /// counter-clockwise seen from outside the sphere and its circle holds no other point; a shift reads the words as the
+    /// same points shifted; fewer than three points have no graph.
+    #[test]
+    fn the_plane_triangulation_is_delaunay_and_turns_as_the_sphere_on_every_face() {
+        for face in [Face::PosX, Face::NegY] {
+            let pts = grid_on(face);
+            let graph = triangulate_on_face(&pts, face, 0).expect("a graph");
+            assert!(graph.tris.len() > 200, "{}", graph.tris.len());
+            let f = face.index();
+            let axis = usize::from(f >> 1);
+            let (mut u, mut v) = (NEXT[axis], PREV[axis]);
+            if f & 1 == 1 {
+                core::mem::swap(&mut u, &mut v);
+            }
+            let plane: Vec<Dir> = pts.iter().map(|p| [p[u], p[v], Gi::ZERO]).collect();
+            for t in &graph.tris {
+                let [a, b, c] = t.map(|k| k as usize);
+                assert!(orient(&pts[a], &pts[b], &pts[c]) > 0, "{face:?} {t:?}");
+                let inside = (0..pts.len())
+                    .filter(|&d| (d != a) & (d != b) & (d != c))
+                    .filter(|&d| in_circle_plane(&plane[a], &plane[b], &plane[c], &plane[d]) > 0)
+                    .count();
+                assert_eq!(inside, 0, "{face:?} {t:?}");
+            }
+            assert_eq!(
+                (0..pts.len())
+                    .filter(|&p| graph.neighbours(p).len() < 2)
+                    .count(),
+                0
+            );
+            // The shift: the words over 2⁸ are the points shifted down by 8 bits.
+            let down: Vec<Dir> = pts
+                .iter()
+                .map(|p| p.map(|w| Gi::new(w.raw() >> 8)))
+                .collect();
+            assert_eq!(
+                triangulate_on_face(&pts, face, 8),
+                triangulate_on_face(&down, face, 0)
+            );
+        }
+        assert_eq!(
+            triangulate_on_face(&grid_on(Face::PosX)[..2], Face::PosX, 0),
+            None
+        );
     }
 }

@@ -378,6 +378,7 @@ fn home_grid() -> Grid {
     let dir = [BERTH[0] / radial, BERTH[1] / radial, BERTH[2] / radial];
     let drawn = artifact.drawn_range_m(&lattice);
     let named = vd_terrain::artifact::fine_needs_of_head(
+        vd_terrain::fine::level::FineLevel::L1,
         &body,
         (drawn.0, drawn.1, artifact.sea_m),
         dir,
@@ -400,7 +401,8 @@ fn home_grid() -> Grid {
             ty,
         };
         if let Ok(Some(bytes)) = read_fine_record(&store, &at)
-            && let Some((ts, levels)) = decode_levels(&bytes)
+            && let Some((ts, levels)) =
+                decode_levels(&bytes, vd_terrain::fine::level::FineLevel::L1)
         {
             tiles.push((
                 tx,

@@ -19,10 +19,11 @@
 //! face 2, turned. The cut along that edge is searched in face 0's chart (face 0 is the lower); the tile across reads the
 //! same cut from face 0's chart and turns it into its own rows, so both draw the same valley floor up to the edge.
 
-use super::l1::{TILE_NODES, TileKey};
+use super::l1::TileKey;
+use super::level::LevelGeom;
 use super::points::{chart_cell, chart_of};
 use super::stitch::{
-    BLEND, CutLine, Field, MISSING, Meet, TileCuts, col_cut_half, corner_point, draw, joined,
+    CutLine, Field, MISSING, Meet, TileCuts, col_cut_half, corner_point, draw, joined,
     mid_across_columns, mid_across_rows, row_cut_half,
 };
 use std::borrow::Cow;
@@ -346,17 +347,16 @@ const SLOT_STEP: [(i64, i64); 9] = [
     (1, 1),
 ];
 
-/// ★ THE NINE TILES AROUND `key` on any face (row by row NW … SE, `2^shift` cells a node, `n` cells along a face's
-/// edge): each slot the tile that holds the cell just past the tile's side or corner in its chart; `None` past a cube
-/// corner, where no face holds that cell.
+/// ★ THE NINE TILES AROUND `key` on any face (row by row NW … SE, at the level `geom`): each slot the tile that holds
+/// the cell just past the tile's side or corner in its chart; `None` past a cube corner, where no face holds that cell.
 #[must_use]
-pub fn block_keys(key: TileKey, shift: u32, n: i32) -> [Option<TileKey>; 9] {
+pub fn block_keys(key: TileKey, geom: LevelGeom) -> [Option<TileKey>; 9] {
     let lv = Level {
-        side: i64::from(TILE_NODES) << shift,
+        side: geom.side(),
         band: 0,
-        n,
+        n: geom.n,
     };
-    let ts = shift + TILE_NODES.trailing_zeros();
+    let (ts, n) = (geom.ts, geom.n);
     let [x0, y0, x1, y1] = own_square(lv, key);
     SLOT_STEP.map(|(dx, dy)| {
         let x = [x0 - 1, x0, x1][(dx + 1) as usize];
@@ -386,15 +386,14 @@ impl Prepared<'_> {
 }
 
 /// Everything the tile in slot 4 of `block` draws from (see [`finished_square`]).
-fn prepare<'a>(
-    block: [Option<(TileKey, &'a Field)>; 9],
-    shift: u32,
-    n: i32,
-) -> Option<Prepared<'a>> {
+fn prepare<'a>(block: [Option<(TileKey, &'a Field)>; 9], geom: LevelGeom) -> Option<Prepared<'a>> {
+    if geom.band() <= 0 {
+        return None;
+    }
     let lv = Level {
-        side: i64::from(TILE_NODES) << shift,
-        band: (1i64 << shift) - BLEND,
-        n,
+        side: geom.side(),
+        band: geom.band(),
+        n: geom.n,
     };
     let (key, _) = block[4]?;
     let square = own_square(lv, key);
@@ -405,8 +404,8 @@ fn prepare<'a>(
         slots: block,
         corners: [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
     };
-    // The rasters in the tile's chart, each over its own square and one node beyond.
-    let node = 1i64 << shift;
+    // The rasters in the tile's chart, each over its own square and its margin beyond.
+    let node = geom.margin;
     let mut here: Vec<Cow<'a, Field>> = Vec::with_capacity(9);
     for slot in block {
         here.push(match slot {
@@ -480,12 +479,12 @@ fn prepare<'a>(
 }
 
 /// ★ THE FINISHED SQUARE of the tile in slot 4 of `block` (row by row NW … SE, as [`block_keys`] names them; each slot
-/// its tile's key and raw raster in that tile's own face chart; `None` past a cube corner), in the tile's own chart:
-/// `TILE_NODES` nodes of `2^shift` cells a side, `n` cells along a face's edge. `None` where the tile is missing, a
-/// neighbour is not where its key says, or a cut cannot be joined.
+/// its tile's key and raw raster in that tile's own face chart; `None` past a cube corner), in the tile's own chart, at
+/// the level `geom` (each raw raster reaching its margin past its tile). `None` where the tile is missing, a neighbour is
+/// not where its key says, or a cut cannot be joined.
 #[must_use]
-pub fn finished_square(block: [Option<(TileKey, &Field)>; 9], shift: u32, n: i32) -> Option<Field> {
-    let p = prepare(block, shift, n)?;
+pub fn finished_square(block: [Option<(TileKey, &Field)>; 9], geom: LevelGeom) -> Option<Field> {
+    let p = prepare(block, geom)?;
     Some(draw(p.refs(), &p.cuts, p.square, p.side, p.meets))
 }
 

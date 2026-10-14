@@ -1116,10 +1116,10 @@ pub fn fine_reach_m(
     Some((if seen < across { seen } else { across }) + chunk_m + tile_m)
 }
 
-/// ★ THE FINE TILES A VIEW READS, EACH WITH THE FINEST LEVEL IT READS THEM AT (rulings B86 item 3 and B87: by the
-/// distance alone, whatever realm the viewer stands in) — ONE HOME for the realm's shard, which names, solves and answers
-/// them, and the gateway, which serves each session from its cache. Level `k` is read by rung `7 + k` out to that rung's
-/// own reach ([`fine_reach_m`]: its ask edge bounded by the ground the eye sees, one chunk of the rung and one tile past
+/// ★ THE FINE TILES OF `level` A VIEW READS, EACH WITH THE FINEST MEAN LEVEL IT READS THEM AT (rulings B86 item 3 and
+/// B87: by the distance alone, whatever realm the viewer stands in; ruling B95: one rule for every fine level) — ONE HOME
+/// for the realm's shard, which names, solves and answers them, and the gateway, which serves each session from its
+/// cache. Mean level `k` is read by the rung `level.rung() + k` out to that rung's own reach ([`fine_reach_m`]: its ask edge bounded by the ground the eye sees, one chunk of the rung and one tile past
 /// it); each tile is named once, with the finest level whose reach names it, the nearest first. `ground_m` is the ground's
 /// distance from the centre under the eye (the shard reads its artifact; the gateway, which reads no tile, passes the
 /// lowest ground, so its reach holds the shard's), `relief_m` the tallest ground over the radius.
@@ -1128,6 +1128,7 @@ pub fn fine_reach_m(
 /// 1, and the rest of the ring to ~770 km as their coarse copies only.
 #[must_use]
 pub fn fine_needs(
+    level: crate::fine::level::FineLevel,
     lattice: &MacroLattice,
     dir: [f64; 3],
     radial_m: f64,
@@ -1135,11 +1136,10 @@ pub fn fine_needs(
     relief_m: f64,
     pixel_rad: f64,
 ) -> Vec<((u8, u32, u32), u8)> {
-    use crate::fine::l1::{L1_RUNG, TILE_NODES};
-    use crate::fine::read::L1_TOP_RUNG;
-    let tile_m = lattice.node_m() * f64::from(TILE_NODES);
+    let tile_nodes = 1u32 << level.tile_nodes_shift();
+    let tile_m = lattice.node_m() * f64::from(tile_nodes);
     let reach = |k: u8| {
-        let rung = L1_RUNG + k;
+        let rung = level.rung() + k;
         let chunk_m = crate::chunk::CHUNK_EDGE as f64 * f64::from(vd_seed::ladder::cell_m(rung));
         fine_reach_m(
             rung,
@@ -1150,18 +1150,18 @@ pub fn fine_needs(
             (chunk_m, tile_m),
         )
     };
-    let top = L1_TOP_RUNG - L1_RUNG;
+    let top = level.top_rung() - level.rung();
     // A coarser level reaches at least as far as a finer one: no reach at the coarsest names nothing.
     let Some(widest) = reach(top) else {
         return Vec::new();
     };
-    let names = tiles_within_of(lattice, dir, widest, TILE_NODES as u32);
+    let names = tiles_within_of(lattice, dir, widest, tile_nodes);
     let mut need: BTreeMap<(u8, u32, u32), u8> = names.iter().map(|&n| (n, top)).collect();
     for k in (0..top).rev() {
         let Some(r) = reach(k) else {
             break;
         };
-        for n in tiles_within_of(lattice, dir, r, TILE_NODES as u32) {
+        for n in tiles_within_of(lattice, dir, r, tile_nodes) {
             if let Some(level) = need.get_mut(&n) {
                 *level = k;
             }
@@ -1180,6 +1180,7 @@ pub fn fine_needs(
 /// reads the ground under the eye. Empty for a body with no lattice or where the level does not apply.
 #[must_use]
 pub fn fine_needs_of_head(
+    level: crate::fine::level::FineLevel,
     body: &crate::BodyDefinition,
     (low_m, high_m, sea_m): (i32, i32, i16),
     dir: [f64; 3],
@@ -1198,6 +1199,7 @@ pub fn fine_needs_of_head(
         .ground_range_m();
     let r = body.radius_m();
     fine_needs(
+        level,
         &lattice,
         dir,
         radial_m,
