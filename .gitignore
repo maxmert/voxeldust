@@ -30,3 +30,7 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Local scratch folders at the root: build logs and downloaded tools, never part of the repository.
+/logs/
+/tools/
