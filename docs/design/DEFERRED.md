@@ -12212,6 +12212,44 @@ generation alone), so a body solves once per generation on a machine, not once p
   after a headless client of the same account and node was stopped: the gateway ended the old session at that moment and
   logged nothing for the new one; the window showed its authentication screen for 8 minutes and the shards shut down.
   Cause NOT MEASURED (the suspect: the old connection's end crossing the new Hello). Waiting 10 s between the two avoids it.
-- 🟥 **THE HOME PLANET'S STORE IS 12.9 GB (MEASURED 2026-10-14)** after the logins at hull 17's hills and the valley (both
-  fine levels with their far copies). What fills it is NOT MEASURED; it bounds the server's disk and the player's disk cache
-  (B86 item 7).
+- 🟧 **THE HOME PLANET'S STORE IS 12.9 GB (MEASURED 2026-10-14)** after the logins at hull 17's hills and the valley (both
+  fine levels with their far copies). HALF OF IT WAS DEAD (MEASURED the same evening): 128 m tiles of fine versions 1 and 2,
+  which nothing reads; with them dropped (`examples/store_prune.rs`, D-TERRAIN-13) the file is 6.46 GB — 90 809 rows,
+  2.85 GB of values: the artifact, the 128 m and the 16 m tiles of today's words. The live size bounds the server's disk and
+  the player's disk cache (B86 item 7).
+
+### D-TERRAIN-13 🟧 THE SOLVED GROUND LIVES IN EACH SLOT'S REALM STORE — the worktree clone is the interim, ONE SOLVED LIBRARY per machine is owed (2026-10-14)
+
+- 🟧 **THE INTERIM, BUILT 2026-10-14 (the owner: "Please proceed").** A new worktree's slot had empty stores, so its first
+  login solved the home planet again (2 245 s on the shard's threads), every far planet (hours each, the cores full — B91)
+  and every fine tile. `scripts/worktree-new.sh` now clones this checkout's realm stores into the new worktree's slot and
+  this checkout's build folder into the worktree (the Mac file system's copy-on-write clones: no disk until a block
+  changes); it refuses while a process holds a store file or a cargo build holds the build folder, and when the build
+  folder is on another volume (a silent full copy). `scripts/worktree-remove.sh` removes a worktree AND its slot's stores
+  (a removed worktree left its stores before: slot 8's). `vd-slot --slot N --stores` names a slot's stores by the one
+  layout function. LIMITS: the copies drift (a tile one side solves after the clone, the other side solves again); a newer
+  ground means a new clone, and the worktree's own berths go with the old one; a worktree at the committed code reads tiles
+  the source checkout solved with its UNCOMMITTED code under the same version word (the forgotten-bump case in small).
+  MEASURED 2026-10-14 (a trial worktree, slot 22, release, a headless login at hull 18's valley spawn): the script 34 s and
+  0.23 GB of disk for 6 GB of stores and a 62 GB build folder; the first build 18 s (13 of our crates, no library); five
+  realms "armed from the store", none solved; the planet's fine work `raw_solved=0 finished_made=0`, 1 317 finished tiles
+  loaded and 3 124 records sent, the client's book whole in ~80 s; the removal script 17 s.
+- 🟧 **A STORE NEVER DROPS AN OLD INPUT WORD'S TILES.** A fine tile is keyed by its input word (the artifact's digest and the
+  fine versions); a new fine version or a new artifact leaves every older tile in the file, and the file never shrinks.
+  MEASURED 2026-10-14: the home planet's file held 128 m tiles of fine versions 1, 2 and 3, and only version 3 is read;
+  planet 6548333207712198820 held tiles only under a word its stored artifact does not give (0.27 → 0.14 GB). THE INTERIM:
+  `examples/store_prune.rs` (cluster down) copies every row still used into a fresh file, reads it back row by row against
+  the old one, then swaps them and keeps the old file in a backup folder. THE PROPER CURE: the library below (an old
+  version is one folder), or the shard dropping every row no live word names.
+- 🟥 **ONE SOLVED LIBRARY PER MACHINE (step 2; the owner's ruling owed).** The derived ground (the artifact, the 128 m and
+  16 m tiles) leaves the realm's store for one library keyed by today's keys — one file a record, written once under a
+  temporary name and renamed whole, never changed, its digest checked on read — while the realm's own memory (the berths,
+  the body, the owner fence, later the edits and blocks) stays in its slot, private. The shard, the gates (the home planet's
+  in-process solve, 227 s a run) and the benches read it by ONE call ("read the record, or solve it and write it"), so no
+  number of worktrees holds a second copy. Later the same keys name a shared volume or a bucket (B86's advance calculation
+  fills it; the player's disk cache is its client twin). THE OWNER'S QUESTIONS: (1) HR1 — a shard's store is private; the
+  library holds only what the seed decides (SL10), the same bytes on every host, but many shards read one set of files;
+  (2) THE WRITER RULE — recommended: only a build of committed generator sources writes the library (a build with
+  uncommitted generator changes writes its own slot), and each record notes its writer's source fingerprint so a tool finds
+  "the same key, other sources" (a forgotten key bump). The fingerprint is NOT part of the key: that would solve the home
+  planet again after every generator edit, against B22's key generation.

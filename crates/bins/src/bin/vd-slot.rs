@@ -7,6 +7,7 @@
 //! vd-slot --worktree /path/to/wt   # -> VD_SLOT=… (the stable per-worktree slot)
 //! vd-slot --slot 0                 # -> VD_GW_ADDR=… VD_ADMIN_ADDR=… …
 //! vd-slot --slot 0 --agent 1       # adds VD_DEVCTL_PORT / VD_CLIENT_QUIC_PORT
+//! vd-slot --slot 0 --stores        # -> VD_REALM_STORE_DIR=… (the slot's realm stores, alone)
 //! ```
 //! Every emitted value is POSIX single-quoted (`vd_bins::sh_quote`) so a path with
 //! spaces or metacharacters can never word-split or inject when sourced. All port
@@ -27,7 +28,9 @@ fn main() -> ExitCode {
         }
         Err(msg) => {
             eprintln!("vd-slot: {msg}");
-            eprintln!("usage: vd-slot (--worktree <path> | --slot <N> [--agent <M>])");
+            eprintln!(
+                "usage: vd-slot (--worktree <path> | --slot <N> [--agent <M>] | --slot <N> --stores)"
+            );
             ExitCode::FAILURE
         }
     }
@@ -37,9 +40,11 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
     let mut slot: Option<u16> = None;
     let mut agent: Option<u16> = None;
     let mut worktree: Option<String> = None;
+    let mut stores = false;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--slot" => slot = Some(parse_u16("--slot", args.next())?),
+            "--stores" => stores = true,
             "--agent" => agent = Some(parse_u16("--agent", args.next())?),
             "--worktree" => worktree = Some(args.next().ok_or("--worktree needs a path")?),
             other => return Err(format!("unexpected argument `{other}`")),
@@ -55,6 +60,18 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
     }
 
     let slot = slot.ok_or("--slot (or --worktree) is required")?;
+
+    // `--stores` names the slot's realm stores and nothing else: the folder the solved planets and the berths live in,
+    // built by the one layout function the cluster uses, so a script that copies a slot's world never builds the path.
+    if stores {
+        return Ok(emit(&[(
+            "VD_REALM_STORE_DIR",
+            vd_bins::realm_store_dir(&vd_bins::slot_workdir(slot))
+                .display()
+                .to_string(),
+        )]));
+    }
+
     let ports = DevPortScheme::DEFAULT
         .slot_ports(slot)
         .map_err(|e| e.to_string())?;

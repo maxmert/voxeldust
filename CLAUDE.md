@@ -861,6 +861,11 @@ just coverage-html          # see the uncovered region
 ```
 Coverage runs on a pinned nightly (`VD_COVERAGE_TOOLCHAIN`); product builds on stable 1.94.1.
 
+A NEW WORKTREE STARTS WITH THIS CHECKOUT'S SOLVED WORLD (2026-10-14): `scripts/worktree-new.sh <name>` makes it under
+`.claude/worktrees/` and clones (copy-on-write, no disk at first) this checkout's realm stores into its slot and the build
+folder into it — no first solve of the home planet or the far planets; `scripts/worktree-remove.sh <name>` removes it and
+its slot's stores. A store keeps every old fine version's tiles: `examples/store_prune.rs` drops them (cluster down).
+
 ## Roadmap position
 
 P0 (foundation: harness + frozen wire + FSMs + clock) → P1 stub shards → P1.5 client+HR6

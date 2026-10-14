@@ -210,15 +210,61 @@ pub struct FinePart {
     pub bytes: Vec<u8>,
 }
 
+/// A form's family tag.
+fn fine_family(form: FineForm) -> u8 {
+    match form {
+        FineForm::Raw => FINE_RAW,
+        FineForm::Finished => FINE_FINISHED,
+    }
+}
+
+/// ★ THE KEY RANGE OF ONE INPUT WORD's rows in one form, `[from, to)`: the family and the word are the head of every
+/// fine tile's key ([`fine_tile_prefix`]), so every tile, level and part solved from that word lies inside it.
+///
+/// **Example.** The home planet's store holds 128 m tiles of fine versions 1, 2 and 3. The tiles of version 1 lie in
+/// one range, and a tool that drops them skips that range whole, without reading a row of it.
+#[must_use]
+pub fn fine_word_range(form: FineForm, input: u64) -> (Vec<u8>, Vec<u8>) {
+    let family = fine_family(form);
+    let mut from = vec![family];
+    from.extend_from_slice(&input.to_be_bytes());
+    let to = input.checked_add(1).map_or_else(
+        || vec![family + 1],
+        |next| {
+            let mut to = vec![family];
+            to.extend_from_slice(&next.to_be_bytes());
+            to
+        },
+    );
+    (from, to)
+}
+
+/// ★ THE INPUT WORDS a store holds fine rows under in one form, ascending — one bounded read a word, the read jumping
+/// past each word's range ([`fine_word_range`]), never a walk of the rows.
+///
+/// # Errors
+/// A row of the family whose key is too short to hold a word: the store is not one this build wrote.
+pub fn fine_words(store: &dyn crate::io::Store, form: FineForm) -> Result<Vec<u64>, String> {
+    let family = fine_family(form);
+    let end = [family + 1];
+    let mut from = vec![family];
+    let mut words = Vec::new();
+    while let Some((key, _)) = store.range(&from, &end, 1).into_iter().next() {
+        let word = key
+            .get(1..9)
+            .and_then(|b| <[u8; 8]>::try_from(b).ok())
+            .map(u64::from_be_bytes)
+            .ok_or_else(|| format!("a fine row's key holds no input word: {key:02x?}"))?;
+        words.push(word);
+        from = fine_word_range(form, word).1;
+    }
+    Ok(words)
+}
+
 /// The key prefix of every part of one fine tile.
 #[must_use]
 pub fn fine_tile_prefix(at: &FineAt) -> Vec<u8> {
-    let family = match at.form {
-        FineForm::Raw => FINE_RAW,
-        FineForm::Finished => FINE_FINISHED,
-    };
-    let mut k = vec![family];
-    k.extend_from_slice(&at.input.to_be_bytes());
+    let mut k = fine_word_range(at.form, at.input).0;
     k.push(at.level);
     k.push(at.face);
     k.extend_from_slice(&at.tx.to_be_bytes());
@@ -1149,5 +1195,55 @@ mod tests {
         assert!(read_fine_record(&store, &other).is_err());
         assert_eq!(decode_fine_part(&encode_fine_part(&stray)), Ok(stray));
         assert_eq!(FINE_PART_SCHEMA, SchemaId(41));
+    }
+
+    /// ★ THE INPUT WORDS of a store's fine rows (the clean-out of old fine versions): each form's words found in order;
+    /// one word's range holds every tile, level and part of that word and nothing of the next; the last word closes at
+    /// the next family; a row of another family is never read as a word; a key too short to hold a word is refused.
+    #[test]
+    fn a_store_names_its_fine_words_and_each_word_is_one_range() {
+        use super::{
+            FINE_FINISHED, FINE_RAW, FineAt, FineForm, fine_part_key, fine_word_range, fine_words,
+        };
+        use crate::io::Store;
+        let mut store = crate::io::mem::MemStore::default();
+        let at = |form, input, level, face| FineAt {
+            form,
+            input,
+            level,
+            face,
+            tx: 9,
+            ty: 4,
+        };
+        let one = crate::io::bytes(vec![1]);
+        for key in [
+            fine_part_key(&at(FineForm::Raw, 7, 1, 0), 0),
+            fine_part_key(&at(FineForm::Raw, 7, 2, 5), 3),
+            fine_part_key(&at(FineForm::Raw, 0x9a57, 1, 2), 0),
+            fine_part_key(&at(FineForm::Finished, 7, 1, 0), 0),
+            fine_part_key(&at(FineForm::Finished, u64::MAX, 1, 0), 0),
+            vec![FINE_FINISHED + 1, 0],
+        ] {
+            store.put(&key, &one);
+        }
+        store.commit();
+        assert_eq!(fine_words(&store, FineForm::Raw), Ok(vec![7, 0x9a57]));
+        assert_eq!(
+            fine_words(&store, FineForm::Finished),
+            Ok(vec![7, u64::MAX])
+        );
+        let (from, to) = fine_word_range(FineForm::Raw, 7);
+        assert_eq!(store.range(&from, &to, 10).len(), 2);
+        assert_eq!(
+            fine_word_range(FineForm::Finished, u64::MAX).1,
+            vec![FINE_FINISHED + 1]
+        );
+        store.put(&[FINE_RAW, 1, 2], &one);
+        store.commit();
+        assert!(
+            fine_words(&store, FineForm::Raw)
+                .expect_err("a short key is refused")
+                .contains("holds no input word")
+        );
     }
 }
