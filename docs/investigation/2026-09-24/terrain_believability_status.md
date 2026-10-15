@@ -1869,3 +1869,41 @@ the session: the loading screen went after ~80 s with 9 680 pieces wanted (the d
 pieces, 3 min 45 s — the near pieces reach less far under tan 35°, and many tiles were stored); a 16 m tile further out took
 up to 107 s while the window ran (the solve threads below the window, B91). NEXT: the tests (the owner's word), the speed
 on a calm machine, then B5.
+- 2026-10-14 (later) — B97 COMMITTED (`c5b83b7`, the owner: "Please commit all, then do everything else"; no push) AND ITS TESTS
+GREEN: the library and binary tests of the three changed crates in release — the generator 354 passed (the 16 m solve's own
+test on the new law among them), the client 399, the bins crate 111 (its three tests that solve the moon's 8 km ground skipped
+as before, registered). A first run without `--lib --bins` also started the bins crate's process-tier tests (load 179, two
+orphaned node processes); it was stopped and the orphans ended — the unit round runs `--lib --bins`. The worktree's build
+folder and the Earth data now carry Spotlight's never-index marker (the owner: "do everything else"). Docker's k3d cluster
+`voxeldust` runs (up 32 h) and is left running: the speed reading is labelled with it.
+- 2026-10-14 (later) — B97's SPEED, READ UNDER LOAD (no calm machine this evening: an iOS simulator, Docker's k3d cluster and a
+research job ran; load 18–26): `planet_stand l2`, four 16 m tiles at once — hull 17's hills 3.8–5.2 s a tile (53–76 passes;
+B96's form 4.0–4.5 s at 42 passes under a similar load), the mountain tile beside hull 19 8.6–12.9 s (180 passes, the bound) —
+about two to three times B96's. A LEVER, NOT BUILT (measured first, the owner's word): the settle law reads the law's own
+128 m cell means, yet the game draws only the law's detail finer than 128 m; a divide that flips moves a whole cell's mean
+but barely its drawn detail, so a settle law on the drawn detail may end the mountain's passes far sooner.
+- 2026-10-14 (later) — B5 RESEARCHED AND DESIGNED (the owner: "do everything else"; documents only, no game change):
+`docs/investigation/2026-10-14/ground_2to4m_design.md`, revision 2. Two read-only research agents (outside the repo,
+`/tmp/vd-b5/research/`): the published laws and methods at 1–5 m (smooth is lawful on soil; the sharp things are channel
+beds and banks, rock ledges and talus; creep at today's rates would erase the finer channels; no published method shows a
+lawful 1–5 m height field at eye height) and Earth's 1 m lidar between 2 m and 16 m (MEASURED: a detail of 0.71–1.22 m RMS
+under the 16 m Catmull-Rom curve, 11–18 % of the 2 m slope variance, 65–73 % of it on hillslopes and ridges, channels
+0.7–2.2 m deep, rock steps only on steep mountains; the mountains' threshold plateau at a median slope 0.67–0.78 — tan 35°
+is 0.70; a 4 m level holds ~90 % of the height detail, ~70 % of its slope share). Two adversarial reviews of revision 1: A
+(rules) no blocker, 9 major; B (code) ONE BLOCKER — the 16 m flow an L3 tile needs had no buildable definition — and the
+cost ~10× low. Revision 2: ONE 16 m FLOW RECORD PER L2 TILE (built once after the L2 tile finishes, its rim water from the
+128 m flow, the rate per 128 m cell, kept on the shard); THE HONEST PRICE — an L3 tile costs as an L2 tile (4.5–15 s calm,
+9–41 s in a running game) and the code's reach names ~58 tiles for rung 2 alone, ~150 for rungs 2–3, so the 4 m ring at a
+new place takes ~1–6 or ~3–15 minutes in a running game; the provisional ground against B86 item 1, the near pieces (~5×
+the rung-0 pieces), the stored unit (quarter metres = a 3.6° slope step at 4 m), the wire (a minor gate; the
+acknowledgement as a new appended arm, an SL6 ask), the terrace on the fine ground (it escapes the bound and the probe), and
+every code change listed. The owner's five answers owed (Q1 the price, Q2 the provisional ground, Q3 the threshold at 4 m,
+Q4 the terrace, Q5 the acknowledgement) before the bench.
+- 2026-10-14 (later) — B97's SPEED ON A CALM MACHINE (the owner stopped Docker: "Docker is stopped, please proceed"; the load
+5.6 at the start): `planet_stand l2`, four 16 m tiles at once — the mountain tile beside hull 19 8.8–13.3 s a tile (180
+passes, the bound; ~84 ns a point a pass), hull 17's hills 3.9–5.4 s (53–76 passes) — the same as under the evening's load,
+so the price is the solve's own (B96's form: ~4 s at 42 passes). THE LEVER REFUTED (a temporary reading, removed): the
+drawn detail (a point's height less its 128 m cell's mean) moves as much as the cell means — at pass 180 on the mountain its
+largest move is 5.2 m, its 99th percentile 0.89 m, ~40 000 points over a quarter metre; the hills at pass 50, just before
+they settle, read the same (5.2 / 0.89 m, ~61 000). A settle law on the drawn detail would not end the mountain's passes
+sooner. The mountain's tiles stop at the bound with the readings converged by N against 2N (40 / 80 / 180 passes).

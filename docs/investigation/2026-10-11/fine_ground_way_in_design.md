@@ -586,7 +586,8 @@ division by a whole number replaced by a multiplication by its reciprocal writte
    **B97 (2026-10-14):** the L2 law replaced by L1's own (see §3.2's note); `L2_VERSION` 2, only the 16 m tiles move.
 6. **B5 — L3:** the law at 2–4 m in a small ring around a walker (its cost measured first). B87 makes the ring a rule by
    distance for every viewer, never a walker's special case; Earth's 1 m lidar gives its readings at 2 m and 4 m (B97's
-   bench: the San Gabriel Mountains 22.3 / 21.6 % of the links over 35°, the Oregon Coast Range 10.0 / 9.4 %).
+   bench: the San Gabriel Mountains 22.3 / 21.6 % of the links over 35°, the Oregon Coast Range 10.0 / 9.4 %). ITS DESIGN:
+   `docs/investigation/2026-10-14/ground_2to4m_design.md` (revision 2; the owner's answers owed).
 
 ## 10. The reviews' findings and their answers (revision 1 → 2)
 
