@@ -12134,6 +12134,16 @@ generation alone), so a body solves once per generation on a machine, not once p
       (7) one source (K12): the shard computes no surface yet, and the client's slope is its own float normal; (8) the
       airless body's regolith is painted as soil. **Example.** A pilot on the belt sees grey rock on a 50° flank, brown
       soil in the valley under it, and white shoulders over the summer's freezing line, with the dark face above them.
+    - 🟥 THE CLIENT'S SUMMER READS A DRY PLANET (found 2026-10-15 by the colours design's review B; READ, not yet
+      measured in a log): since B22 the pyramid ships no water words (`bins/src/artifact_source.rs:136-141`), so the
+      client's `wet_share_of` (`client/src/surface.rs:80-91`) finds no sea and its season's heat store is a rock skin —
+      its seasonal amplitude ~9 times the shard's (ESTIMATE); the drawn snow line (17.7 km at the poles) is a dry
+      planet's, the shard's ICE facies disagrees with it. The cure (the colours design §4, Q3): the realm states its
+      snow line (an SL6 ask). Interim 5 of THE FIRST SURFACE LOOK above.
+    - 🟥 THE ROCK LAW CANNOT SHOW BARE ROCK ON THE SOLVED GROUND (found 2026-10-15, review B M4): the paint reads `S_c`
+      1.25 (the soil mantle's limit at the hillslope's own scale) while the 128 m and 16 m ground stands under tan 35°
+      (B82, B97), so the drawn rock share stays under ~0.31. The cure (the colours design §3.2, Q2): the expected share
+      under the hidden slope spread (rule M).
     - 🟥 THE RAIN LAW'S DEFECTS (registered by ruling B78, 2026-10-11; the study `docs/investigation/2026-10-11/
       macro_rain_rise_study.md`): (1) the rain belt's factor (`climate.rs:122-123`, `:374-377`) is a share never
       renormalised (area mean 0.575), so the law cannot give back its own calibration body (Earth's ~990 mm; Earth's
@@ -12256,7 +12266,9 @@ generation alone), so a body solves once per generation on a machine, not once p
 
 - 🟥 **THE 2–4 m LEVEL (B5, L3) — DESIGNED (2026-10-14), BENCHED ONCE (2026-10-15: the mountain matches Earth at 4 m, the
   hills overshoot with a comb on their crests, the channel-head fallback refuted; the status file holds the numbers).
-  WAITS BY RULING B98 until the ground's colours by law are built; then tested again with colours.** The shared solve
+  WAITED BY RULING B98 for the colours; ★ RULING B99 (2026-10-15) PUTS IT IN THE TERRAIN BASE — step 2 of the base's
+  order, after generator 27: its comb on the hills cured by law without colours, its open questions answered, built through
+  the one tile machinery.** The shared solve
   `fine::refine` is covered by the 16 m solve's own test (green 2026-10-15, 354 of the generator's tests); `fine::l3` has
   NO unit test yet — its 100 % coverage (HR5) is owed before any game path reads it. `docs/investigation/2026-10-14/ground_2to4m_design.md`
   revision 2 (two research reports, two adversarial reviews answered): one 16 m flow record per L2 tile; the law B97's one

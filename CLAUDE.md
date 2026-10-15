@@ -478,6 +478,15 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     its code stays bench-only: `fine::refine` — the 16 m level runs through it byte for byte —, `fine::l3`,
     `planet_stand l3`); THE GROUND'S COLOURS BY LAW NEXT (B35's biomes and materials on B75's first surface look; research,
     a design with reviews, the art's questions, B36 Q14); THEN THE 4 m LEVEL TESTED AGAIN WITH COLOURS.
+    ★★ B99 (2026-10-15, the owner: "what needs to be done in terrain work now? … we need to have the terrain base that we
+    (ideally) will not change much" → "Agree with the order, let's implement please"; the 4 m level "Should be included into
+    the base"): THE TERRAIN BASE FIRST = THE SHAPE + THE CONTRACT (height, solid or empty, substance, water — the same on
+    server and client); built ground never moves (B81 Q8, the frozen patch). THE ORDER (amends B35's and B98 item 2):
+    (1) GENERATOR 27 — the rain and the seasonal winds (B78's defects, B36 item 1) → (2) THE 4 m LEVEL IN THE BASE (its comb
+    cured by law, no wait for colours; amends B98 items 1 and 3) → (3) the one-volume design revised for today's ground
+    (beside 1–2) → (4) the volume: the solid pass with substances by law, then the water fill → (5) the edit system and the
+    frozen patch → (6) standing, collision and delivery beside 4–5 → (7) THE BASE FREEZES. THE LOOK AFTER (colours, textures,
+    vegetation, rocks, weather, waves); the colours design PARKED, its substance half moves into step 4.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

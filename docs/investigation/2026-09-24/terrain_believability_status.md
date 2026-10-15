@@ -1936,3 +1936,21 @@ row "8e biome and soil" is stale on that point.
 vd-terrain --lib`, 354 passed, the 16 m solve's own test among them. `fine::l3` has no unit test yet (registered). The
 colours step started: two read-only research reports (`/tmp/vd-b5/colours/`: the code survey written, the laws and data
 running).
+- 2026-10-15 (later) — THE COLOURS DESIGNED (ruling B98 item 2; documents only, no game change):
+`docs/investigation/2026-10-15/ground_colours_design.md` revision 2. Two research reports (`/tmp/vd-b5/colours/`: the laws
+and 656 measured spectra; the code map) and two adversarial reviews (rules: 2 blockers — the shares per pixel in the shader
+are a port refused by F7 item 3 and the ground design's F1, and biome classes may not rest on today's climate by B36 item 1;
+code: 2 blockers — the same port, and THE CLIENT'S SUMMER READS A DRY PLANET since B22, its snow line a dry planet's).
+Revision 2: colour = Σ share × paint; the shares computed once in the generator at the vertex (the shader only blends); ONE
+table from USGS splib07 (CC0); the work in three phases — C0 the colours that do not read the climate (rock by the bed the
+surface cuts, scree, regolith, snow and ice, the star's light, rule M with its gates), C1 the corrected climate (generator
+27, a world change), C2 plants and soils by climate and the far fold (SL6). Two defects registered: the client's dry summer,
+and the rock law (`S_c` 1.25) that cannot show bare rock on ground under tan 35°. TODAY'S ROWS (`examples/cover_census.rs`,
+the rain read at each class's middle): the land's rain median 375 mm, 38.4 % under 250 mm, 26.4 % at or over 650 mm. The
+owner's seven answers owed.
+- 2026-10-15 (later) — RULING B99: THE TERRAIN BASE FIRST (the shape + the contract the game builds on; the look after).
+THE ORDER: (1) generator 27 — the rain and the seasonal winds (B78's registered defects, B36 item 1); (2) the 4 m level IN
+THE BASE (amends B98: its comb cured by law without colours); (3) the one-volume design revised for today's ground (beside);
+(4) the volume — the solid pass with substances by law, then the water fill; (5) the edit system and the frozen patch;
+(6) standing, collision and delivery beside 4–5; (7) the base freezes. The colours design PARKED (its substance half moves to
+step 4). The parked work committed on the owner's "Yes". NEXT: generator 27's design and bench.

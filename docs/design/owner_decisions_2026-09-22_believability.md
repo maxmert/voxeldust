@@ -2507,3 +2507,45 @@ like to test 4m with colors again, maybe it will be way better."*
 
 **Example.** On hull 17's hills the 4 m comb read as grey teeth on grey ground; once the hills carry their soil and grass
 by law and the crests their rock, the owner looks again whether the 4 m detail reads as believable texture.
+
+## B99 (2026-10-15) — THE TERRAIN BASE FIRST: the shape and the contract the game builds on; the look after
+
+The owner stepped back from the colours: *"Let's stop and think holistically. TO proceed building the game itself, what
+needs to be done in terrain work now? As colors is not something that will survive - we will need apply textures, build
+vegetation, rocks, etc. But it's all later work. At the moment we need to have the terrain base that we (ideally) will not
+change much in the future."* On the recommended order the owner answered: *"1. Agree with the order, let's implement
+please. 2. Should be included into the base please 3. Yes"*.
+
+1. **THE TERRAIN BASE = THE SHAPE + THE CONTRACT.** The shape is where the hills, the valleys and the coasts are; the
+   contract is what the game asks the ground at a point, the same on the server and the client (the height, solid or
+   empty, which substance, where the water is). Game features build on the contract; built ground never moves after a
+   later law change (B81 Q8, F2 amended), which the frozen patch makes real.
+2. **THE ORDER (amends B35's order and B98 item 2):**
+   1. **THE RAIN AND THE SEASONAL WINDS — GENERATOR 27** (B78's registered defects: the rain belt's share never
+      renormalised, the 55° tilt's seasonal circulation missing, the rain that falls with height; B36 item 1's corrected
+      climate): the bench, the pictures on three bodies, the owner's look, the world moves once, the pins. Every 8 km
+      height and every fine tile reads the rain (the river's water is rain × area), so this goes first.
+   2. **THE 4 m LEVEL IS PART OF THE BASE** (amends B98 items 1 and 3): its defects (the comb on the hills' crests) cured
+      by law WITHOUT waiting for colours, its open questions answered, built through the one tile machinery on generator
+      27's world; HR5's tests for `fine::l3` before any game path reads it.
+   3. **THE ONE-VOLUME DESIGN REVISED for today's ground** (written 2026-09-28 at generator 21, before the 128 m and 16 m
+      tiles): documents with reviews, beside steps 1 and 2.
+   4. **THE VOLUME BUILT:** the solid pass from the finest ground with the substance of each cell by law (the bed's rock,
+      the soil and sediment, the ice), then the water fill (B22 item 4).
+   5. **THE EDIT SYSTEM AND THE FROZEN PATCH** (B22 item 5, F1, slice 9): an edit is a one-hop diff from the owning realm
+      (SL10); built ground never moves.
+   6. **STANDING, COLLISION AND DELIVERY** beside steps 4 and 5 (D-TERRAIN-11, D-TERRAIN-12, D-TERRAIN-13): the walker
+      stood, a landed hull stood again, the first statement on the fine ground, a parked hull that never follows a dropped
+      tile, the advance calculation, the disk cache, the 16 m (and 4 m) tiles' acknowledgement (an SL6 ask), one solved
+      library per machine.
+   7. **THE BASE FREEZES**; the game builds on it.
+3. **THE LOOK COMES AFTER THE BASE** and does not move it: colours, textures, vegetation, rock assets, clouds and weather,
+   waves, far shadows, the reference's dressing (D-TERRAIN-8). The colours design
+   (`docs/investigation/2026-10-15/ground_colours_design.md`, revision 2) is PARKED as a document; its SUBSTANCE half (which
+   material stands at a point: rock by the bed the surface cuts, scree, regolith, soil, snow and ice) moves into step 4,
+   where textures will read the same substances later; its paint half waits for the look.
+4. **THE PARKED WORK COMMITTED** (the owner's "Yes"): the colours design, the census of today's rain
+   (`examples/cover_census.rs`), the two defects registered (the client's dry summer, the rock law under tan 35°).
+
+**Example.** A player who builds a landing pad beside the river under the belt's pass stands on ground that the rain's cure
+already shaped; when the grass and the rock textures arrive later, the pad and the valley around it stay where they are.
