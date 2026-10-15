@@ -251,3 +251,20 @@ The design:
 | B m-7 the two orders | §7 (a), §10 |
 | B m-8 face edges and corners | §12 item 2 |
 | A minor: HR4/HR5/P-SAME; the moon; the status and registry entries | §1, §6 item 5; the status file and DEFERRED carry this design |
+
+## 14. The bench's first round (2026-10-15; the status file holds every number)
+
+- **Built (bench only, no game path):** the shared solve `fine::refine` (the 16 m bytes proven unchanged on eight tiles),
+  `fine::l3` (the 16 m flow record of §5 and the 4 m solve of §6), the bench `planet_stand l3`.
+- **The mountain matches Earth at 4 m** (25.1 / 5.33 / 0.003 % of the links over 35° / 45° / 63° against the San Gabriel
+  Mountains' 21.6 / 5.01 / 0.36 %; the detail 1.18 m RMS against 1.22 m) and draws rough rock and gullies.
+- **The hills overshoot** (15.8 / 1.38 % against Oregon's 9.4 / 0.52 %; the detail 1.39 m against 0.71 m RMS) and draw a
+  comb along their crests — the feather of §3.
+- **The channel-head fallback (§3) refuted in its simple form:** hillslope points held on the 16 m curve make walls and
+  needles where the law cuts beside them (B97's lesson one level down).
+- **The unit:** no visible bands at quarter metres; the readings move by about a point — sixteenths for the slope's sake.
+- **The terrace:** barely visible on the near ground.
+- **The cost:** 8.6–14 s a tile on the hills, 17–40 s on the mountain under load, every tile at the 180-pass bound.
+- **Open:** a lawful way to keep the hills smooth (Earth's hills are soil-mantled and smooth under the hillslope length)
+  while the mountains keep their 4 m rock — the owner's choice of the next step.
+

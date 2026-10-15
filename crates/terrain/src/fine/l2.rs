@@ -32,18 +32,17 @@
 //! 128 m flow over 57 km around it, the steady form on the 16 m points, then 640 × 640 heights in quarter metres — the
 //! tile and half its buffer, today's ground plus the law's small valleys — the same on any host.
 
-use super::delaunay::{Dir, NONE, triangulate_on_face};
-use super::geometry::{geometry, locate};
+use super::delaunay::NONE;
 use super::l1::{Domain, L1_RUNG, U0_LAND, cells_per_node_shift, domain_nodes};
-use super::points::{CellId, Level, chart_cell, chart_of, domain_points};
-use super::read::{FineBook, FineZ};
+use super::points::CellId;
+use super::read::FineBook;
+use super::refine::{Coarse, Setup, drawn, median, metres, raster, setup, steady};
 use super::tree::{accumulate, tree};
 use crate::artifact::Artifact;
 use crate::body::{BodyDefinition, TAN_REPOSE};
 use crate::gf::Gf;
 use crate::macro_lattice::MacroLattice;
 use crate::solve::{JOINT_K_LP, JOINT_N};
-use crate::units::{LENGTH_BITS, STEPS_PER_M};
 use vd_seed::bend::Face;
 
 /// The level's rung (the rung-4 cell: 16 m on the home planet).
@@ -59,9 +58,9 @@ pub const FLOW_NODES: i32 = 3;
 pub const STEADY_BOUND: usize = super::l1::FINE_ROUND_BOUND;
 pub const STEADY_SETTLE_M: f64 = 1.0;
 /// The Gaussian that reads each 16 m point's rate and rain from the 128 m points around it, in 128 m spacings, and its
-/// reach in widths (the 128 m level's own read).
-pub const READ_SIGMA: f64 = 0.5;
-pub const READ_REACH: f64 = 2.5;
+/// reach in widths (the 128 m level's own read; [`super::refine`] holds the one value).
+pub const READ_SIGMA: f64 = super::refine::READ_SIGMA;
+pub const READ_REACH: f64 = super::refine::READ_REACH;
 
 /// A solved 16 m tile: the tile and half its buffer as `side × side` heights in quarter metres over the sea (rows of the
 /// face's chart from its north-west corner), and the readings.
@@ -76,59 +75,17 @@ pub struct L2Tile {
     pub detail_cm: [i64; 2],
 }
 
-/// The drawn 128 m ground at the centre of `cell` (a cell of `rung`) in metres over the sea; `None` where its tile is not
-/// held.
-fn drawn(book: &FineBook, cell: &CellId, rung: u8, sea: Gf) -> Option<Gf> {
-    let face = Face::from_index(cell.face)?;
-    match book.z(face, rung, rung, cell.i, cell.j) {
-        FineZ::Held(z) => {
-            Some(Gf::from_i64(z.raw()) / Gf::from_i64(STEPS_PER_M << LENGTH_BITS) - sea)
-        }
-        FineZ::Missing(_) | FineZ::Outside => None,
-    }
-}
-
-/// A direction as metres on the sphere.
-fn metres(d: &Dir, r_m: Gf) -> [Gf; 3] {
-    let s = r_m / Gf::from_f64((1u64 << vd_recipe::bend::DIR_BITS) as f64);
-    [
-        Gf::from_i64(d[0].raw()) * s,
-        Gf::from_i64(d[1].raw()) * s,
-        Gf::from_i64(d[2].raw()) * s,
-    ]
-}
-
-fn dist2(a: &[Gf; 3], b: &[Gf; 3]) -> Gf {
-    let (x, y, z) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-    x * x + y * y + z * z
-}
-
-/// The median of `v` (the lower of the two middles), `None` when empty.
-fn median(mut v: Vec<Gf>) -> Option<Gf> {
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
-    (!v.is_empty()).then(|| v[(v.len() - 1) >> 1])
-}
-
-/// The joint law's slope for the rate `u` and the water `q` (`(U/(K·Q))^(1/n)`); unbounded (a large word) where no water.
-fn river_slope(u: Gf, q: Gf) -> Gf {
-    let k = Gf::from_f64(JOINT_K_LP);
-    if q <= Gf::ZERO || u <= Gf::ZERO {
-        return Gf::from_f64(f64::MAX);
-    }
-    (u / (k * q)).powf_fine(Gf::from_f64(1.0 / JOINT_N))
-}
-
 /// ★ THE 128 m FLOW around the node `(ni, nj)` of `face`: the domain over the node and [`FLOW_NODES`] each side, its
 /// points at the drawn ground, the tree, the water through each point, each point's rate and rain. `None` where a
 /// finished 128 m tile it reads is not held.
-struct Flow {
-    d: Domain,
-    h: Vec<Gf>,
-    recv: Vec<u32>,
-    q: Vec<Gf>,
-    rate: Vec<Gf>,
-    rain: Vec<Gf>,
-    pos: Vec<[Gf; 3]>,
+pub(crate) struct Flow {
+    pub d: Domain,
+    pub h: Vec<Gf>,
+    pub recv: Vec<u32>,
+    pub q: Vec<Gf>,
+    pub rate: Vec<Gf>,
+    pub rain: Vec<Gf>,
+    pub pos: Vec<[Gf; 3]>,
 }
 
 fn flow(
@@ -210,75 +167,28 @@ fn flow(
     })
 }
 
-/// A grid of point indices by their cells on a chart rectangle (compressed rows): every point whose cell stands at
-/// `(x, y)` of the rectangle `[x0, x0 + w) × [y0, y0 + h)`.
-struct CellGrid {
-    x0: i32,
-    y0: i32,
-    w: i32,
-    h: i32,
-    start: Vec<u32>,
-    pts: Vec<u32>,
+/// ★ THE 16 m DOMAIN of the node `key` under the 128 m flow: the flow over the node and [`FLOW_NODES`] each side, and the
+/// 16 m points of the node and its buffer set up by [`super::refine::setup`] (the graph, the drawn 128 m ground, the read,
+/// the rim). The 16 m tile solves on it; the 4 m level's 16 m flow record ([`super::l3`]) is built on it too.
+pub(crate) struct L2Domain {
+    pub f1: Flow,
+    pub s: Setup,
+    pub n4: i32,
+    pub down: u32,
+    pub shift4: u32,
+    pub buf: i32,
+    pub sea: Gf,
 }
 
-impl CellGrid {
-    fn new(at: &[Option<(i32, i32)>], (x0, y0, w, h): (i32, i32, i32, i32)) -> CellGrid {
-        let slot = |&(x, y): &(i32, i32)| {
-            ((x >= x0) & (y >= y0) & (x < x0 + w) & (y < y0 + h))
-                .then(|| ((y - y0) * w + (x - x0)) as usize)
-        };
-        let mut start = vec![0u32; (w * h) as usize + 1];
-        for s in at.iter().flatten().filter_map(slot) {
-            start[s + 1] += 1;
-        }
-        for i in 0..start.len() - 1 {
-            start[i + 1] += start[i];
-        }
-        let mut fill = start.clone();
-        let mut pts = vec![0u32; start[start.len() - 1] as usize];
-        for (p, a) in at.iter().enumerate() {
-            if let Some(s) = a.as_ref().and_then(slot) {
-                pts[fill[s] as usize] = p as u32;
-                fill[s] += 1;
-            }
-        }
-        CellGrid {
-            x0,
-            y0,
-            w,
-            h,
-            start,
-            pts,
-        }
-    }
-
-    /// The points of the cells `[xa, xb] × [ya, yb]` (clipped to the rectangle).
-    fn near(&self, (xa, xb): (i32, i32), (ya, yb): (i32, i32)) -> impl Iterator<Item = u32> + '_ {
-        let (xa, xb) = (xa.max(self.x0), xb.min(self.x0 + self.w - 1));
-        let (ya, yb) = (ya.max(self.y0), yb.min(self.y0 + self.h - 1));
-        (ya..=yb).flat_map(move |y| {
-            (xa..=xb).flat_map(move |x| {
-                let s = ((y - self.y0) * self.w + (x - self.x0)) as usize;
-                self.pts[self.start[s] as usize..self.start[s + 1] as usize]
-                    .iter()
-                    .copied()
-            })
-        })
-    }
-}
-
-/// ★ THE 16 m TILE `key` — one macro node: the node `(key.tx, key.ty)` of `key.face` — refining the finished 128 m tiles of `book`. `None` where the
-/// rung's cells do not nest in the nodes by a power of two, a finished 128 m tile it reads is not held, or a domain
-/// cannot be built.
-#[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn solve_l2(
+/// The 16 m domain of `key`; `None` where the rung's cells do not nest in the nodes by a power of two, a finished 128 m
+/// tile it reads is not held, or a domain cannot be built.
+pub(crate) fn l2_domain(
     body: &BodyDefinition,
     lattice: &MacroLattice,
     artifact: &Artifact,
     book: &FineBook,
     key: super::l1::TileKey,
-) -> Option<L2Tile> {
+) -> Option<L2Domain> {
     let (face, ni, nj) = (key.face, key.tx, key.ty);
     let f1 = flow(body, lattice, artifact, book, face, (ni, nj))?;
     let sea = Gf::from_i32(i32::from(artifact.sea_m));
@@ -292,357 +202,96 @@ pub fn solve_l2(
     let down = shift4.checked_sub(shift7)?;
     let node4 = 1i32 << shift4;
     let buf = node4 >> BUFFER_SHIFT;
-    let (i0, j0, side) = ((ni << shift4) - buf, (nj << shift4) - buf, node4 + 2 * buf);
-    let level = Level::new(body.seed(), L2_RUNG, n4 as u32)?;
-    let pts = domain_points(&level, face, i0, j0, side, side);
-    let dirs: Vec<Dir> = pts.iter().map(|p| p.dir).collect();
-    let cells: Vec<CellId> = pts.iter().map(|p| p.cell).collect();
-    // The face's plane (`triangulate_on_face`): the words shifted so a face's edge spans about 2^28 units — about 8 000
-    // between two 16 m neighbours on the home planet.
-    let plane_shift = (32 - (n4 as u32).leading_zeros())
-        .saturating_add(12)
-        .min(40);
-    let graph = triangulate_on_face(&dirs, face, 40 - plane_shift)?;
-    let geom = geometry(&dirs, &graph, r_m);
-    let n = dirs.len();
-    let pos: Vec<[Gf; 3]> = dirs.iter().map(|d| metres(d, r_m)).collect();
-    let mut base = Vec::with_capacity(n);
-    for c in &cells {
-        base.push(drawn(book, c, L2_RUNG, sea)?);
-    }
-    let mut outlet: Vec<bool> = base.iter().map(|&b| b <= Gf::ZERO).collect();
-    // Each 16 m point's place on the chart (rung 4), and each 128 m point's in the same chart at rung 4 (its cell's
-    // middle): where a link crosses the domain's rim, and which cells a search reads.
-    let at4: Vec<Option<(i32, i32)>> = cells.iter().map(|&c| chart_of(face, c, n4)).collect();
-    let at7: Vec<Option<(i32, i32)>> = f1.d.cells.iter().map(|&c| chart_of(face, c, n7)).collect();
-    let mid = 1i32 << (down - 1);
-    let in4 = |a: Option<(i32, i32)>| -> Option<(i32, i32)> {
-        a.map(|(x, y)| ((x << down) + mid, (y << down) + mid))
-    };
-    let inside = |a: Option<(i32, i32)>| {
-        in4(a).is_some_and(|(x, y)| (x >= i0) & (y >= j0) & (x < i0 + side) & (y < j0 + side))
-    };
-    let grid4 = CellGrid::new(&at4, (i0, j0, side, side));
     let (fi0, fj0) = ((ni - FLOW_NODES) << shift7, (nj - FLOW_NODES) << shift7);
     let fside = (2 * FLOW_NODES + 1) << shift7;
-    let grid7 = CellGrid::new(&at7, (fi0, fj0, fside, fside));
-    // The 16 m point nearest a place on the chart at rung 4 (its cell and the eight around; ties to the lower index).
-    let nearest4 = |x: i32, y: i32, target: &[Gf; 3]| -> Option<usize> {
-        grid4
-            .near((x - 1, x + 1), (y - 1, y + 1))
-            .map(|p| (dist2(&pos[p as usize], target), p))
-            .min_by(|a, b| {
-                a.0.partial_cmp(&b.0)
-                    .unwrap_or(core::cmp::Ordering::Equal)
-                    .then(a.1.cmp(&b.1))
-            })
-            .map(|b| b.1 as usize)
+    let coarse = Coarse {
+        cells: &f1.d.cells,
+        outlet: &f1.d.outlet,
+        h: &f1.h,
+        recv: &f1.recv,
+        q: &f1.q,
+        rate: &f1.rate,
+        rain: &f1.rain,
+        pos: &f1.pos,
+        rect: (fi0, fj0, fside),
+        n: n7,
+        spacing: Gf::from_f64(lattice.node_m() / f64::from(1u32 << shift7)),
     };
-    // THE READ'S WEIGHTS AND EACH POINT'S CELL: the 128 m points within the reach of each 16 m point, by the Gaussian of
-    // their distance (σ half a 128 m spacing); its cell the nearest (ties to the lower index).
-    let spacing7 = Gf::from_f64(lattice.node_m() / f64::from(1u32 << shift7));
-    let sigma = spacing7 * Gf::from_f64(READ_SIGMA);
-    let reach2 = (sigma * Gf::from_f64(READ_REACH)) * (sigma * Gf::from_f64(READ_REACH));
-    let two_s2 = sigma * sigma * Gf::TWO;
-    let (mut wstart, mut wcell, mut wval) = (Vec::with_capacity(n + 1), Vec::new(), Vec::new());
-    let mut cell_of = vec![u32::MAX; n];
-    for p in 0..n {
-        wstart.push(wcell.len() as u32);
-        let Some((x, y)) = at4[p] else {
-            continue;
-        };
-        let (cx, cy) = (x >> down, y >> down);
-        let first = wcell.len();
-        let mut sum = Gf::ZERO;
-        let mut best: Option<(Gf, u32)> = None;
-        for m in grid7.near((cx - 2, cx + 2), (cy - 2, cy + 2)) {
-            let d2 = dist2(&pos[p], &f1.pos[m as usize]);
-            if best.is_none_or(|b| (d2, m) < b) {
-                best = Some((d2, m));
-            }
-            if d2 <= reach2 {
-                let w = (-(d2 / two_s2)).exp_fine();
-                wcell.push(m);
-                wval.push(w);
-                sum += w;
-            }
-        }
-        if let Some(b) = best {
-            cell_of[p] = b.1;
-            if wcell.len() == first {
-                wcell.push(b.1);
-                wval.push(Gf::ONE);
-                sum = Gf::ONE;
-            }
-        }
-        for w in &mut wval[first..] {
-            *w = *w / sum;
-        }
-    }
-    wstart.push(wcell.len() as u32);
-    // Each point's rate and rain by the same weights (the logarithm of the rate), its water the rain over its area.
-    let ln_rate1: Vec<Gf> = f1.rate.iter().map(|r| r.ln_fine()).collect();
-    let mut rate = Vec::with_capacity(n);
-    let mut water = Vec::with_capacity(n);
-    for p in 0..n {
-        let (mut l, mut rain) = (Gf::ZERO, Gf::ZERO);
-        for w in wstart[p] as usize..wstart[p + 1] as usize {
-            l += wval[w] * ln_rate1[wcell[w] as usize];
-            rain += wval[w] * f1.rain[wcell[w] as usize];
-        }
-        rate.push(if wstart[p + 1] > wstart[p] {
-            l.exp_fine()
-        } else {
-            Gf::ZERO
-        });
-        water.push(rain * geom.area[p]);
-    }
-    // THE RIM: a 128 m link leaving the domain is an exit at the 16 m point nearest its crossing, on the drawn ground
-    // along the link; a link entering hands its water to the point nearest its crossing.
-    let lerp = |a: Gf, b: Gf, t: Gf| a + (b - a) * t;
-    let crossing = |c: usize, r: usize| -> Option<(i32, i32, Gf)> {
-        let (a, b) = (in4(at7[c])?, in4(at7[r])?);
-        // The parameter where the segment meets the rim, by bisection on the chart (forty halvings, exact in `Gf`).
-        let (mut lo, mut hi) = (Gf::ZERO, Gf::ONE);
-        let at = |t: Gf| {
-            let x = Gf::from_i32(a.0) + Gf::from_i32(b.0 - a.0) * t;
-            let y = Gf::from_i32(a.1) + Gf::from_i32(b.1 - a.1) * t;
-            (
-                x.floor().to_i64_floor() as i32,
-                y.floor().to_i64_floor() as i32,
-            )
-        };
-        let inside_xy =
-            |(x, y): (i32, i32)| (x >= i0) & (y >= j0) & (x < i0 + side) & (y < j0 + side);
-        let a_in = inside_xy(a);
-        for _ in 0..40 {
-            let m = (lo + hi) * Gf::HALF;
-            if inside_xy(at(m)) == a_in {
-                lo = m;
-            } else {
-                hi = m;
-            }
-        }
-        let (x, y) = at(if a_in { lo } else { hi });
-        Some((x, y, lo))
-    };
-    let mut exits = 0usize;
-    for c in 0..f1.h.len() {
-        let r = f1.recv[c];
-        if r == NONE || f1.d.outlet[c] {
-            continue;
-        }
-        let r = r as usize;
-        let (ci, ri) = (inside(at7[c]), inside(at7[r]));
-        if ci == ri {
-            continue;
-        }
-        let Some((x, y, t)) = crossing(c, r) else {
-            continue;
-        };
-        let foot = [
-            lerp(f1.pos[c][0], f1.pos[r][0], t),
-            lerp(f1.pos[c][1], f1.pos[r][1], t),
-            lerp(f1.pos[c][2], f1.pos[r][2], t),
-        ];
-        let Some(p) = nearest4(x, y, &foot) else {
-            continue;
-        };
-        if ci {
-            let z = lerp(f1.h[c], f1.h[r], t);
-            base[p] = if outlet[p] { base[p].lesser(z) } else { z };
-            outlet[p] = true;
-            exits += 1;
-        } else if !outlet[p] {
-            water[p] += f1.q[c];
-        }
-    }
-    if exits == 0 && !outlet.iter().any(|&o| o) {
-        // No 128 m water leaves and no sea: the rim's lowest point drains the domain.
-        let rim = |p: usize| {
-            at4[p].is_some_and(|(x, y)| {
-                (x == i0) | (y == j0) | (x == i0 + side - 1) | (y == j0 + side - 1)
-            })
-        };
-        if let Some(p) = (0..n).filter(|&p| rim(p)).min_by(|&a, &b| {
-            base[a]
-                .partial_cmp(&base[b])
-                .unwrap_or(core::cmp::Ordering::Equal)
-                .then(a.cmp(&b))
-        }) {
-            outlet[p] = true;
-        }
-    }
-    // ★ THE STEADY FORM IS THE 128 m LEVEL'S OWN LAW (ruling B97): each pass builds the drainage from the last pass's
-    // heights (the first from today's ground), brings each point the water its tree carries, and stands each point over its
-    // receiver by the joint law's slope for its rate and that water, never steeper than tan 35°. From the second pass each
-    // point moves HALF way to that form (the 128 m level's half step, B92): rebuilt from full steps, a divide's two sides
-    // kept capturing each other and the means never settled (MEASURED: the mountain tile beside hull 19 still moved
-    // 170 m at pass 180). The passes stop when no 128 m cell's mean moves more than a metre (the settle law), within the
-    // bound.
-    let tan = Gf::from_f64(TAN_REPOSE);
-    let ncell = f1.h.len();
-    let cell_means = |h: &[Gf]| -> Vec<Gf> {
-        let (mut sum, mut area) = (vec![Gf::ZERO; ncell], vec![Gf::ZERO; ncell]);
-        for p in 0..n {
-            let c = cell_of[p];
-            if c != u32::MAX {
-                sum[c as usize] += h[p] * geom.area[p];
-                area[c as usize] += geom.area[p];
-            }
-        }
-        (0..ncell)
-            .map(|c| {
-                if area[c] > Gf::ZERO {
-                    sum[c] / area[c]
-                } else {
-                    Gf::ZERO
-                }
-            })
-            .collect()
-    };
-    let settle = Gf::from_f64(STEADY_SETTLE_M);
-    let mut h = base.clone();
-    let mut last = cell_means(&h);
-    let mut passes = 0usize;
-    for pass in 1..=STEADY_BOUND {
-        passes = pass;
-        let t = tree(&h, &outlet, &graph, &geom.len);
-        let q = accumulate(&t, &water);
-        for &c in &t.order {
-            let c = c as usize;
-            let r = t.recv[c];
-            if outlet[c] || r == NONE {
-                h[c] = base[c];
-                continue;
-            }
-            let full = h[r as usize] + river_slope(rate[c], q[c]).lesser(tan) * t.link[c];
-            h[c] = if pass == 1 {
-                full
-            } else {
-                (h[c] + full) * Gf::HALF
-            };
-        }
-        let now = cell_means(&h);
-        let moved = now
-            .iter()
-            .zip(&last)
-            .map(|(x, y)| (*x - *y).abs())
-            .fold(Gf::ZERO, Gf::greater);
-        last = now;
-        if moved <= settle {
-            break;
-        }
-    }
-    // THE LAW'S RASTER: the tile and half its buffer, cell centres at rung 4, by the walk's weights; beside it the drawn
-    // 128 m ground at the same cells (today's ground, the curve every rung under 7 reads).
-    let half = buf >> 1;
-    let (ri0, rj0, rside) = (
-        (ni << shift4) - half,
-        (nj << shift4) - half,
-        node4 + 2 * half,
+    let drawn_at = |c: &CellId| drawn(book, c, L2_RUNG, sea);
+    let s = setup(
+        body.seed(),
+        r_m,
+        face,
+        L2_RUNG,
+        n4,
+        down,
+        ((ni << shift4) - buf, (nj << shift4) - buf, node4 + 2 * buf),
+        &coarse,
+        &drawn_at,
+    )?;
+    Some(L2Domain {
+        f1,
+        s,
+        n4,
+        down,
+        shift4,
+        buf,
+        sea,
+    })
+}
+
+/// ★ THE 16 m TILE `key` — one macro node: the node `(key.tx, key.ty)` of `key.face` — refining the finished 128 m tiles
+/// of `book` by [`super::refine`]: the domain under the 128 m flow, the steady form, the raster in B96's form. `None` where
+/// the rung's cells do not nest in the nodes by a power of two, a finished 128 m tile it reads is not held, or a domain
+/// cannot be built.
+#[must_use]
+pub fn solve_l2(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    book: &FineBook,
+    key: super::l1::TileKey,
+) -> Option<L2Tile> {
+    let d = l2_domain(body, lattice, artifact, book, key)?;
+    let (h, passes) = steady(
+        &d.s,
+        d.f1.h.len(),
+        Gf::from_f64(TAN_REPOSE),
+        Gf::from_f64(STEADY_SETTLE_M),
+        STEADY_BOUND,
     );
-    let rs = rside as usize;
-    let inv_n = vd_recipe::bend::inv_n_of(n4 as u32);
-    let mut law: Vec<Option<Gf>> = Vec::with_capacity(rs * rs);
-    let mut curve: Vec<Option<Gf>> = Vec::with_capacity(rs * rs);
-    let mut row_from = 0u32;
-    for bj in 0..rside {
-        let mut from = row_from;
-        for ai in 0..rside {
-            let Some(c) = chart_cell(face, ri0 + ai, rj0 + bj, n4) else {
-                law.push(None);
-                curve.push(None);
-                continue;
-            };
-            let qd = vd_recipe::bend::direction(i32::from(c.face), c.i, c.j, inv_n);
-            let (tri, w) = locate(&dirs, &graph, from, &qd)?;
-            let v = graph.tris[tri as usize];
-            law.push(Some(
-                w[0] * h[v[0] as usize] + w[1] * h[v[1] as usize] + w[2] * h[v[2] as usize],
-            ));
-            curve.push(Some(drawn(book, &c, L2_RUNG, sea)?));
-            if ai == 0 {
-                row_from = tri;
-            }
-            from = tri;
-        }
-    }
-    // ★ THE DETAIL (ruling B95, the owner: "adjust the formula and law, so we don't break what we already have today"):
-    // the 16 m ground is TODAY'S DRAWN GROUND plus the law's detail finer than 128 m — the law's raster less its own 128 m
-    // version, made exactly as today's curve is made from its samples (the box means over each 128 m cell, read back by
-    // the same Catmull-Rom between the cells' centres). So each 128 m cell keeps today's mean, the 128 m shapes stay as
-    // they are, and the law only adds what lies under 128 m: no hold, no fight between two levels.
-    let k = 1usize << down;
-    let mb = rs >> down;
-    let mut means = vec![Gf::ZERO; mb * mb];
-    for by in 0..mb {
-        for bx in 0..mb {
-            let (mut sum, mut cnt) = (Gf::ZERO, 0i64);
-            for y in by * k..(by + 1) * k {
-                for x in bx * k..(bx + 1) * k {
-                    if let Some(z) = law[y * rs + x] {
-                        sum += z;
-                        cnt += 1;
-                    }
-                }
-            }
-            means[by * mb + bx] = if cnt > 0 {
-                sum / Gf::from_i64(cnt)
-            } else {
-                Gf::ZERO
-            };
-        }
-    }
-    // The Catmull-Rom weights at the fraction `t` (Catmull & Rom 1974, the kernel the fine read draws with).
-    let cr = |t: Gf| -> [Gf; 4] {
-        let (t2, t3) = (t * t, t * t * t);
-        [
-            (Gf::TWO * t2 - t3 - t) * Gf::HALF,
-            (Gf::from_i64(3) * t3 - Gf::from_i64(5) * t2 + Gf::TWO) * Gf::HALF,
-            (Gf::from_i64(4) * t2 - Gf::from_i64(3) * t3 + t) * Gf::HALF,
-            (t3 - t2) * Gf::HALF,
-        ]
-    };
-    // A cell's place among the 128 m cells' centres: `(x + ½ − k/2) / k`, its whole part and its fraction.
-    let place = |x: usize| -> (i64, Gf) {
-        let u = (Gf::from_i64(x as i64) + Gf::HALF - Gf::from_i64((k >> 1) as i64))
-            / Gf::from_i64(k as i64);
-        let i = u.floor();
-        (i.to_i64_floor(), u - i)
-    };
-    let clampm = |i: i64| i.clamp(0, mb as i64 - 1) as usize;
-    let (mut quarters, mut detail) = (Vec::with_capacity(rs * rs), Vec::new());
-    for y in 0..rs {
-        let (iy, ty) = place(y);
-        let wy = cr(ty);
-        for x in 0..rs {
-            let (Some(lz), Some(cz)) = (law[y * rs + x], curve[y * rs + x]) else {
-                quarters.push(i32::MIN);
-                continue;
-            };
-            let (ix, tx) = place(x);
-            let wx = cr(tx);
-            let mut low = Gf::ZERO;
-            for (dy, &wyv) in wy.iter().enumerate() {
-                for (dx, &wxv) in wx.iter().enumerate() {
-                    low += wyv
-                        * wxv
-                        * means[clampm(iy + dy as i64 - 1) * mb + clampm(ix + dx as i64 - 1)];
-                }
-            }
-            let d = lz - low;
-            detail.push(d.abs());
-            let z = cz + d;
-            quarters.push((z * Gf::from_i64(4) + Gf::HALF).floor().to_i64_floor() as i32);
-        }
-    }
-    detail.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+    // THE RASTER: the tile and half its buffer, cell centres at rung 4.
+    let node4 = 1i32 << d.shift4;
+    let half = d.buf >> 1;
+    let rside = node4 + 2 * half;
+    let sea = d.sea;
+    let drawn_at = |c: &CellId| drawn(book, c, L2_RUNG, sea);
+    let (out, detail) = raster(
+        &d.s,
+        &h,
+        key.face,
+        d.n4,
+        d.down,
+        (
+            (key.tx << d.shift4) - half,
+            (key.ty << d.shift4) - half,
+            rside,
+        ),
+        &drawn_at,
+    )?;
+    let quarters = out
+        .iter()
+        .map(|z| {
+            z.map_or(i32::MIN, |z| {
+                (z * Gf::from_i64(4) + Gf::HALF).floor().to_i64_floor() as i32
+            })
+        })
+        .collect();
     let cm = |g: Gf| (g * Gf::from_i64(100)).floor().to_i64_floor();
     Some(L2Tile {
-        side: rs,
+        side: rside as usize,
         quarters,
-        points: n,
+        points: d.s.dirs.len(),
         passes,
         detail_cm: [
             detail.get(detail.len() >> 1).map_or(0, |&g| cm(g)),

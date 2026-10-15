@@ -247,8 +247,8 @@ fn main() {
         maxes.iter().filter(|&&m| m > 100.0).count()
     );
     let tot = rows.iter().fold([0usize; 5], |mut t, r| {
-        for k in 0..5 {
-            t[k] += r.links[k];
+        for (a, b) in t.iter_mut().zip(r.links) {
+            *a += b;
         }
         t
     });

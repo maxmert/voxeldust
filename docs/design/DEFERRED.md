@@ -12254,7 +12254,11 @@ generation alone), so a body solves once per generation on a machine, not once p
   2.85 GB of values: the artifact, the 128 m and the 16 m tiles of today's words. The live size bounds the server's disk and
   the player's disk cache (B86 item 7).
 
-- 🟥 **THE 2–4 m LEVEL (B5, L3) — DESIGNED, NOT BENCHED (2026-10-14).** `docs/investigation/2026-10-14/ground_2to4m_design.md`
+- 🟥 **THE 2–4 m LEVEL (B5, L3) — DESIGNED (2026-10-14), BENCHED ONCE (2026-10-15: the mountain matches Earth at 4 m, the
+  hills overshoot with a comb on their crests, the channel-head fallback refuted; the status file holds the numbers).
+  WAITS BY RULING B98 until the ground's colours by law are built; then tested again with colours.** The shared solve
+  `fine::refine` is covered by the 16 m solve's own test (green 2026-10-15, 354 of the generator's tests); `fine::l3` has
+  NO unit test yet — its 100 % coverage (HR5) is owed before any game path reads it. `docs/investigation/2026-10-14/ground_2to4m_design.md`
   revision 2 (two research reports, two adversarial reviews answered): one 16 m flow record per L2 tile; the law B97's one
   level down at 4 m; the honest price ~58 tiles around a viewer for rung 2 (~1–6 minutes of the solve's cores in a running
   game at a new place); the owner's five answers owed (the price, the provisional ground against B86 item 1, the threshold

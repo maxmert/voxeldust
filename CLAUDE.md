@@ -473,6 +473,11 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     amends B96 item 1) UNDER tan 35° (amends B82 item 1's 1.25 at 16 m: the creep's own limit); B96's form stays; the solve
     stops by convergence; only the 16 m tiles move. Benched against Earth's 1 m lidar at 16 m (San Gabriel, Oregon).
     THE LOOK GIVEN in the window at hull 19's valley: "It looks amazing!" (9 680 pieces, loading ~80 s).
+    ★ B98 (2026-10-15, the owner on B5's bench: "Agree with your recommendation. But after colors are done, I'd like to
+    test 4m with colors again"): THE 4 m LEVEL WAITS (it matched Earth on the mountain, overshot on the hills with a comb;
+    its code stays bench-only: `fine::refine` — the 16 m level runs through it byte for byte —, `fine::l3`,
+    `planet_stand l3`); THE GROUND'S COLOURS BY LAW NEXT (B35's biomes and materials on B75's first surface look; research,
+    a design with reviews, the art's questions, B36 Q14); THEN THE 4 m LEVEL TESTED AGAIN WITH COLOURS.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

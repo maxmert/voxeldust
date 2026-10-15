@@ -2086,6 +2086,21 @@ fn main() {
                 "the four 16 m tiles solved in {:.1} s (four threads)",
                 started.elapsed().as_secs_f64()
             );
+            // Each tile's bytes as one word (FNV-1a over its quarters), so two builds of the solve can be compared.
+            for (t, nd) in solved.iter().zip(&nodes) {
+                if let Some(t) = t {
+                    let mut d = 0xcbf2_9ce4_8422_2325u64;
+                    for q in &t.quarters {
+                        for b in q.to_le_bytes() {
+                            d = (d ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+                        }
+                    }
+                    println!(
+                        "  DIGEST node {nd:?}: {d:#018x} ({} samples)",
+                        t.quarters.len()
+                    );
+                }
+            }
             // The 16 m square: each tile's own node square (512 × 512 of its 640 × 640) laid side by side.
             let shift4 = cells_per_node_shift(&body, &lattice, L2_RUNG).expect("nests");
             let node4 = 1usize << shift4;
@@ -2293,6 +2308,380 @@ fn main() {
                     0.0,
                     12.0,
                     &format!("{out}/{name}_high.png"),
+                );
+            }
+            println!("pictures in {out}");
+        }
+        Some("l3") => {
+            // ★ THE 4 m LEVEL ON THE BENCH (B5, `docs/investigation/2026-10-14/ground_2to4m_design.md` rev 2): the 128 m tiles
+            // around the tile `F,TX,TY` solved and finished; 5 × 5 16 m tiles around its middle node solved and the middle
+            // 3 × 3 finished, as the planet's shard does; the 16 m flow record of the middle node; the 2 × 2 4 m tiles in the
+            // node's middle; the census beside Earth's 4 m numbers, the detail against today's 16 m curve, the views; the
+            // stored unit `UNIT` a metre (4 = quarter metres, today's; 16 = sixteenths).
+            use vd_terrain::fine::finish::block_keys;
+            use vd_terrain::fine::l2::solve_l2;
+            use vd_terrain::fine::l3::{L3_RUNG, TILE_CELLS_SHIFT, flow_record, solve_l3};
+            use vd_terrain::fine::level::{FineLevel, LevelGeom};
+            use vd_terrain::fine::read::{FineBook, FineZ};
+            use vd_terrain::fine::stitch::{BLEND, Field, stitch_columns, stitch_rows};
+            use vd_terrain::fine::tile::{finish, raw_field};
+            let world = args.get(2).expect("WORLD.art");
+            let tile: Vec<i32> = args
+                .get(3)
+                .expect("F,TX,TY")
+                .split(',')
+                .map(|x| x.trim().parse().expect("an integer"))
+                .collect();
+            let out = args.get(4).expect("OUT_DIR");
+            let unit: f64 = args.get(5).map_or(4.0, |s| s.parse().expect("a unit"));
+            std::fs::create_dir_all(out).expect("the output directory");
+            let artifact = vd_bins::artifact_file::read(world).expect("the world reads");
+            let face = vd_seed::bend::Face::from_index(tile[0] as u8).expect("a face");
+            let key = TileKey {
+                face,
+                tx: tile[1],
+                ty: tile[2],
+            };
+            let g1 = LevelGeom::of(FineLevel::L1, &body, &lattice).expect("the 128 m level");
+            let g2 = LevelGeom::of(FineLevel::L2, &body, &lattice).expect("the 16 m level");
+            let started = std::time::Instant::now();
+            // 1. The 128 m tiles: the 3 × 3 around `key` finished, each from its nine raw tiles.
+            let ring: Vec<TileKey> = block_keys(key, g1).into_iter().flatten().collect();
+            let mut all: Vec<TileKey> = ring
+                .iter()
+                .flat_map(|&k| block_keys(k, g1).into_iter().flatten())
+                .collect();
+            all.sort();
+            all.dedup();
+            let raws1: std::collections::BTreeMap<TileKey, vd_terrain::fine::stitch::Field> =
+                std::thread::scope(|sc| {
+                    let handles: Vec<_> = all
+                        .iter()
+                        .map(|&k| {
+                            let (body, lattice, artifact) = (&body, &lattice, &artifact);
+                            sc.spawn(move || {
+                                solve_l1(body, lattice, artifact, k)
+                                    .map(|t| (k, raw_field(k, g1, t.side, t.quarters)))
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .filter_map(|h| h.join().expect("a solve"))
+                        .collect()
+                });
+            let mut book1 =
+                FineBook::new(FineLevel::L1, &body, &lattice, artifact.sea_m).expect("a book");
+            for &k in &ring {
+                let keys = block_keys(k, g1);
+                let block: [Option<(TileKey, &vd_terrain::fine::stitch::Field)>; 9] =
+                    std::array::from_fn(|i| keys[i].and_then(|kk| raws1.get(&kk).map(|f| (kk, f))));
+                assert!(book1.insert(k, finish(block, g1).expect("a tile finishes")));
+            }
+            println!(
+                "{} 128 m tiles solved, {} finished, in {:.1} s",
+                raws1.len(),
+                book1.len(),
+                started.elapsed().as_secs_f64()
+            );
+            // 2. The 16 m tiles: 5 × 5 raw around the middle node, the 3 × 3 middle finished.
+            let mid = TILE_NODES / 2;
+            let (cx, cy) = (key.tx * TILE_NODES + mid, key.ty * TILE_NODES + mid);
+            let node = |x: i32, y: i32| TileKey { face, tx: x, ty: y };
+            let raw_keys: Vec<TileKey> = (-2..=2)
+                .flat_map(|dy| (-2..=2).map(move |dx| (dx, dy)))
+                .map(|(dx, dy)| node(cx + dx, cy + dy))
+                .collect();
+            let started = std::time::Instant::now();
+            let raws2: std::collections::BTreeMap<TileKey, vd_terrain::fine::stitch::Field> =
+                std::thread::scope(|sc| {
+                    let handles: Vec<_> = raw_keys
+                        .iter()
+                        .map(|&k| {
+                            let (body, lattice, artifact, book1) =
+                                (&body, &lattice, &artifact, &book1);
+                            sc.spawn(move || {
+                                solve_l2(body, lattice, artifact, book1, k)
+                                    .map(|t| (k, raw_field(k, g2, t.side, t.quarters)))
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .filter_map(|h| h.join().expect("a solve"))
+                        .collect()
+                });
+            let mut book2 =
+                FineBook::new(FineLevel::L2, &body, &lattice, artifact.sea_m).expect("a book");
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let k = node(cx + dx, cy + dy);
+                    let keys = block_keys(k, g2);
+                    let block: [Option<(TileKey, &vd_terrain::fine::stitch::Field)>; 9] =
+                        std::array::from_fn(|i| {
+                            keys[i].and_then(|kk| raws2.get(&kk).map(|f| (kk, f)))
+                        });
+                    assert!(book2.insert(k, finish(block, g2).expect("a 16 m tile finishes")));
+                }
+            }
+            println!(
+                "{} 16 m tiles solved, {} finished, in {:.1} s",
+                raws2.len(),
+                book2.len(),
+                started.elapsed().as_secs_f64()
+            );
+            // 3. The 16 m flow record of the middle node.
+            let started = std::time::Instant::now();
+            let record = flow_record(&body, &lattice, &artifact, &book1, &book2, node(cx, cy))
+                .expect("the 16 m flow record");
+            println!(
+                "the 16 m flow record of node ({cx}, {cy}): {} points in {:.2} s",
+                record.points(),
+                started.elapsed().as_secs_f64()
+            );
+            // 4. The 2 × 2 4 m tiles in the node's middle.
+            let shift2 = cells_per_node_shift(&body, &lattice, L3_RUNG).expect("nests");
+            let per = 1i32 << (shift2 - TILE_CELLS_SHIFT);
+            let (lx, ly) = (cx * per + per / 2 - 1, cy * per + per / 2 - 1);
+            let l3keys: Vec<TileKey> = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                .iter()
+                .map(|&(dx, dy)| node(lx + dx, ly + dy))
+                .collect();
+            let started = std::time::Instant::now();
+            let solved: Vec<Option<vd_terrain::fine::l3::L3Tile>> = std::thread::scope(|sc| {
+                let handles: Vec<_> = l3keys
+                    .iter()
+                    .map(|&k| {
+                        let (body, lattice, record, book2) = (&body, &lattice, &record, &book2);
+                        let sea_m = artifact.sea_m;
+                        sc.spawn(move || {
+                            let t0 = std::time::Instant::now();
+                            let t = solve_l3(body, lattice, sea_m, record, book2, k);
+                            println!(
+                                "  the 4 m tile ({}, {}): {:.1} s{}",
+                                k.tx,
+                                k.ty,
+                                t0.elapsed().as_secs_f64(),
+                                t.as_ref().map_or(" — DID NOT SOLVE".to_owned(), |t| format!(
+                                    ", {} points, {} passes, the law's detail median / largest {:.2} / {:.2} m",
+                                    t.points,
+                                    t.passes,
+                                    t.detail_cm[0] as f64 / 100.0,
+                                    t.detail_cm[1] as f64 / 100.0
+                                ))
+                            );
+                            t
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("a solve"))
+                    .collect()
+            });
+            println!(
+                "the four 4 m tiles solved in {:.1} s (four threads)",
+                started.elapsed().as_secs_f64()
+            );
+            // 5. The joined 4 m ground at the unit, and today's 16 m curve at the same 4 m cells.
+            let ts = 1usize << TILE_CELLS_SHIFT;
+            let w = 2 * ts;
+            let (i0, j0) = (
+                (lx as i64) << TILE_CELLS_SHIFT,
+                (ly as i64) << TILE_CELLS_SHIFT,
+            );
+            let fields: Vec<Field> = solved
+                .iter()
+                .zip(&l3keys)
+                .map(|(t, k)| {
+                    let t = t.as_ref().expect("every 4 m tile solves");
+                    let off = ((t.side - ts) / 2) as i64;
+                    Field {
+                        gx0: (i64::from(k.tx) << TILE_CELLS_SHIFT) - off,
+                        gy0: (i64::from(k.ty) << TILE_CELLS_SHIFT) - off,
+                        w: t.side,
+                        h: t.side,
+                        v: t.metres
+                            .iter()
+                            .map(|m| m.map_or(i32::MIN, |m| (m * unit + 0.5).floor() as i32))
+                            .collect(),
+                    }
+                })
+                .collect();
+            let off = ((solved[0].as_ref().expect("a tile").side - ts) / 2) as i64;
+            let band = off - BLEND;
+            let (gx, gy) = (
+                i64::from(l3keys[1].tx) << TILE_CELLS_SHIFT,
+                i64::from(l3keys[2].ty) << TILE_CELLS_SHIFT,
+            );
+            let (top, _) = stitch_columns(&fields[0], &fields[1], gx, band);
+            let (bottom, _) = stitch_columns(&fields[2], &fields[3], gx, band);
+            let (joined, _) = stitch_rows(&top, &bottom, gy, band);
+            let mut l3 = vec![f32::NAN; w * w];
+            for y in 0..w {
+                for x in 0..w {
+                    let q = joined.at(i0 + x as i64, j0 + y as i64);
+                    if q != i32::MIN {
+                        l3[y * w + x] = (f64::from(q) / unit) as f32;
+                    }
+                }
+            }
+            let sea = f64::from(artifact.sea_m);
+            let mut l2c = vec![f32::NAN; w * w];
+            let unit_z = (vd_terrain::units::STEPS_PER_M << vd_terrain::units::LENGTH_BITS) as f64;
+            for y in 0..w {
+                for x in 0..w {
+                    if let FineZ::Held(z) = book2.z(
+                        face,
+                        L3_RUNG,
+                        L3_RUNG,
+                        (i0 + x as i64) as i32,
+                        (j0 + y as i64) as i32,
+                    ) {
+                        l2c[y * w + x] = (z.raw() as f64 / unit_z - sea) as f32;
+                    }
+                }
+            }
+            // 6. The readings.
+            let step = |z: &[f32], a: usize, b: usize| (z[a] - z[b]).abs();
+            let mut joins: Vec<f32> = (0..w)
+                .flat_map(|k| {
+                    [
+                        step(&l3, k * w + ts - 1, k * w + ts),
+                        step(&l3, (ts - 1) * w + k, ts * w + k),
+                    ]
+                })
+                .filter(|s| s.is_finite())
+                .collect();
+            joins.sort_by(f32::total_cmp);
+            println!(
+                "the joins after the stitch: the step median {:.2} m, 99th {:.2} m, the largest {:.2} m",
+                joins[joins.len() / 2],
+                joins[joins.len() * 99 / 100],
+                joins[joins.len() - 1]
+            );
+            let mut res: Vec<f64> = l3
+                .iter()
+                .zip(&l2c)
+                .filter(|(a, b)| a.is_finite() && b.is_finite())
+                .map(|(a, b)| f64::from(a - b))
+                .collect();
+            let rms = (res.iter().map(|r| r * r).sum::<f64>() / res.len().max(1) as f64).sqrt();
+            res.iter_mut().for_each(|r| *r = r.abs());
+            res.sort_by(f64::total_cmp);
+            println!(
+                "THE 4 m DETAIL against today's 16 m curve: RMS {:.2} m, 99th {:.2} m, largest {:.2} m (Earth's 2 m detail: RMS 0.71 / 0.95 / 1.22 m, 99th 2.45 / 3.11 / 4.19 m)",
+                rms,
+                res[res.len() * 99 / 100],
+                res[res.len() - 1]
+            );
+            let k4 = 4usize;
+            let mut gaps: Vec<f64> = Vec::new();
+            for by in 0..w / k4 {
+                for bx in 0..w / k4 {
+                    let (mut a, mut b, mut n) = (0f64, 0f64, 0u32);
+                    for y in by * k4..(by + 1) * k4 {
+                        for x in bx * k4..(bx + 1) * k4 {
+                            let (u, v) = (l3[y * w + x], l2c[y * w + x]);
+                            if u.is_finite() && v.is_finite() {
+                                a += f64::from(u);
+                                b += f64::from(v);
+                                n += 1;
+                            }
+                        }
+                    }
+                    if n > 0 {
+                        gaps.push(((a - b) / f64::from(n)).abs());
+                    }
+                }
+            }
+            gaps.sort_by(f64::total_cmp);
+            println!(
+                "each 16 m cell's mean, the 4 m ground against today's: off by median {:.2} m, 99th {:.2} m, largest {:.2} m",
+                gaps[gaps.len() / 2],
+                gaps[gaps.len() * 99 / 100],
+                gaps[gaps.len() - 1]
+            );
+            println!(
+                "  EARTH at 4 m: San Gabriel 21.63 / 5.01 / 0.364 % of the links over 35° / 45° / 63°; Oregon 9.38 / 0.515 / 0.0021 %"
+            );
+            let cell = f64::from(1u32 << L3_RUNG);
+            let r_m = body.radius_m();
+            let terraced = |z: &[f32]| -> Vec<f32> {
+                z.iter()
+                    .map(|&h| {
+                        if h.is_finite() {
+                            let s = r_m + sea + f64::from(h);
+                            (vd_terrain::height::terrace_m(&body, s, 0) - r_m - sea) as f32
+                        } else {
+                            h
+                        }
+                    })
+                    .collect()
+            };
+            let (l2t, l3t) = (terraced(&l2c), terraced(&l3));
+            let tag = if (unit - 4.0).abs() < 1e-9 {
+                "q4".to_owned()
+            } else {
+                format!("u{unit}")
+            };
+            for (name, z) in [
+                ("today_16m_curve".to_owned(), &l2c),
+                (format!("new_4m_{tag}"), &l3),
+                ("today_16m_curve_terraced".to_owned(), &l2t),
+                (format!("new_4m_{tag}_terraced"), &l3t),
+            ] {
+                let name = name.as_str();
+                let mut r1 = reliefs(z, w, (1_000.0 / cell) as usize);
+                summary(&format!("{name}, 1 km"), &mut r1);
+                steep_census(name, z, w, cell);
+                if !name.ends_with("terraced") {
+                    let (counts, rb, density, order) = branching(z, w, cell, 0.05);
+                    println!(
+                        "  {name:<40}: BRANCHING (heads 0.05 km²) orders {counts:?}, bifurcation {rb:.2}, density {density:.2} km/km²"
+                    );
+                    drainage_map(z, w, cell, &order, &format!("{out}/{name}_above.png"));
+                }
+                let c = (w as f64 / 2.0, w as f64 * 0.85);
+                render_view(
+                    z,
+                    w,
+                    cell,
+                    c,
+                    1.8,
+                    0.0,
+                    2.0,
+                    &format!("{out}/{name}_walker.png"),
+                );
+                render_view(
+                    z,
+                    w,
+                    cell,
+                    c,
+                    30.0,
+                    0.0,
+                    6.0,
+                    &format!("{out}/{name}_low.png"),
+                );
+                // A walker on the highest ground of the square's south half, looking north across it.
+                let (mut best, mut at) = (f32::MIN, c);
+                for y in (w / 2)..(w * 15 / 16) {
+                    for x in (w / 8)..(w * 7 / 8) {
+                        let v = l2c[y * w + x];
+                        if v.is_finite() && v > best {
+                            (best, at) = (v, (x as f64, y as f64));
+                        }
+                    }
+                }
+                render_view(
+                    z,
+                    w,
+                    cell,
+                    at,
+                    1.8,
+                    0.0,
+                    4.0,
+                    &format!("{out}/{name}_crest.png"),
                 );
             }
             println!("pictures in {out}");

@@ -133,7 +133,7 @@ that join into drainage, forest over whole hillsides, and one lake in a valley. 
 | B2-5 the lake side word | BUILT (two bits a node); ★ the level-1 word keeps a lone lake (`block_water`, step 2 part 5). The lake's EDGE law (W6) and the sea's shore off the node squares are OWED. | `terrain/src/artifact.rs` `coast_side`, `sample_side`, `block_water` |
 | W18 the water sheet | BUILT (client geometry; it draws what the columns say). | `terrain/src/position.rs:271-499` |
 | 8d the authored override | NOT BUILT. | no code |
-| 8e biome and soil | NOT BUILT. Every ground pixel is ONE colour, `srgb(0.55, 0.50, 0.42)`. | `client-render/src/terrain.rs:1974` |
+| 8e biome and soil | NOT BUILT. ★ Since 2026-10-10 the FIRST SURFACE LOOK paints bare rock by the soil's critical slope, soil, and snow over the summer's freezing line from a three-colour table (`vd_terrain::surface`, `vd_client::surface`, the fade shader); biomes, rock kinds, soil colour by climate and the cover are not built (ruling B98: next). | `terrain/src/surface.rs`; `client/src/surface.rs`; `client-render/src/ladder_fade.wgsl` |
 | 8f the third dimension (cliffs, overhangs) | NOT BUILT. | no code |
 | 8o the ocean | NOT BUILT. The water is one colour, `srgb(0.06, 0.24, 0.42)`. | `client-render/src/terrain.rs:2034` |
 
@@ -1907,3 +1907,32 @@ drawn detail (a point's height less its 128 m cell's mean) moves as much as the 
 largest move is 5.2 m, its 99th percentile 0.89 m, ~40 000 points over a quarter metre; the hills at pass 50, just before
 they settle, read the same (5.2 / 0.89 m, ~61 000). A settle law on the drawn detail would not end the mountain's passes
 sooner. The mountain's tiles stop at the bound with the readings converged by N against 2N (40 / 80 / 180 passes).
+- 2026-10-15 — B5's BENCH (the owner: "please continue with 1"; the bench took the design's recommendations for Q1, Q3 and
+Q4; Q2 and Q5 stay open for the build; built, linted, NOT committed, no test run). CODE: the shared solve `fine::refine` —
+the 16 m solve's set-up, steady form and B96 raster moved out of `fine::l2` unchanged (PROVEN BYTE FOR BYTE: eight 16 m
+tiles' digests at hull 17 and hull 19 equal before and after, the "before" built from the commit in a temporary checkout
+and its binary shown to hold no `refine` code); `fine::l3` — the 16 m flow record (one per 16 m tile: its domain under the
+128 m flow, the tree and water on the finished 16 m ground, the rate per 128 m cell) and the 4 m solve (rung 2, tiles of
+512 cells, 128-cell buffer, settle a quarter metre within 180), NO game path reads it; the bench `planet_stand l3` (the
+128 m and 16 m tiles solved and finished as the shard does, the record, 2 × 2 4 m tiles joined by the game's cut, the
+census beside Earth's 4 m lidar, the views, the unit, the terrace). MEASURED: THE MOUNTAIN beside hull 19 matches the San
+Gabriel Mountains at 4 m (25.1 / 5.33 / 0.0026 % of the links over 35° / 45° / 63° at sixteenth metres, Earth 21.6 / 5.01 /
+0.364 %; the detail under today's 16 m curve 1.18 m RMS, 99th 3.22 m, Earth's steep tile 1.22 / 4.19 m) and draws rough
+rock and gullies; THE HILLS at hull 17 overshoot Oregon (15.8 / 1.38 / 0 % against 9.4 / 0.52 / 0.002 %, the detail 1.39 m
+RMS against 0.71) and draw a fine comb of teeth along their crests — the "feather" the design named. THE CHANNEL-HEAD LAW
+(A·S² ≥ 500 m², Tarolli et al. 2009; hillslope points held on the 16 m curve) REFUTED: the hills went too smooth (0.84 %
+over 35°) with single walls to 27 m, the mountain grew needles (19.6 % over 63°, steps to 247 m) — B97's pinned-ground
+walls again. THE UNIT: quarter against sixteenth metres draws the same picture (no contour bands); the readings move (45°:
+6.20 → 5.33 % on the mountain). THE TERRACE on the near ground: barely visible (+0.4 points over 45°). THE COST (load 20–48):
+a 4 m tile 8.6–14 s on the hills, 17–40 s on the mountain, every tile at the 180-pass bound; the 16 m flow record 1.6–3 s a
+node. Pictures: `~/Downloads/voxeldust_4m_bench_2026-10-15/`. The owner's look and choice owed.
+- 2026-10-15 (later) — RULING B98: the 4 m level WAITS (its code bench-only); THE GROUND'S COLOURS BY LAW NEXT (on B75's first
+surface look — rock by the soil's critical slope, soil, snow over the summer's freezing line, the first three-colour paint
+table, DEFERRED "THE FIRST SURFACE LOOK" with its eight interims); then the 4 m level tested again with colours. A
+CORRECTION: the report of 2026-10-15 said every ground pixel has one plain colour (read from §3's table, written
+2026-09-24); the code draws the first surface look since 2026-10-10 (`vd_client::surface`, the fade shader's paint) — §3's
+row "8e biome and soil" is stale on that point.
+- 2026-10-15 (later) — THE GENERATOR'S TESTS GREEN on the shared solve (the owner: "Yes to all"): `cargo test --release -p
+vd-terrain --lib`, 354 passed, the 16 m solve's own test among them. `fine::l3` has no unit test yet (registered). The
+colours step started: two read-only research reports (`/tmp/vd-b5/colours/`: the code survey written, the laws and data
+running).

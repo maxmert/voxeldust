@@ -2489,3 +2489,21 @@ valley, as on the San Gabriel Mountains' 16 m ground.
 **THE LOOK GIVEN (2026-10-14, the window at hull 19's valley on the built B97 ground, hull 20 berthed 40 m away as a size
 reference):** *"It looks amazing!"* MEASURED in the same session: the loading screen went after ~80 s with 9 680 pieces
 wanted (the day before at the same valley under the 1.25 bound: 34 232 pieces, 3 min 45 s).
+
+## B98 (2026-10-15) — the 4 m level waits; the ground's colours by law next; then the 4 m level again with colours
+
+THE BENCH (status file, 2026-10-15): the 4 m level (B5) under B97's law matches Earth on the mountain beside hull 19 (the San
+Gabriel Mountains at 4 m) and draws rough rock and gullies, but overshoots on hull 17's hills (a comb of teeth along their
+crests where Oregon's hills are smooth under soil); the channel-head fallback made walls and needles; a 4 m tile costs
+9–40 s and the ring around a viewer minutes. The owner: *"Agree with your recommendation. But after colors are done, I'd
+like to test 4m with colors again, maybe it will be way better."*
+
+1. **THE 4 m LEVEL WAITS.** Its code stays (the shared solve `fine::refine`, which the 16 m level runs through byte for
+   byte, the bench level `fine::l3`, the bench `planet_stand l3`); no game path reads the 4 m level.
+2. **THE GROUND'S COLOURS BY LAW ARE NEXT** — B35's "biomes and materials" on the first surface look of B75 (rock by the
+   soil's critical slope, soil, snow over the summer's freezing line, a first three-colour paint table): research, a design
+   with reviews, the owner's questions (the art's step, B36 Q14), then the bench and the window.
+3. **THEN THE 4 m LEVEL IS TESTED AGAIN WITH COLOURS** — the same bench and the window, judged by the owner's look.
+
+**Example.** On hull 17's hills the 4 m comb read as grey teeth on grey ground; once the hills carry their soil and grass
+by law and the crests their rock, the owner looks again whether the 4 m detail reads as believable texture.
