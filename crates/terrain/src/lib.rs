@@ -65,6 +65,7 @@ pub mod noise;
 pub mod par;
 pub mod position;
 pub mod river;
+pub mod seasons;
 pub mod seat;
 pub mod solve;
 pub mod strata;

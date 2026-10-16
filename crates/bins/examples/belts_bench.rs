@@ -775,6 +775,10 @@ fn main() {
         );
         let mut laws = Laws::default();
         vd_bins::solve_copy::RAIN_RENORMALISED.store(false, std::sync::atomic::Ordering::Relaxed);
+        vd_bins::solve_copy::SEASONS.store(false, std::sync::atomic::Ordering::Relaxed);
+        *vd_bins::solve_copy::SEASON_STATE
+            .lock()
+            .expect("the season state") = None;
         if let Some(every) = climate_every {
             laws.climate_every = every;
         }
@@ -785,6 +789,10 @@ fn main() {
                 // Ruling B94 step 2: the rain belt renormalised (`solve_copy::RAIN_RENORMALISED`, a probe).
                 "rain" => vd_bins::solve_copy::RAIN_RENORMALISED
                     .store(true, std::sync::atomic::Ordering::Relaxed),
+                // Ruling B99 step 1 (generator 27's S3): the seasons' chain as the copy's climate.
+                "seasons" => {
+                    vd_bins::solve_copy::SEASONS.store(true, std::sync::atomic::Ordering::Relaxed)
+                }
                 other => {
                     // The land copy's forms and diagnostics (rulings B58 item 2, B59–B61): cellK, airy, flex; the game's
                     // own margins, spread, spectrum and share (no change on generator 26); the diagnostics blendM

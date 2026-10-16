@@ -226,6 +226,31 @@ impl Gf {
         (y * self.ln()).exp()
     }
 
+    /// ★ THE FENCED ARC COSINE (generator 27's sun, ruling B99 step 1: the hour angle of sunset, `cos h₀ = −tan φ·tan δ`),
+    /// for `x` in `[−1, 1]`. `acos x = π − acos(−x)` folds a negative `x`; `acos x = 2·asin(√((1 − x)/2))` turns the rest
+    /// into an arc sine of at most `sin 45°`, and `asin y = π/2 − 2·asin(√((1 − y)/2))` takes one over `½` under `½`; there
+    /// `asin z = Σ cₙ·z^(2n+1)`, `c₀ = 1`, `cₙ₊₁ = cₙ·(2n + 1)²/((2n + 2)(2n + 3))`, thirty terms in Horner form (the last
+    /// term under `2⁻⁶¹`). Add, multiply, divide by a whole number, a root: one answer on every target. An `x` outside
+    /// `[−1, 1]` is a caller's defect and answers NaN, never a wrong finite number.
+    ///
+    /// **Example.** At 70° N in the home planet's northern summer the sun's declination is 40°: `−tan 70°·tan 40°` is
+    /// under −1, so the caller states a polar day without this call; at 40° N it is −0.70, and this answers the hour angle
+    /// of sunset, 2.35 rad — a day of 15 of its 24 hours.
+    #[must_use]
+    pub fn acos(self) -> Gf {
+        let half_pi = Gf(std::f64::consts::FRAC_PI_2);
+        if self.0 < 0.0 {
+            return Gf(std::f64::consts::PI) - (-self).acos();
+        }
+        let y = ((Gf::ONE - self) * Gf::HALF).sqrt();
+        let asin_y = if y.0 > 0.5 {
+            half_pi - Gf::TWO * asin_series(((Gf::ONE - y) * Gf::HALF).sqrt())
+        } else {
+            asin_series(y)
+        };
+        Gf::TWO * asin_y
+    }
+
     /// ★ THE FINE EXPONENTIAL (the fine levels' power, the way-in design rev 4 §5): [`Gf::exp`]'s own reduction and
     /// Taylor polynomial, with each division by a whole number replaced by a multiplication by its reciprocal written
     /// ONCE as a constant (`1/n!`, Horner from the inside) — add, multiply, a floor and a bit pattern, so one answer on
@@ -303,6 +328,23 @@ impl Gf {
     pub fn powf_fine(self, y: Gf) -> Gf {
         (y * self.ln_fine()).exp_fine()
     }
+}
+
+/// The arc sine's series for `0 ≤ z ≤ ½` ([`Gf::acos`]): `z·(c₀ + z²·(c₁ + z²·(…)))`, the coefficients by their
+/// recurrence in the word's own exact operations.
+fn asin_series(z: Gf) -> Gf {
+    const TERMS: usize = 30;
+    let mut c = [Gf::ONE; TERMS];
+    for n in 0..TERMS - 1 {
+        let k = (2 * n + 1) as i64;
+        c[n + 1] = c[n] * Gf::from_i64(k * k) / Gf::from_i64((k + 1) * (k + 2));
+    }
+    let z2 = z * z;
+    let mut p = c[TERMS - 1];
+    for &cn in c[..TERMS - 1].iter().rev() {
+        p = cn + z2 * p;
+    }
+    z * p
 }
 
 impl Add for Gf {
@@ -456,6 +498,33 @@ mod tests {
             Gf::from_f64(-800.0).exp_fine().to_f64(),
             Gf::from_f64(-800.0).exp().to_f64()
         );
+    }
+
+    /// ★ THE FENCED ARC COSINE against LITERAL values (a test may not call the platform's): the exact ends, the angles
+    /// whose cosines are known, each branch of the reduction, and NaN outside `[−1, 1]`.
+    #[test]
+    fn the_fenced_arc_cosine_meets_the_known_angles() {
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, PI};
+        let near = |x: f64, want: f64| {
+            let got = Gf::from_f64(x).acos().to_f64();
+            // The input's own rounding (half a unit in its last place) moves the answer by the slope `1/√(1 − x²)`.
+            let slope = 1.0 / (1.0 - x * x).sqrt();
+            let scale = if want.abs() > 1.0 { want.abs() } else { 1.0 };
+            let tol = 4e-16 * scale + 1.2e-16 * if slope.is_finite() { slope } else { 0.0 };
+            assert!((got - want).abs() < tol, "acos {x} = {got}, want {want}");
+        };
+        near(1.0, 0.0);
+        near(-1.0, PI);
+        near(0.0, FRAC_PI_2);
+        near(0.5, FRAC_PI_3);
+        near(-0.5, 2.0 * FRAC_PI_3);
+        near(std::f64::consts::FRAC_1_SQRT_2, FRAC_PI_4);
+        near(0.866_025_403_784_438_6, FRAC_PI_6);
+        // cos 1 = 0.540 302 305 868 139 7 (the reduction's y over ½) and cos 0.1 (y under ½).
+        near(0.540_302_305_868_139_7, 1.0);
+        near(0.995_004_165_278_025_8, 0.1);
+        assert!(Gf::from_f64(1.5).acos().to_f64().is_nan());
+        assert!(Gf::from_f64(-1.5).acos().to_f64().is_nan());
     }
 
     /// ★ THE FENCED EXPONENTIAL AND LOGARITHM against LITERAL values (a test may not call the

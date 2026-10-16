@@ -2549,3 +2549,24 @@ please. 2. Should be included into the base please 3. Yes"*.
 
 **Example.** A player who builds a landing pad beside the river under the belt's pass stands on ground that the rain's cure
 already shaped; when the grass and the rock textures arrive later, the pad and the valley around it stay where they are.
+
+## B100 (2026-10-16) — GENERATOR 27's CLIMATE IS TODAY'S CHAIN; THE DESERT LAWS POSTPONED; THE GAME FIRST
+
+The owner looked at the three worlds (`~/Downloads/voxeldust_rain_worlds_2026-10-15/`: today's generator 26; the first
+macro world with the older chain; the second with today's chain — the evaporation cure and the heated winds; the design
+`docs/investigation/2026-10-15/rain_seasons_design.md` §11.5) and said: *"I really want to proceed with the game
+development, so let's postpone the desert laws for now, it looks good enough."*
+
+1. **THE SECOND WORLD'S CHAIN IS GENERATOR 27's CLIMATE** (the owner's look given for B99 step 1): the seasons' sun, the
+   latitude–longitude grid, the seasonal moist energy balance with the ice–albedo law, the cells' winds with the heated
+   winds' departures (Gill), the vapour with the evaporation cure, the mountains' rain on the 8 km nodes. Its readings on the
+   home planet: the land's rain 423 mm/yr on the median, 2.2 % under 250 mm, the belts' windward faces wet.
+2. **THE DESERT LAWS ARE POSTPONED** (registered, not dropped): the desert's radiative sink (Charney 1975), the land's
+   surface energy split and the saturation law after it, the trades' momentum mixing, the storm belts' closure. MEASURED
+   cost of the postponement: on Earth's charter the chain rains on the Sahara (718–1 025 mm in July against GPCP's ~23); on
+   the home planet it reads 2.2 % desert against ExoPlaSim's 3–4 %; the desert world's dryness is not yet tested by law.
+3. **THE GAME FIRST**: B99's order continues — generator 27 into the game's solve (the world moves once, the pins), then the
+   4 m level, the volume, the edits and the frozen patch, standing and collision, the base's freeze.
+
+**Example.** A pilot who lands beside the home planet's belt finds its sea-facing slopes wet and its rivers fed; on Earth's
+charter the same chain would still put rain on the Sahara — that waits for the desert laws, after the game's first steps.

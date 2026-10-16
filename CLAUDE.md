@@ -487,6 +487,11 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     (beside 1–2) → (4) the volume: the solid pass with substances by law, then the water fill → (5) the edit system and the
     frozen patch → (6) standing, collision and delivery beside 4–5 → (7) THE BASE FREEZES. THE LOOK AFTER (colours, textures,
     vegetation, rocks, weather, waves); the colours design PARKED, its substance half moves into step 4.
+    ★ B100 (2026-10-16, the owner on the three rain worlds: "I really want to proceed with the game development, so let's
+    postpone the desert laws for now, it looks good enough"): GENERATOR 27's CLIMATE IS TODAY'S CHAIN (the seasons' balance,
+    the cells' winds + Gill's departures, the evaporation cure, the mountains' rain; the home planet's land 423 mm/yr, 2.2 %
+    desert); THE DESERT LAWS POSTPONED (Charney's sink, the surface energy split → the saturation law, the trades' mixing,
+    the storm belts; registered); THE GAME FIRST — B99's order continues.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

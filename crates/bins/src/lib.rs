@@ -48,6 +48,9 @@ pub mod shore_shape;
 // stations and the reference stand read one rule, so our number and the reference's are one
 // instrument.
 pub mod skyline;
+// ★ EARTH AS A MEASURING STICK ON THE HOME PLANET'S GRID (rulings B36 item 7, B79 Q1, B99 step 1): the relief, the
+// rain and the wind readers and the one binning rule the Earth benches share; the data stays outside the repo.
+pub mod earth;
 // ★ THE ONE COPY OF THE BELTS' LAW FOR THE BENCHES (ruling B60 item 3: the second cliff's cause): the wedge by the
 // node's crust and the Andean coast, switched in the copy only; the game's law is untouched.
 pub mod belts_copy;

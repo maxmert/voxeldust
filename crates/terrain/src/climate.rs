@@ -692,7 +692,7 @@ pub fn upwind_slot(lattice: &MacroLattice, node: u32, d: [Gf; 3], wind: [Gf; 3])
 }
 
 /// [`upwind_slot`] over the neighbours `around` (in the stencil's order) and their directions `dirs`.
-fn upwind_pick(around: &[u32; 8], dirs: &[[Gf; 3]; 8], d: [Gf; 3], wind: [Gf; 3]) -> u8 {
+pub(crate) fn upwind_pick(around: &[u32; 8], dirs: &[[Gf; 3]; 8], d: [Gf; 3], wind: [Gf; 3]) -> u8 {
     let mut best = 0u8;
     let mut best_dot = Gf::from_f64(f64::MAX);
     for (slot, m) in around.iter().enumerate() {

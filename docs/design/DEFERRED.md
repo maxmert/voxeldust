@@ -12144,6 +12144,21 @@ generation alone), so a body solves once per generation on a machine, not once p
       1.25 (the soil mantle's limit at the hillslope's own scale) while the 128 m and 16 m ground stands under tan 35°
       (B82, B97), so the drawn rock share stays under ~0.31. The cure (the colours design §3.2, Q2): the expected share
       under the hidden slope spread (rule M).
+    - 🟨 THE RAIN LAW'S CURE ON THE BENCH (ruling B99 step 1, generator 27; 2026-10-15): the seasons' chain
+      (`vd_terrain::seasons`: the sun, a latitude–longitude climate grid, the seasonal moist energy balance with the
+      ice–albedo law, the winds, the vapour and the rain, the 8 km mountains' rain, and the chain as the solve's climate
+      with its warm state) BUILT ON THE BENCH ONLY; the design `docs/investigation/2026-10-15/rain_seasons_design.md`
+      revision 2 and its §11 readings. OWED before the build: the land's surface energy split (then the saturation law,
+      which makes the deserts dry: the Sahara 340 mm against GPCP's 23), the monsoon's law (the Himalaya's south face 102 mm
+      against 1 153), the speed (the mountains' rain 15–21 s a season cold; 2026-10-15 the seasons in waves, the band order and the loops'
+      exact solve: a pass 13–33 s, one call in ten still at the round bound — design §11.5), ExoPlaSim's home-planet reading (running),
+      the macro solve with the chain (S3, running) and the owner's look; sea ice; the moon with air and the star-locked
+      body (refused by the chain's scope); Milly's seasonal runoff; the client's snow line from the realm.
+    - 🟨 THE DESERT LAWS — POSTPONED by ruling B100 (2026-10-16; "it looks good enough", the game first): the desert's
+      radiative sink (Charney 1975), the land's surface energy split and the saturation law after it, the trades' downward
+      momentum mixing (Stevens et al. 2002), the storm belts' closure (design §11.4). MISSING, so the chain is too wet where
+      deserts form: Earth's Sahara 718–1 025 mm in July (GPCP ~23); the home planet 2.2 % desert (ExoPlaSim 3–4 %); the
+      desert world untested. WHEN: after the game's first steps, on the owner's word; each law benched on Earth first.
     - 🟥 THE RAIN LAW'S DEFECTS (registered by ruling B78, 2026-10-11; the study `docs/investigation/2026-10-11/
       macro_rain_rise_study.md`): (1) the rain belt's factor (`climate.rs:122-123`, `:374-377`) is a share never
       renormalised (area mean 0.575), so the law cannot give back its own calibration body (Earth's ~990 mm; Earth's

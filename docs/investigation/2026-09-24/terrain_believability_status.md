@@ -1954,3 +1954,37 @@ THE BASE (amends B98: its comb cured by law without colours); (3) the one-volume
 (4) the volume — the solid pass with substances by law, then the water fill; (5) the edit system and the frozen patch;
 (6) standing, collision and delivery beside 4–5; (7) the base freezes. The colours design PARKED (its substance half moves to
 step 4). The parked work committed on the owner's "Yes". NEXT: generator 27's design and bench.
+- 2026-10-15 (later) — GENERATOR 27'S BENCH, FIRST READINGS (ruling B99 step 1; the design
+`docs/investigation/2026-10-15/rain_seasons_design.md` revision 2, one adversarial review answered, §11 the readings): the
+sun, a latitude–longitude climate grid (the cube's two-point flux MEASURED 12–16 % wrong), the seasonal moist energy
+balance (Earth's global mean exact, its rain belt within a month of GPCP's), the winds (the cells bounded by the eddy
+limit, calm at their edges; NCEP's direction met on 70–73 % of the sea), the vapour and the rain on the climate grid (the
+8-case matrix: the residence law with the storms' diffusion everywhere best — correlation with GPCP over land 0.72 with
+the law's own winds; the saturation law waits for the ice–albedo law). The home planet's land under 250 mm 14.3 % against
+today's 37.7 %. Pictures `~/Downloads/voxeldust_rain_bench_2026-10-15/`. No world change; nothing the game reads.
+- 2026-10-15 (later) — GENERATOR 27'S BENCH, SECOND ROUND (the owner: "Both ok" — the order kept, ExoPlaSim approved): the
+ice–albedo law (Earth's equator–pole contrast 31 → 42 K, Earth ~45); the 8 km mountains' rain (the Andes' east face 2 354 mm
+against GPCP's 1 978, Tibet 245 against 290; no monsoon yet: the Himalaya's south face 102 against 1 153); the home planet's
+land median 450 mm/yr, 16 % under 250 mm (today 38 %); the saturation law still waits for the land's surface energy split.
+ExoPlaSim installed outside the repo and running the home planet (it cannot reach the charter's 288 K at 0.75 of Earth's
+sunlight with ≤ 1 bar of CO₂: ~282 K, a stated limit). The chain wired into the bench copy (`belts_bench phase2+seasons`,
+S3, running). Design §11.1.
+- 2026-10-15 (later) — GENERATOR 27'S BENCH, THE FIRST MACRO WORLD WITH THE CHAIN (the owner: "Let's look on it first and then
+decide"; design §11.5): the land under 250 mm 37.7 % → 9.7 %, the rain wet on the belt's windward face in place of the
+hollows, the belts lower (over 2 km 5.5 → 2.9 % of the land). THE SPEED without a law change (the seasons in waves, the same
+bytes on any core count; the heated winds' band order; the mountains' loops solved exactly: the worst seasons 202–250 rounds
+→ 6–17); the second world (today's chain) solving at 13–33 s a pass. Pictures `~/Downloads/voxeldust_rain_worlds_2026-10-15/`.
+- 2026-10-15 (later) — B99 STEP 3: THE ONE-VOLUME DESIGN REVISED FOR TODAY'S GROUND (documents only, beside step 1):
+`docs/investigation/2026-10-15/one_volume_revision.md` revision 2 (two adversarial reviews — the code evidence and the
+rulings — 52 findings: 49 accepted, 3 partly, the ledger in its §7). Found in the code: the 128 m and 16 m solve has no
+floor for a closed lake (every pit spills; a dry basin under the sea's level reads as sea). Proposed: the fine solve ends its
+rivers at the 8 km water's own ends; a water map in the finished tile (SL6 ask); rivers at every level by one law; caves
+solid on both hosts until a dig opens one; a built area stores its own ground, its water always the newest world's. Ten
+owner questions (Q1–Q10), none blocking step 1.
+- 2026-10-16 — GENERATOR 27'S BENCH, THE SECOND MACRO WORLD (today's chain: the evaporation cure and the heated winds; design
+§11.5): the land's rain 423 mm/yr on the median, 2.2 % under 250 mm (today 37.7 %, the first world 9.7 %); the spread
+narrow (279–591 mm, 10th–90th), no desert; the heights as the first world's (over 2 km 3.3 % against today's 5.5 %).
+Pictures `~/Downloads/voxeldust_rain_worlds_2026-10-15/` (1 today, 2 the first world, 3 the second). The owner's look and
+the decision on the desert laws owed.
+- 2026-10-16 — RULING B100: generator 27's climate is today's chain (the second world's); the desert laws POSTPONED
+(registered in DEFERRED); the game first — B99's order continues with generator 27 into the game's solve.

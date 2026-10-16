@@ -48,7 +48,44 @@ fn rained(mut c: vd_terrain::climate::Climate) -> vd_terrain::climate::Climate {
     c
 }
 
-/// The game's climate, then [`rained`].
+/// ★ A CANDIDATE UNDER MEASUREMENT, NOT A RULED LAW (2026-10-15, ruling B99 step 1, generator 27's bench step S3; the design
+/// `docs/investigation/2026-10-15/rain_seasons_design.md`): every climate call of the copy reads the SEASONS' CHAIN
+/// (`vd_terrain::seasons::chain`) — the seasonal energy balance, the winds, the vapour and the mountains' rain — warm from
+/// the copy's last call ([`SEASON_STATE`]). The bench sets it (`belts_bench … +seasons`); off, the copy is the game's.
+pub static SEASONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The seasons' chain's warm state across the copy's calls (one solve at a time; the bench clears it before a case).
+pub static SEASON_STATE: std::sync::Mutex<Option<vd_terrain::seasons::chain::SeasonState>> =
+    std::sync::Mutex::new(None);
+
+/// The seasons' chain on `cores`, warm from [`SEASON_STATE`].
+fn seasons_on(
+    body: &BodyDefinition,
+    lattice: &vd_terrain::macro_lattice::MacroLattice,
+    words: &vd_terrain::solve::SolveWords,
+    z: &[i32],
+    sea: Option<vd_terrain::climate::SeaView<'_>>,
+    threads: usize,
+) -> vd_terrain::climate::Climate {
+    let mut guard = SEASON_STATE.lock().expect("the season state");
+    let state =
+        guard.get_or_insert_with(|| vd_terrain::seasons::chain::SeasonState::new(lattice, threads));
+    let clock = std::time::Instant::now();
+    let c =
+        vd_terrain::seasons::chain::seasonal_climate(body, lattice, words, z, sea, threads, state);
+    if std::env::var_os("VD_BENCH_TIMES").is_some() {
+        eprintln!(
+            "SEASONS: a call in {:.1} s (the balance {} years, the mountains' worst rounds {}, the largest loop solved {}, left {})",
+            clock.elapsed().as_secs_f64(),
+            state.last_years,
+            state.last_rounds,
+            state.last_loop,
+            state.last_left
+        );
+    }
+    c
+}
+
+/// The game's climate, then [`rained`]; the seasons' chain where [`SEASONS`] is set.
 fn climate_on(
     body: &BodyDefinition,
     lattice: &vd_terrain::macro_lattice::MacroLattice,
@@ -57,12 +94,15 @@ fn climate_on(
     sea: Option<vd_terrain::climate::SeaView<'_>>,
     cores: vd_terrain::par::Cores,
 ) -> vd_terrain::climate::Climate {
+    if SEASONS.load(std::sync::atomic::Ordering::Relaxed) {
+        return seasons_on(body, lattice, words, z, sea, cores.threads());
+    }
     rained(vd_terrain::climate::climate_on(
         body, lattice, words, z, sea, cores,
     ))
 }
 
-/// The game's climate on the default cores, then [`rained`].
+/// The game's climate on the default cores, then [`rained`]; the seasons' chain where [`SEASONS`] is set.
 fn climate_of(
     body: &BodyDefinition,
     lattice: &vd_terrain::macro_lattice::MacroLattice,
@@ -70,6 +110,16 @@ fn climate_of(
     z: &[i32],
     sea: Option<vd_terrain::climate::SeaView<'_>>,
 ) -> vd_terrain::climate::Climate {
+    if SEASONS.load(std::sync::atomic::Ordering::Relaxed) {
+        return seasons_on(
+            body,
+            lattice,
+            words,
+            z,
+            sea,
+            vd_terrain::par::Cores::default().threads(),
+        );
+    }
     rained(vd_terrain::climate::climate(body, lattice, words, z, sea))
 }
 use vd_terrain::Gf;
