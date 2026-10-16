@@ -114,6 +114,37 @@ pub fn map<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> 
     join(per_range(n, threads, |r| r.map(&f).collect::<Vec<T>>()))
 }
 
+/// ★ `f` over every index of `0..n` on `threads` threads TAKEN IN TURN: each thread takes the next index when it finishes
+/// one, so an index that takes long holds only its own thread, never a whole range; the results in index order — the
+/// vector one thread gives (each result is its own index's alone).
+///
+/// **Example.** The seasons' climate runs its sixteen seasons on eight threads: a winter whose mountains' rain needs many
+/// rounds keeps one thread busy while the other seven finish the remaining seasons.
+pub fn map_in_turn<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = threads.clamp(1, n.max(1));
+    let (f, next) = (&f, &next);
+    let step = inherited_step();
+    let mut parts: Vec<Vec<(usize, T)>> = (0..workers).map(|_| Vec::new()).collect();
+    std::thread::scope(|s| {
+        for part in &mut parts {
+            s.spawn(move || {
+                begin_helper(step);
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    part.push((i, f(i)));
+                }
+            });
+        }
+    });
+    let mut all: Vec<(usize, T)> = parts.into_iter().flatten().collect();
+    all.sort_unstable_by_key(|(i, _)| *i);
+    all.into_iter().map(|(_, t)| t).collect()
+}
+
 /// The ranges' parts joined in their order into one vector — the vector one thread gives. Each part moves into the
 /// answer whole (ruling B72 item 1: joining the home planet's 8.9 million values one at a time was a twentieth of a
 /// solve's time on twelve cores, the profile of 2026-10-09).
@@ -236,6 +267,18 @@ mod tests {
         assert_eq!(sums.len(), 4);
         assert_eq!(sums.iter().sum::<usize>(), one.iter().sum::<usize>());
         assert_eq!(map(0, 3, f), Vec::<usize>::new());
+    }
+
+    /// The map taken in turn is the map on one thread, value for value and in order, on any number of threads; no item
+    /// gives an empty vector.
+    #[test]
+    fn indices_taken_in_turn_give_the_bytes_one_gives() {
+        let f = |i: usize| (i * 2_654_435_761) % 1_000_003;
+        let one = map(1_000, 1, f);
+        assert_eq!(map_in_turn(1_000, 1, f), one);
+        assert_eq!(map_in_turn(1_000, 7, f), one);
+        assert_eq!(map_in_turn(3, 16, f), map(3, 1, f));
+        assert_eq!(map_in_turn(0, 4, f), Vec::<usize>::new());
     }
 
     /// ★ The key sort on many threads is the one-thread sort, key for key: few keys and many, fewer keys than threads,

@@ -2570,3 +2570,43 @@ development, so let's postpone the desert laws for now, it looks good enough."*
 
 **Example.** A pilot who lands beside the home planet's belt finds its sea-facing slopes wet and its rivers fed; on Earth's
 charter the same chain would still put rain on the Sahara — that waits for the desert laws, after the game's first steps.
+
+## B101 (2026-10-16) — GENERATOR 27's CLIMATE: THE MOIST FORM, EVERY 8th PASS; THE LOOK GIVEN
+
+The owner asked for planets "solved in minutes", chose to find the climate's many states first ("Option 1"), asked to "try
+every 8th pass please, we can increase if that will make sense", and on the comparison pictures
+(`~/Downloads/voxeldust_rain_worlds_2026-10-15/COMPARE_*`: today's game, the second world, the moist-form world) said:
+*"Looks ok. What's next?"* (the design `docs/investigation/2026-10-15/rain_seasons_design.md` §11.5 items 5–11).
+
+1. **THE MOIST FORM IS GENERATOR 27's CLIMATE** (amends B100 item 1's chain): the heated winds carry no lagged latent term;
+   their stability is the GROSS MOIST STABILITY `M = h_T − h` (Neelin & Held 1987), `h_T` 1.06 × the season's most energetic
+   cell (convective quasi-equilibrium, Emanuel 1994; Siler, Roe & Armour's ratio). MEASURED: the lagged latent heating kept
+   the climate in more than one state on one ground; in this form the climate settles in 12 calls on a fixed ground and is
+   one function of the ground. The land is wetter than the second world's (the median ~559 mm against 423 mm; no desert —
+   the desert laws stay postponed, B100 item 2).
+2. **THE NUMERICS WITHOUT A LAW CHANGE**: Anderson's acceleration (Walker & Ni 2011) for the mountains' rain and the drag;
+   the mountains' small loops solved exactly; each cell's exact drag balance per round (the drag's two-speed jump cured);
+   the seasons taken in turn by the cores (the same bytes on any core count); the spin-up to a stated stop.
+3. **THE CLIMATE EVERY 8th PASS, THE SEA EVERY PASS**: against every pass it passes B47's tolerance on every global reading
+   and on the tracked plates 5 and 13; three untracked plates' old plains read 11–15 % lower (registered). A home-planet
+   solve 63 min on 7 shared cores against 2 h 6 min; the lakes' budget (one core) is now its largest part.
+4. **NEXT, B99 step 1's close**: the chain into the game's solve (generator 27; the coverage tests asked for before they
+   run), then the world moves once (the home planet, a moon, the desert world; the pins; the window look).
+
+**Example.** A pilot over the home planet's belt sees the same wet sea-facing slopes and dry lee whether the planet's server
+re-solved its climate every pass or every eighth — and that server finishes the planet's first solve in about an hour
+instead of five and a half.
+
+## B102 (2026-10-16) — THE SEASONS' COVERAGE TESTS WAIT (HR5 owed)
+
+On the plan for generator 27's build (the chain into the game's solve, the coverage tests, then the world's move), the owner:
+*"Let's not do (The coverage tests (HR5)), I agree with the rest. If we will run all tests, it will take ages — I want to
+avoid that."*
+
+1. **THE SEASONS MODULES' COVERAGE TESTS WAIT** (`vd_terrain::seasons`: sun, grid, balance, wind, gill, vapour, orography,
+   accel, chain; HR5's 100 % region and branch): not written now; the terrain crate's coverage gate will report their misses
+   until they are (registered in DEFERRED, owed before the base freezes, B99 step 7, or on the owner's word).
+2. **THE REST AS PLANNED**: one local commit now; the chain into the game's solve (generator 27); the world moves once.
+
+**Example.** The coverage gate, when the owner next runs it, lists the seasons' untested branches (a drag that stops at its
+bound, a spin-up that stops at its bound) as misses; the game's solve runs them meanwhile.

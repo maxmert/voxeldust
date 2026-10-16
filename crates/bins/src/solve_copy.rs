@@ -73,13 +73,25 @@ fn seasons_on(
     let c =
         vd_terrain::seasons::chain::seasonal_climate(body, lattice, words, z, sea, threads, state);
     if std::env::var_os("VD_BENCH_TIMES").is_some() {
+        // The land's rain (the nodes off the connected ocean): its median and its share under 250 mm.
+        let mut land: Vec<u32> = (0..c.rain_mm_yr.len())
+            .filter(|&i| !sea.is_some_and(|s| s.ocean[i]))
+            .map(|i| c.rain_mm_yr[i])
+            .collect();
+        land.sort_unstable();
+        let median = land.get(land.len() / 2).copied().unwrap_or(0);
+        let dry = land.iter().filter(|&&r| r < 250).count() as f64 / land.len().max(1) as f64;
         eprintln!(
-            "SEASONS: a call in {:.1} s (the balance {} years, the mountains' worst rounds {}, the largest loop solved {}, left {})",
+            "SEASONS: a call in {:.1} s (the balance {} years, the mountains' worst rounds {}, the largest loop solved {}, left {}; the drag's rounds {} met {}; the spin-up {:?}); the land's rain median {median} mm, under 250 mm {:.1} %",
             clock.elapsed().as_secs_f64(),
             state.last_years,
             state.last_rounds,
             state.last_loop,
-            state.last_left
+            state.last_left,
+            state.last_drag,
+            state.last_drag_met,
+            state.last_spin,
+            100.0 * dry
         );
     }
     c
@@ -184,6 +196,10 @@ pub struct Laws {
     /// and the running sea re-solved every this many passes. The game re-solves both every pass (ruling B69 item 1),
     /// so the default is one; a larger spacing measures the error the game's twenty passes carried until generator 26.
     pub climate_every: u32,
+    /// ★ THE CLIMATE'S OWN SPACING — A RESOLUTION UNDER MEASUREMENT, NOT A LAW (2026-10-16, the owner: "Let's try every 8th
+    /// pass please"; the bench's `+seasonsN`): the climate re-solved every this many passes, the running sea still every
+    /// pass (ruling B68 found the sea's stale spacing, not the climate's, made the jump near the present). One by default.
+    pub rain_every: u32,
     /// ★ THE INITIAL LAND (rulings B58 item 2, B59–B61; [`crate::land_copy`]): the game's own by default (generator
     /// 26), or the bench land copy with a law taken out or a diagnostic in.
     pub land: crate::land_copy::LandLaws,
@@ -199,6 +215,7 @@ impl Default for Laws {
             pass_share: false,
             routing_flats: false,
             climate_every: 1,
+            rain_every: 1,
             land: crate::land_copy::LandLaws::default(),
         }
     }
@@ -702,6 +719,7 @@ pub fn solve_copy_watched(
         vec![i32::MAX; n]
     };
     let mut since_climate = laws.climate_every;
+    let mut since_rain = laws.rain_every;
     let mut climate: Option<vd_terrain::climate::Climate> = None;
     let mut talus_done = 0u32;
     let mut ledger: Vec<PassLedger> = Vec::new();
@@ -799,21 +817,25 @@ pub fn solve_copy_watched(
                 report.sea_reseeded |= sea.reseeded;
                 report.sea_unsettled |= !sea.settled;
             }
-            let clock = std::time::Instant::now();
-            let c = climate_on(
-                body,
-                &lattice,
-                words,
-                &state.z,
-                has_water.then_some(state.sea_view()),
-                cores,
-            );
-            times_s[4] += clock.elapsed().as_secs_f64();
-            state.rain.clone_from(&c.rain_mm_yr);
-            climate = Some(c);
+            if since_rain >= laws.rain_every {
+                let clock = std::time::Instant::now();
+                let c = climate_on(
+                    body,
+                    &lattice,
+                    words,
+                    &state.z,
+                    has_water.then_some(state.sea_view()),
+                    cores,
+                );
+                times_s[4] += clock.elapsed().as_secs_f64();
+                state.rain.clone_from(&c.rain_mm_yr);
+                climate = Some(c);
+                since_rain = 0;
+            }
             since_climate = 0;
         }
         since_climate += 1;
+        since_rain += 1;
         let c = climate
             .as_ref()
             .expect("the climate stands from the first pass");

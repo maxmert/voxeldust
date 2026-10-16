@@ -54,9 +54,7 @@ pub struct SeasonState {
     land_evap: Vec<Vec<Gf>>,
     cell_rates: Vec<Vec<Gf>>,
     phi: Vec<Option<Vec<u16>>>,
-    /// Each season's latent heating of the mean flow `L·(P − E − C_e)` (W/m²) and its departures' wind speed, for the next
-    /// pass's land–sea departures (the lag the design states).
-    latent: Vec<Vec<Gf>>,
+    /// Each season's departures' wind speed, the next pass's start for the drag.
     speed: Vec<Vec<Gf>>,
     /// The last call's readings for the bench: the years the balance stepped, the mountains' worst rounds.
     pub last_years: usize,
@@ -64,6 +62,17 @@ pub struct SeasonState {
     /// The largest loop the mountains' rain solved exactly, and the largest it left to the sweeps.
     pub last_loop: usize,
     pub last_left: usize,
+    /// The heated winds' most drag rounds in a season, and whether every season's drag met its stop.
+    pub last_drag: usize,
+    pub last_drag_met: bool,
+    /// The spin-up's calls and whether it met its stop ([`SPIN_TOL`]); the last call's year of rain per climate cell, mm.
+    pub last_spin: (usize, bool),
+    /// The spin-up's readings, one a call: the largest change of a cell's year of rain over its stop's allowance, the cells
+    /// whose change exceeded it, and the mean year of rain over the land's cells (mm).
+    pub spin_trace: Vec<(Gf, usize, Gf)>,
+    /// Which climate cells are mostly land (the last call's sea share under a half).
+    cell_land: Vec<bool>,
+    cell_rain: Vec<Gf>,
 }
 
 impl SeasonState {
@@ -87,7 +96,6 @@ impl SeasonState {
             land_evap: vec![vec![Gf::ZERO; n]; seasons],
             cell_rates: vec![vec![Gf::ONE / Gf::from_f64(RESIDENCE_S); n]; seasons],
             phi: vec![None; seasons],
-            latent: vec![vec![Gf::ZERO; n]; seasons],
             speed: vec![Vec::new(); seasons],
             grid,
             geo,
@@ -95,6 +103,12 @@ impl SeasonState {
             last_rounds: 0,
             last_loop: 0,
             last_left: 0,
+            last_drag: 0,
+            last_drag_met: true,
+            last_spin: (0, true),
+            spin_trace: Vec::new(),
+            cell_land: Vec::new(),
+            cell_rain: Vec::new(),
         }
     }
 }
@@ -131,24 +145,81 @@ fn line_z(lapse_k_m: Gf, over: Gf, datum: i32) -> i32 {
 type NodeRow = (i16, u32, u8, u32, u32, i32, i32, u8);
 
 /// One season's answers inside a call: its winds (the cells' plus the departures), its water, its mountains' rain, and the
-/// next pass's latent heating, departures' speed and land evaporation.
+/// next pass's departures' speed and land evaporation.
 struct SeasonOut {
+    /// The heated winds' drag rounds and whether they met their stop.
+    drag: (usize, bool),
     east: Vec<Gf>,
     north: Vec<Gf>,
     water: super::vapour::Water,
     mr: super::orography::MountainRain,
-    latent: Vec<Gf>,
     speed: Vec<Gf>,
     land_evap: Vec<Gf>,
 }
 
-/// ★ THE SEASONS' CLIMATE over `lattice` for the relief `z` as it stands, warm from `state`.
+/// ★ THE SPIN-UP'S STOP (2026-10-16): the climate's slow words (the land's wetness and own evaporation) start cold, and MEASURED the land's rain needs about ten calls to settle (its median 468 → ~530 mm, the
+/// desert 7.3 → ~2 %); before the first pass the chain therefore repeats on the starting relief until no climate cell's
+/// year of rain moves more than this share of itself (or one whole millimetre where it is nearly dry), within
+/// [`SPIN_BOUND`] calls — so every later call, one a pass or one every few passes, only follows the relief.
+pub const SPIN_TOL: f64 = 0.01;
+/// The bound on the spin-up's calls (the state reports the count and whether it met its stop).
+pub const SPIN_BOUND: usize = 30;
+
+/// ★ THE SEASONS' CLIMATE over `lattice` for the relief `z` as it stands, warm from `state`; from a cold state the
+/// spin-up first ([`SPIN_TOL`]).
 #[must_use]
+pub fn seasonal_climate(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    words: &SolveWords,
+    z: &[i32],
+    sea: Option<SeaView<'_>>,
+    threads: usize,
+    state: &mut SeasonState,
+) -> Climate {
+    if !state.t_start.is_empty() {
+        return climate_once(body, lattice, words, z, sea, threads, state);
+    }
+    let (tol, one_mm) = (Gf::from_f64(SPIN_TOL), Gf::ONE);
+    let mut calls = 0;
+    loop {
+        let before = state.cell_rain.clone();
+        let c = climate_once(body, lattice, words, z, sea, threads, state);
+        calls += 1;
+        let (mut worst, mut over) = (Gf::ZERO, 0usize);
+        if before.len() == state.cell_rain.len() {
+            for (a, b) in before.iter().zip(&state.cell_rain) {
+                let ratio = (*b - *a).abs() / (*a * tol).greater(one_mm);
+                worst = worst.greater(ratio);
+                over += usize::from(ratio > Gf::ONE);
+            }
+        } else {
+            over = state.cell_rain.len();
+        }
+        let (mut sum, mut count) = (Gf::ZERO, 0i64);
+        for (r, &l) in state.cell_rain.iter().zip(&state.cell_land) {
+            if l {
+                sum += *r;
+                count += 1;
+            }
+        }
+        state
+            .spin_trace
+            .push((worst, over, sum / Gf::from_i64(count.max(1))));
+        let settled = over == 0;
+        if settled || calls >= SPIN_BOUND {
+            state.last_spin = (calls, settled);
+            return c;
+        }
+    }
+}
+
+/// One call of the chain, warm from `state` (the spin-up repeats it from a cold one).
 #[allow(
     clippy::too_many_lines,
     reason = "one chain, its six laws in their order; split, each piece would only pass the others' fields on"
 )]
-pub fn seasonal_climate(
+fn climate_once(
     body: &BodyDefinition,
     lattice: &MacroLattice,
     words: &SolveWords,
@@ -284,11 +355,10 @@ pub fn seasonal_climate(
         })
         .collect();
     // L4–L6: each season's heated winds, vapour, rain and mountains' rain. A season reads only the last pass's state, so the
-    // seasons run on the cores in waves (one season a core); each wave's answers join in the seasons' order, so the bytes
-    // are the same on any number of cores (ruling B64).
+    // seasons run on the cores, one season a core, each core taking the next season when it finishes one; the answers join
+    // in the seasons' order, so the bytes are the same on any number of cores (ruling B64).
     let k = Gf::from_i64(per as i64);
     let kept_mean = mean_sun(grid, &sun) * bw.kept;
-    let last_latent = std::mem::take(&mut state.latent);
     let last_speed = std::mem::take(&mut state.speed);
     let last_land_evap = std::mem::take(&mut state.land_evap);
     let last_rates = std::mem::take(&mut state.cell_rates);
@@ -322,7 +392,6 @@ pub fn seasonal_climate(
             super::gill::Heating {
                 t: &t,
                 net: &net,
-                latent: &last_latent[m],
                 sea: &sea_share,
                 rh: &rh,
                 departures_only: true,
@@ -381,14 +450,6 @@ pub fn seasonal_climate(
             inner,
             last_phi[m].as_deref(),
         );
-        let latent = sea_share
-            .iter()
-            .enumerate()
-            .map(|(c, s)| {
-                let e = water.sea_evap[c] + last_land_evap[m][c] * (Gf::ONE - *s);
-                super::gill::latent_w_m2(water.rain[c] - e - water.eddy_convergence[c])
-            })
-            .collect();
         // The next pass's land evaporation this season: Turc–Pike on the season's rain and PET.
         let land_evap = (0..n)
             .map(|c| {
@@ -401,11 +462,11 @@ pub fn seasonal_climate(
             })
             .collect();
         SeasonOut {
+            drag: (dep.worst_iterations, dep.met),
             east,
             north,
             water,
             mr,
-            latent,
             speed,
             land_evap,
         }
@@ -416,38 +477,38 @@ pub fn seasonal_climate(
     let mut wind_year = (vec![Gf::ZERO; n], vec![Gf::ZERO; n]);
     let mut worst_rounds = 0;
     let (mut worst_loop, mut worst_left) = (0, 0);
-    let (mut next_latent, mut next_speed, mut next_land_evap) =
-        (Vec::new(), Vec::new(), Vec::new());
+    let (mut worst_drag, mut drag_met) = (0, true);
+    let (mut next_speed, mut next_land_evap) = (Vec::new(), Vec::new());
     let (mut next_rates, mut next_phi) = (Vec::new(), Vec::new());
-    let wave = threads.clamp(1, seasons);
-    let inner = (threads / wave).max(1);
-    for first in (0..seasons).step_by(wave) {
-        let count = wave.min(seasons - first);
-        for o in crate::par::map(count, count, |j| season(first + j, inner)) {
-            worst_rounds = worst_rounds.max(o.mr.rounds);
-            worst_loop = worst_loop.max(o.mr.largest_loop);
-            worst_left = worst_left.max(o.mr.largest_left);
-            for (acc, r) in node_rain.iter_mut().zip(&o.mr.rain) {
-                *acc += *r * season_s;
-            }
-            for c in 0..n {
-                cell_rain_year[c] += o.water.rain[c] * season_s;
-                pet_year[c] += o.water.pet[c] * season_s;
-                wind_year.0[c] += o.east[c] * o.water.column[c];
-                wind_year.1[c] += o.north[c] * o.water.column[c];
-            }
-            next_latent.push(o.latent);
-            next_speed.push(o.speed);
-            next_land_evap.push(o.land_evap);
-            next_rates.push(o.mr.cell_rate);
-            next_phi.push(Some(o.mr.phi));
+    // Each thread takes the next season when it finishes one (a slow season holds only its own thread); the answers join
+    // in the seasons' order, so the bytes are the same on any number of cores.
+    let inner = (threads / seasons).max(1);
+    for o in crate::par::map_in_turn(seasons, threads, |m| season(m, inner)) {
+        worst_rounds = worst_rounds.max(o.mr.rounds);
+        worst_drag = worst_drag.max(o.drag.0);
+        drag_met &= o.drag.1;
+        worst_loop = worst_loop.max(o.mr.largest_loop);
+        worst_left = worst_left.max(o.mr.largest_left);
+        for (acc, r) in node_rain.iter_mut().zip(&o.mr.rain) {
+            *acc += *r * season_s;
         }
+        for c in 0..n {
+            cell_rain_year[c] += o.water.rain[c] * season_s;
+            pet_year[c] += o.water.pet[c] * season_s;
+            wind_year.0[c] += o.east[c] * o.water.column[c];
+            wind_year.1[c] += o.north[c] * o.water.column[c];
+        }
+        next_speed.push(o.speed);
+        next_land_evap.push(o.land_evap);
+        next_rates.push(o.mr.cell_rate);
+        next_phi.push(Some(o.mr.phi));
     }
-    state.latent = next_latent;
     state.speed = next_speed;
     state.land_evap = next_land_evap;
     state.cell_rates = next_rates;
     state.phi = next_phi;
+    state.cell_rain.clone_from(&cell_rain_year);
+    state.cell_land = sea_share.iter().map(|&x| x < Gf::HALF).collect();
     // The next pass's land wetness: the year's Turc–Pike evaporation over the PET.
     for c in 0..n {
         let (pr, pe) = (cell_rain_year[c], pet_year[c]);
@@ -464,6 +525,8 @@ pub fn seasonal_climate(
     state.last_years = p.years;
     state.last_rounds = worst_rounds;
     state.last_loop = worst_loop;
+    state.last_drag = worst_drag;
+    state.last_drag_met = drag_met;
     state.last_left = worst_left;
     // THE ROWS. The annual mean and the warmest quarter at each climate cell (the datum's air).
     let quarter = steps / 4;

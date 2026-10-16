@@ -24,6 +24,8 @@
 //!   own is eight, ruling B62).
 //! - any case `@R` (last of all): the water routed R times a pass, the pass's sweeps shared among the routings — a
 //!   resolution (ruling B63 item 1 measured with it; the solve's own is four, ruling B65).
+//! - the candidate `+seasonsN` (2026-10-16, under measurement): the seasons' chain as the climate, re-solved every N passes,
+//!   the running sea every pass (`Laws::rain_every`).
 //! - any case `^C` (just before `@R`): the climate and the running sea re-solved every C passes, counted in passes on
 //!   either axis — a resolution (ruling B68: the sea's stale spacing near the present; `Laws::climate_every`); without
 //!   it every pass, the solve's own since ruling B69 item 1 (`^20` is the game's spacing until then).
@@ -792,6 +794,13 @@ fn main() {
                 // Ruling B99 step 1 (generator 27's S3): the seasons' chain as the copy's climate.
                 "seasons" => {
                     vd_bins::solve_copy::SEASONS.store(true, std::sync::atomic::Ordering::Relaxed)
+                }
+                // The seasons' chain every N passes, the sea every pass (`Laws::rain_every`, under measurement).
+                every if every.starts_with("seasons") => {
+                    vd_bins::solve_copy::SEASONS.store(true, std::sync::atomic::Ordering::Relaxed);
+                    laws.rain_every = every["seasons".len()..]
+                        .parse()
+                        .expect("a pass count after seasons");
                 }
                 other => {
                     // The land copy's forms and diagnostics (rulings B58 item 2, B59–B61): cellK, airy, flex; the game's

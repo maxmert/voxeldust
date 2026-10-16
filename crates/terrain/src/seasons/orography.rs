@@ -36,6 +36,7 @@
 use crate::gf::Gf;
 use crate::macro_lattice::{MacroLattice, NO_NODE};
 
+use super::accel::Anderson;
 use super::balance::LATENT_J_KG;
 use super::grid::{ClimateGrid, unit};
 use super::vapour::{R_VAPOUR, RESIDENCE_S};
@@ -277,10 +278,17 @@ pub fn mountain_rain(
     // The round in which each node last moved more than the stop, and the loops' working words.
     let mut stamp = vec![0u32; n];
     let mut loops = Loops::new(n);
+    // ★ ANDERSON'S ACCELERATION (Walker & Ni 2011) over the rounds: a round `G` (the four sweeps and the loops' exact
+    // solve) maps the factor `x` to `G(x)`; the next start is `G(x)` corrected by the last few rounds' differences so that
+    // their combined change is least — GMRES's answer for a linear `G`, so the slow modes a round leaves settle in a few
+    // rounds. The answer is still `G`'s own fixed point: the stop is the round's change, as before.
+    let mut accel = Anderson::new();
+    let mut g = phi.clone();
     while rounds < ROUND_BOUND {
         rounds += 1;
-        let mut moved = Gf::ZERO;
         let now = rounds as u32;
+        g.copy_from_slice(&phi);
+        let mut moved = Gf::ZERO;
         for order in 0..4 {
             for f in 0..6 {
                 for jj in 0..edge {
@@ -297,35 +305,31 @@ pub fn mountain_rain(
                             NO_NODE
                         };
                         if partner == NO_NODE {
-                            let (x, _) = affine(i, NO_NODE, &phi);
-                            let d = (x - phi[i]).abs();
+                            let (x, _) = affine(i, NO_NODE, &g);
+                            let d = (x - g[i]).abs();
                             if d >= tol {
                                 stamp[i] = now;
                             }
                             moved = moved.greater(d);
-                            phi[i] = x;
+                            g[i] = x;
                         } else {
                             let p = partner as usize;
-                            let (ai, bi) = affine(i, partner, &phi);
-                            let (ap, bp) = affine(p, i as u32, &phi);
+                            let (ai, bi) = affine(i, partner, &g);
+                            let (ap, bp) = affine(p, i as u32, &g);
                             let xi = (ai + bi * ap) / (Gf::ONE - bi * bp);
                             let xp = ap + bp * xi;
-                            let (di, dp) = ((xi - phi[i]).abs(), (xp - phi[p]).abs());
+                            let (di, dp) = ((xi - g[i]).abs(), (xp - g[p]).abs());
                             if di.greater(dp) >= tol {
                                 stamp[i] = now;
                                 stamp[p] = now;
                             }
                             moved = moved.greater(di).greater(dp);
-                            phi[i] = xi;
-                            phi[p] = xp;
+                            g[i] = xi;
+                            g[p] = xp;
                         }
                     }
                 }
             }
-        }
-        if moved < tol {
-            met = true;
-            break;
         }
         // The nodes still moving: their loops solved exactly, upwind first.
         let still: Vec<u32> = (0..n)
@@ -333,8 +337,18 @@ pub fn mountain_rain(
             .map(|i| i as u32)
             .collect();
         loops.still = loops.still.max(still.len());
-        loops.solve(&still, &pair, &rate, inv_tau0, &mut phi);
+        loops.solve(&still, &pair, &rate, inv_tau0, &mut g);
+        let change = phi
+            .iter()
+            .zip(&g)
+            .fold(Gf::ZERO, |m, (a, b)| m.greater((*b - *a).abs()));
+        if moved.greater(change) < tol {
+            met = true;
+            break;
+        }
+        accel.step(&mut phi, &g, change, (Gf::ZERO, Gf::ONE));
     }
+    phi.copy_from_slice(&g);
     let rain: Vec<Gf> = (0..n).map(|i| w_c[i] * phi[i] * rate[i]).collect();
     // Each climate cell's mean rain-out rate ⟨φ/τ⟩ by its nodes' areas.
     let mut sum = vec![Gf::ZERO; grid.len()];

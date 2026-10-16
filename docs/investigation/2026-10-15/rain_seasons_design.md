@@ -497,6 +497,74 @@ time the heated winds' exact solve, half the mountains' rain, both on one core. 
    rounds, but on the home planet's seasons 300–400 one-pass rounds a season, several unmet (against 6–99 four-pass rounds):
    the home planet's upwind links form ONE connected part of 6–9 million nodes, and inside it the search's order follows
    the wind worse than the grid's four orders. Reverted; the grid sweeps with the loops' exact solve stand.
+5. THE SPEED ROUND OF 2026-10-16 (the owner: "Ideally we should have such planets solved in minutes"; no law changed; the
+   first twelve calls of the home planet's macro solve on 8 cores, the same cases each time):
+
+   | change | twelve calls | worst rounds a call |
+   |---|---|---|
+   | §11.5 items 1–3 (the second world's run) | 332 s | 126 59 34 37 **400** 30 14 140 63 80 36 14 |
+   | + ANDERSON'S ACCELERATION (Walker & Ni 2011, depth 4) over the rounds | 325 s | 23 34 15 13 37 12 11 127 22 16 49 15 |
+   | + the seasons TAKEN IN TURN by the cores (`par::map_in_turn`) + the accelerator's kept products | 250 s | the same |
+   | + ONE DRAG ROUND a pass from the last pass's wind (the cold start keeps three) | 223 s | 23 55 15 19 22 17 14 17 12 47 83 33 |
+
+   On the 48 cold season-runs (`climate_bench home-s2`) the accelerator gives 703 rounds against the loops' 962 (worst 55
+   against 99); its round costs more, so it pays where the sweeps stall — the warm starts inside the solve, where it ends
+   the calls at the round bound (62 of 421 in the second world's run). A PROFILE (sampled, symbols kept) of the warm passes
+   before these cures: the mountains' rain ~40 % and the heated winds' exact solve ~33 % of the CPU, threads waiting ~30 %;
+   the year's balance runs on one core (~8 % of the wall); outside the climate a pass costs ~3.4 s (the lakes' budget
+   2.4 s of it, on one core).
+6. THE CLIMATE'S OWN SPACING (the owner: "Let's try every 8th pass please, we can increase if that will make sense"): the
+   bench's `+seasons8` re-solves the climate every 8th pass and the running sea every pass (ruling B68 found the sea's stale
+   spacing, not the climate's, made the jump near the present); measured against the second world (every pass).
+7. THE FLICKERING RAIN (2026-10-16, MEASURED by the land's rain median and desert share at every call): with the climate
+   every pass the rain swung from pass to pass (desert 0 → 8 %, the median 463–566 mm) on a relief that hardly moved, and
+   the every-8th-pass run repeated the every-pass values CALL BY CALL — the climate followed its own call count, not the
+   ground. CAUSE: the heated winds' drag fed a round's wind speed straight into the next round's drag ("speed = c ÷
+   speed"), which jumps between two speeds forever. CURE (no law changed): each round gives every cell its own drag balance
+   under the round's field exactly (a quadratic in `|U|²`, the spin included) and the rounds repeat to a stated stop
+   (`DRAG_TOL_M_S`, Anderson's acceleration over them) — passes 14–24 then hold 510–521 mm and 1.1–2.6 % desert.
+8. THE SPIN-UP (`SPIN_TOL`): the climate's slow words start cold (the median 468 → ~530 mm over ten calls); from a cold
+   state the chain repeats on the starting relief until every cell's year of rain moves less than 1 % (or a millimetre).
+   MEASURED: it did NOT meet that stop in 30 calls (22 min) on the home planet's starting relief.
+9. THE CLIMATE HAS MORE THAN ONE STATE ON ONE GROUND (MEASURED, both runs from the same spun-up climate, 513 mm and 2 %):
+   every pass, the rain dips now and then (473 mm at pass 8, 469 at passes 44–46) and returns to ~510 within four calls;
+   every 8th pass, it fell to ~471 mm at pass 56 and STAYED for 240 passes. The final every-8th-pass world (98 min on 6
+   cores, `/tmp/vd-fast/s_k8/`): land 23.2 %, mountains 1.66 %, over 1 / 2 / 3 km 10.9 / 3.4 / 1.0 %, the land's rain
+   559 mm by the stored classes (295–719, 0.5 % desert) against the second world's 423; six tracked plates' old plains
+   within 10 % of the second world's, four 12–39 % lower. B39's gate cannot judge a cadence while the climate follows its
+   own history; the suspect is the latent heating's feedback (rain heats the column, the heated winds gather more vapour).
+10. THE CAUSE FOUND AND CURED (2026-10-16, the owner: "Option 1" — one day to find it): the chain on a FIXED ground
+    (`climate_bench chain-fixed`, the second world's final relief), 30 calls from cold, one slow word held still at a
+    time:
+
+    | variant | settles? | the land's mean rain |
+    |---|---|---|
+    | as it was | no — 3 300–13 000 cells still over 1 % a call after 30 calls | wanders 491–546 mm |
+    | the land's wetness held still | no — worse | runs away to 905 mm |
+    | THE LATENT HEATING held still | YES, in 11 calls (the largest change ×0.66 a call) | settles at 622 mm |
+
+    THE CURE is the published form of the same physics: the vapour the lower branch gathers IS the latent heating, so the
+    heating carries no latent term and the dry stability becomes the GROSS MOIST STABILITY `M = h_T − h` (Neelin & Held
+    1987), `h_T` 1.06 × the season's most energetic cell (convective quasi-equilibrium, Emanuel 1994; Siler, Roe & Armour's
+    ratio) — positive at every cell by construction, and no lag left. MEASURED on the same fixed ground: settled in 12
+    calls (186 s on 14 cores; the largest change ×0.68 a call), the drag in 3 rounds (from up to 30); the land's mean rain
+    668 mm, the median 573 mm, 0.2 % desert — WETTER than the second world's (the owner's look owed).
+11. THE CADENCE UNDER THE GATE (2026-10-16, the moist form, both runs on 7 cores sharing the machine): the climate every
+    pass and every 8th pass agree at every pass both computed (the land's rain median 550–551 mm, the desert 1.7–1.8 %
+    over passes 0–100; before the cure 510 against 470 mm). The two final worlds (`/tmp/vd-fast/m_k1/`, `m_k8/`):
+
+    | reading | every pass | every 8th pass | gate (B47: 2 points, 10 %) |
+    |---|---|---|---|
+    | land / plains / tablelands / mountains | 22.95 / 45.97 / 51.64 / 2.39 % | 22.76 / 46.85 / 50.91 / 2.23 % | pass |
+    | land over 1 km; relief p50 / p90 / p99 | 10.32 %; 98 / 526 / 1 440 m | 10.63 %; 96 / 522 / 1 380 m | pass |
+    | heights by cause (means) | crater 564, collision 1 419, Andean 771, plateau 949, old plains 216 m | 577, 1 485, 777, 991, 208 m | pass (≤ 4.6 %) |
+    | drainage to the sea; past a lake; mean rain | 79.3 %; 25.8 %; 583 mm | 79.0 %; 27.5 %; 575 mm | pass |
+    | the tracked plates' old plains (B65: 5, 13) | 196, 51 m | 186, 48 m | pass (−5, −6 %) |
+    | the other plates' old plains | 10 of 13 within 10 % | plates 7, 1, 8: −15, −12, −11 % | three over (untracked) |
+
+    THE TIMES (7 cores, shared): every pass 2 h 6 min (the climate 87 min, 12.6 s a call); every 8th pass 63 min (the
+    climate 18 min; the lakes' budget 21 min on one core is now the largest part). The moist world's look: the land's rain
+    median 559 mm (343–783), no desert; heights over 1 / 2 / 3 km 10.4 / 2.5 / 0.5 % (every pass).
 
 THE SECOND WORLD (today's chain: §11.3's evaporation, §11.4's heated winds as departures; `/tmp/vd-g27/s3b/`, 414 passes
 in 5 h 35 min on 8 cores, a climate call 43 s on the mean; 62 of 421 calls at the mountains' round bound):

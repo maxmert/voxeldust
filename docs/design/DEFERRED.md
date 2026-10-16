@@ -12154,6 +12154,9 @@ generation alone), so a body solves once per generation on a machine, not once p
       exact solve: a pass 13–33 s, one call in ten still at the round bound — design §11.5), ExoPlaSim's home-planet reading (running),
       the macro solve with the chain (S3, running) and the owner's look; sea ice; the moon with air and the star-locked
       body (refused by the chain's scope); Milly's seasonal runoff; the client's snow line from the realm.
+    - 🟥 THE SEASONS' COVERAGE (HR5) — WAITS by ruling B102 (2026-10-16): `vd_terrain::seasons` (sun, grid, balance, wind,
+      gill, vapour, orography, accel, chain) holds only its 16 module tests, not 100 % of its regions and branches; the
+      terrain crate's coverage gate reports the misses. WHEN: before the base freezes (B99 step 7) or on the owner's word.
     - 🟨 THE DESERT LAWS — POSTPONED by ruling B100 (2026-10-16; "it looks good enough", the game first): the desert's
       radiative sink (Charney 1975), the land's surface energy split and the saturation law after it, the trades' downward
       momentum mixing (Stevens et al. 2002), the storm belts' closure (design §11.4). MISSING, so the chain is too wet where

@@ -1988,3 +1988,19 @@ Pictures `~/Downloads/voxeldust_rain_worlds_2026-10-15/` (1 today, 2 the first w
 the decision on the desert laws owed.
 - 2026-10-16 — RULING B100: generator 27's climate is today's chain (the second world's); the desert laws POSTPONED
 (registered in DEFERRED); the game first — B99's order continues with generator 27 into the game's solve.
+- 2026-10-16 (later) — GENERATOR 27's SPEED ROUND (bench only; design §11.5 items 5–9): Anderson's acceleration, the
+seasons taken in turn and the heated winds' exact drag balance cut a climate call 27.7 → ~20 s and end the round-bound
+calls; the climate every 8th pass makes a home-planet solve 64–98 min. FOUND: a flickering rain (the drag's two-speed jump,
+CURED) and a climate with more than one state on one ground (OPEN: the every-8th-pass run settled ~470 mm, the every-pass
+run returns to ~510). The owner's choice of the next step owed. Pictures `~/Downloads/voxeldust_rain_worlds_2026-10-15/4_*`.
+- 2026-10-16 (later) — THE CLIMATE'S MANY STATES: CAUSE FOUND AND CURED (the owner: "Option 1"; design §11.5 item 10): the
+latent heating fed back one call late never settled (held still, the climate settles in 11 calls); the heated winds now use
+the GROSS MOIST STABILITY (Neelin & Held 1987; `h_T` by convective quasi-equilibrium, Emanuel 1994) — on fixed ground the
+climate settles in 12 calls, the drag in 3 rounds; the land wetter (668 mm mean). The cadence test (every pass against every
+8th) runs.
+- 2026-10-16 (evening) — THE CADENCE PASSES THE GATE ON EVERY GLOBAL READING AND THE TRACKED PLATES (design §11.5 item 11): the
+climate every 8th pass against every pass — land, plains, mountains, relief, heights by cause, drainage, rain and plates 5 and
+13 within B47's tolerance; three untracked plates' old plains 11–15 % lower. A home-planet solve 63 min (7 cores, shared)
+against 2 h 6 min; the lakes' budget now the largest part. Pictures `5_*` (every 8th) and `6_*` (every pass).
+- 2026-10-16 (evening) — RULING B101: the moist-form world's look given ("Looks ok"); generator 27's climate = the moist form
+every 8th pass; NEXT the chain into the game's solve (B99 step 1's close).

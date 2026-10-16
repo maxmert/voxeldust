@@ -15,6 +15,9 @@
 //!   NLON even longitudes from 0° east, each cell's land share and mean ground height over the sea (m, the sea's cells at
 //!   nought), as `OUT_DIR/land_share.npy` and `OUT_DIR/height_m.npy` (NLAT × NLON little-endian f32), the latitudes in
 //!   `OUT_DIR/lats.txt`; every node lands in the cell whose centre is nearest in latitude and longitude.
+//! - `stack OUT.png A.png B.png …`: pictures stacked top to bottom for a side-by-side look.
+//! - `chain-fixed FILE.art [THREADS]`: the seasons' chain from a cold state on a stored world's ground, its spin-up call by
+//!   call.
 //! - `art-maps FILE.art OUT_DIR TAG [LAT0 LAT1 LON0 LON1]`: a stored world (optionally only the window between the two
 //!   latitudes and the two east longitudes, degrees, at the same picture width: a region at node detail) (the home planet's) as three maps on one even longitude–latitude
 //!   picture — `OUT_DIR/TAG_relief.png` (the ground by height, shaded by a light from the north-west, the sea dark),
@@ -787,9 +790,7 @@ fn season_s2(
     let mut node_rain = vec![0.0f64; fine.node_count()];
     let mut wetness = vec![Gf::ONE; n];
     let mut land_evap_seasons: Vec<Vec<Gf>> = vec![vec![Gf::ZERO; n]; seasons];
-    // THE HEATED WINDS' lag: each season's latent heating of the mean flow `L·(P − E − C_e)` and its wind speed, from the
-    // round before.
-    let mut latent_seasons: Vec<Vec<Gf>> = vec![vec![Gf::ZERO; n]; seasons];
+    // THE HEATED WINDS' start: each season's wind speed from the round before (the drag's warm start).
     let mut speed_seasons: Vec<Vec<Gf>> = vec![Vec::new(); seasons];
     let mut gill_report = (0usize, true, 0usize);
     let mut gill_winds: Vec<(Vec<Gf>, Vec<Gf>)> = vec![(Vec::new(), Vec::new()); seasons];
@@ -880,8 +881,9 @@ fn season_s2(
                     let g = capacity[i] * (p.year.t[st][i] - p.year.t[prev][i]) / dt;
                     p.year.kept[st][i] - (a_olr + bw.b_w_m2_k * p.year.t[st][i]) - g
                 });
-                // The research's control (`gpcpq`): GPCP's measured rain as the only heating, the cooling uniform.
-                let (net, latent) = if switches.gpcp_heat {
+                // The research's control (`gpcpq`): GPCP's measured rain's latent heat as the only heating, the cooling
+                // uniform (under the moist stability since 2026-10-16: a control of the heating's pattern only).
+                let net = if switches.gpcp_heat {
                     let g = gpcp.expect("gpcpq is Earth's");
                     let months: Vec<usize> = range
                         .clone()
@@ -904,9 +906,9 @@ fn season_s2(
                             vd_terrain::seasons::gill::latent_w_m2(Gf::from_f64(mmday / 86_400.0))
                         })
                         .collect();
-                    (vec![Gf::ZERO; n], q)
+                    q
                 } else {
-                    (net, latent_seasons[m].clone())
+                    net
                 };
                 let hw = vd_terrain::seasons::gill::heated_winds(
                     &grid,
@@ -915,7 +917,6 @@ fn season_s2(
                     vd_terrain::seasons::gill::Heating {
                         t: &t,
                         net: &net,
-                        latent: &latent,
                         sea: &sea,
                         rh: &rh,
                         departures_only: switches.gill_departures,
@@ -982,13 +983,6 @@ fn season_s2(
                 },
             );
             worst_sweeps = worst_sweeps.max(water.sweeps);
-            // The next round's latent heating of the mean flow: L·(P − E − C_e).
-            for i in 0..n {
-                let e = water.sea_evap[i] + land_evap_seasons[m][i] * (Gf::ONE - sea[i]);
-                latent_seasons[m][i] = vd_terrain::seasons::gill::latent_w_m2(
-                    water.rain[i] - e - water.eddy_convergence[i],
-                );
-            }
             if let Some(geo) = &geo {
                 let tm = std::time::Instant::now();
                 let mr = mountain_rain(
@@ -1534,6 +1528,91 @@ fn export_latlon(art: &str, out: &Path, nlat: usize, nlon: usize) {
     );
 }
 
+/// ★ THE CHAIN ON A FIXED RELIEF (2026-10-16): the seasons' chain from a cold state on a stored world's ground, its
+/// spin-up's readings call by call — whether the climate settles on ground that does not move.
+fn chain_fixed(art: &str, threads: usize) {
+    let body = home_planet();
+    let fine = MacroLattice::of(&body).expect("the home planet's lattice");
+    let a = vd_bins::artifact_file::read(art).expect("the world reads");
+    let steps = vd_terrain::solve::Z_STEPS_PER_M;
+    let z: Vec<i32> = a.rows.iter().map(|r| i32::from(r.z_m) * steps).collect();
+    let ocean: Vec<bool> = a
+        .rows
+        .iter()
+        .map(|r| {
+            (r.receiver_facies >> vd_terrain::artifact::FACIES_SHIFT)
+                & vd_terrain::solve::FACIES_SEA
+                != 0
+        })
+        .collect();
+    let sea = vd_terrain::climate::SeaView {
+        level: i32::from(a.sea_m) * steps,
+        ocean: &ocean,
+    };
+    let words = vd_terrain::home::home_solve_words();
+    let mut state = vd_terrain::seasons::chain::SeasonState::new(&fine, threads);
+    let clock = std::time::Instant::now();
+    let c = vd_terrain::seasons::chain::seasonal_climate(
+        &body,
+        &fine,
+        &words,
+        &z,
+        Some(sea),
+        threads,
+        &mut state,
+    );
+    println!(
+        "the spin-up: {:?} in {:.0} s",
+        state.last_spin,
+        clock.elapsed().as_secs_f64()
+    );
+    for (k, (worst, over, land)) in state.spin_trace.iter().enumerate() {
+        println!(
+            "  call {:2}: the largest change {:.2} × its allowance, {} cells over it; the land's mean rain {:.0} mm",
+            k + 1,
+            worst.to_f64(),
+            over,
+            land.to_f64()
+        );
+    }
+    let mut land: Vec<u32> = (0..c.rain_mm_yr.len())
+        .filter(|&i| !ocean[i])
+        .map(|i| c.rain_mm_yr[i])
+        .collect();
+    land.sort_unstable();
+    println!(
+        "the land's rain median {} mm, under 250 mm {:.1} %; the drag's rounds {} met {}; the mountains' rounds {}",
+        land[land.len() / 2],
+        100.0 * land.iter().filter(|&&r| r < 250).count() as f64 / land.len() as f64,
+        state.last_drag,
+        state.last_drag_met,
+        state.last_rounds
+    );
+}
+
+/// Pictures of one width stacked top to bottom, a dark band between them (for the owner's side-by-side look).
+fn stack(out: &str, inputs: &[String]) {
+    let imgs: Vec<image::RgbImage> = inputs
+        .iter()
+        .map(|p| image::open(p).expect("a picture").to_rgb8())
+        .collect();
+    let w = imgs
+        .iter()
+        .map(image::RgbImage::width)
+        .max()
+        .expect("pictures");
+    let band = 12;
+    let h: u32 =
+        imgs.iter().map(image::RgbImage::height).sum::<u32>() + band * (imgs.len() as u32 - 1);
+    let mut canvas = image::RgbImage::from_pixel(w, h, image::Rgb([20, 20, 24]));
+    let mut y = 0;
+    for img in &imgs {
+        image::imageops::overlay(&mut canvas, img, 0, i64::from(y));
+        y += img.height() + band;
+    }
+    canvas.save(out).expect("saves");
+}
+
 fn art_maps(art: &str, out: &Path, tag: &str, window: Option<[f64; 4]>) {
     let [lat0, lat1, lon0, lon1] = window.unwrap_or([-90.0, 90.0, 0.0, 360.0]);
     std::fs::create_dir_all(out).expect("the output folder");
@@ -1680,6 +1759,11 @@ fn main() {
             args.get(3).map_or(90, |r| r.parse().expect("ROWS")),
             args.get(4).map_or(8, |r| r.parse().expect("SEASONS")),
             Switches::parse(args.get(5)),
+        ),
+        Some("stack") => stack(args.get(1).expect("OUT.png"), &args[2..]),
+        Some("chain-fixed") => chain_fixed(
+            args.get(1).expect("FILE.art"),
+            args.get(2).map_or(14, |t| t.parse().expect("threads")),
         ),
         Some("art-maps") => art_maps(
             args.get(1).expect("FILE.art"),

@@ -3,14 +3,18 @@
 //! 2003; Shamir et al. 2023), applied to the near-surface layer with the bulk drag law. ONE law gives the zonal cells and
 //! the land–sea departures — the monsoon's pull to a heated summer continent and the push from a cooled winter one.
 //!
-//! 1. **THE HEATING THE MEAN FLOW CARRIES** (W/m²): the column's dry-static-energy source after the storms take their part,
-//!    `Q = N − ∇·F_e + L·(P − E − C_e)`, less its global mean: `N` the column's net energy input (the balance's kept sunlight
-//!    less its outgoing longwave and its heat store), `F_e` the storms' share of the balance's poleward energy flow (beyond
-//!    the mean cells' share `w`), `P − E` the season's rain less its evaporation and `C_e` the storms' own vapour convergence
-//!    (the vapour model's, the previous round's: the lag the design states).
-//! 2. **THE DRY STABILITY BETWEEN THE BRANCHES**: `Δs = h_T − c_p·T`, `h_T = 1.06 ×` the season's zonal moist energy maximum
-//!    (Siler, Roe & Armour 2018, Earth, named) — positive everywhere by construction.
-//! 3. **THE NEAR-SURFACE LAYER'S MASS BUDGET**: `ε_T·Φ/Δs + ∇·V = −g·Q/(β_s·p_s·Δs)`, `ε_T = B·g/(c_p·p_s)` (the balance's own
+//! 1. **THE HEATING THE MEAN FLOW CARRIES** (W/m²): the column's moist-static-energy source after the storms take their
+//!    part, `Q = N − ∇·F_e`, less its global mean: `N` the column's net energy input (the balance's kept sunlight less its
+//!    outgoing longwave and its heat store), `F_e` the storms' share of the balance's poleward energy flow (beyond the mean
+//!    cells' share `w`). The latent heating is NOT a separate source: the vapour the lower branch gathers IS it, so it
+//!    moves into the stability (2026-10-16, MEASURED: fed back one call late as `L·(P − E − C_e)` it never settled — on a
+//!    fixed ground thousands of cells still moved after 30 calls and the climate kept more than one state; in this form it
+//!    settles in 12 calls).
+//! 2. **THE GROSS MOIST STABILITY BETWEEN THE BRANCHES** (Neelin & Held 1987): `M = h_T − h`, the upper branch's moist
+//!    static energy over the cell's own near-surface one; `h_T = 1.06 ×` the season's most energetic cell (convective
+//!    quasi-equilibrium, Emanuel 1994: the free troposphere matches the most energetic convecting air; the ratio Siler, Roe
+//!    & Armour 2018's, Earth, named) — positive at every cell by construction.
+//! 3. **THE NEAR-SURFACE LAYER'S MASS BUDGET**: `ε_T·Φ/M + ∇·V = −g·Q/(β_s·p_s·M)`, `ε_T = B·g/(c_p·p_s)` (the balance's own
 //!    longwave slope over the column's heat capacity), `β_s` = 0.2 the near-surface share of the lower branch (Earth: NCEP's
 //!    10 m wind against Earth's winter cell; named).
 //! 4. **THE MOMENTUM BALANCE**: `r·u − f·v = −∂Φ/∂x`, `r·v + f·u = −∂Φ/∂y`, `r = C_D·|U|/h` — the bulk drag law, `C_D` by the
@@ -21,8 +25,8 @@
 //! 5. **THE SOLVE**: `u, v` eliminated face by face (each face's normal wind from its own gradient and the Coriolis turn of
 //!    the averaged cross gradient), one non-symmetric elliptic system for `Φ` per round, solved EXACTLY by banded
 //!    Gaussian elimination with partial pivoting (the Krylov methods stall on its Coriolis terms — MEASURED, see
-//!    [`banded_solve`]); [`DRAG_ROUNDS`] rounds of
-//!    the drag on the round's own wind.
+//!    [`banded_solve`]); rounds of the drag, each cell's own drag balance under the round's field solved exactly, until
+//!    the drag's speed settles ([`DRAG_TOL_M_S`]).
 //! 6. **THE STORMS' WESTERLIES** beyond the cells' edges by the steady angular momentum (the surface torque sums to nought),
 //!    applied only when the cells' own torque is EASTERLY (as ExoPlaSim's is in every month on the home planet, MEASURED) —
 //!    a cells' torque of the other sign is reported, never spread as storm-belt easterlies.
@@ -54,17 +58,22 @@ pub const DRAG_HEIGHT_M: f64 = 10.0;
 pub const VON_KARMAN: f64 = 0.4;
 /// ★ THE CONVECTIVE GUST, m/s (Godfrey & Beljaars 1991; named).
 pub const GUST_M_S: f64 = 1.0;
-/// The drag's rounds (each solves with the last round's wind).
-pub const DRAG_ROUNDS: usize = 3;
+/// ★ THE DRAG'S OWN BALANCE, solved to its stop each call (2026-10-16, MEASURED: feeding a round's wind speed straight
+/// into the next round's drag — `r ∝ |U|`, `|U| ∝ 1/r`, "speed = c ÷ speed" — never settles: it jumps between two speeds
+/// forever, and the rain it carries swung by up to 8 points of desert from pass to pass). Each round now gives every cell
+/// its OWN drag balance under the round's field EXACTLY (a quadratic in `|U|²`, the spin `f` included), so only the
+/// field's coupling between cells needs rounds; they repeat until no cell's drag speed `√(|U|² + w_g²)` moves more than
+/// [`DRAG_TOL_M_S`], within [`DRAG_BOUND`] rounds, Anderson's acceleration over them ([`super::accel`]).
+pub const DRAG_TOL_M_S: f64 = 0.01;
+/// The bound on the drag's rounds (the call reports whether it met its stop).
+pub const DRAG_BOUND: usize = 30;
 
 /// One season's fields the heated winds read, per climate cell: the temperature (K), the column's net energy input `N`
-/// (W/m²), the mean flow's latent heating `L·(P − E − C_e)` (W/m², the previous round's), the sea share and the humidity
-/// share.
+/// (W/m²), the sea share and the humidity share.
 #[derive(Clone, Copy, Debug)]
 pub struct Heating<'a> {
     pub t: &'a [Gf],
     pub net: &'a [Gf],
-    pub latent: &'a [Gf],
     pub sea: &'a [Gf],
     pub rh: &'a [Gf],
     /// ★ THE BENCH'S SWITCH (ruling B38): the heating's departure from its row's mean only — the land–sea pull alone, for
@@ -239,12 +248,18 @@ pub fn heated_winds(
             (storm_edge[r] - south) / ring(r)
         })
         .collect();
-    // THE HEATING and THE STABILITY per cell; the heating less its global mean.
-    let h_top = Gf::from_f64(TOP_ENERGY_RATIO) * hz[hmax_row];
-    let ds: Vec<Gf> = (0..n).map(|i| h_top - words.cp_j_kg_k * h.t[i]).collect();
-    let mut q: Vec<Gf> = (0..n)
-        .map(|i| h.net[i] - storm_div[grid.row(i)] + h.latent[i])
+    // THE HEATING and THE GROSS MOIST STABILITY per cell (Neelin & Held 1987); the heating less its global mean. The
+    // moisture the lower branch gathers IS the latent heating, so the latent term leaves the heating and the stability
+    // becomes moist: `M = h_T − h`, the upper branch's moist static energy over the cell's own. The upper branch's by
+    // convective quasi-equilibrium (Emanuel 1994): the free troposphere matches the most energetic convecting air, times
+    // Siler, Roe & Armour's ratio — so `M` is positive at every cell by construction.
+    let h_cell: Vec<Gf> = (0..n)
+        .map(|i| moist_energy(words, h.t[i], h.rh[i]).0)
         .collect();
+    let h_most = h_cell.iter().fold(Gf::ZERO, |m, &v| m.greater(v));
+    let h_top = Gf::from_f64(TOP_ENERGY_RATIO) * h_most;
+    let ds: Vec<Gf> = (0..n).map(|i| h_top - h_cell[i]).collect();
+    let mut q: Vec<Gf> = (0..n).map(|i| h.net[i] - storm_div[grid.row(i)]).collect();
     let (mut qs, mut qa) = (Gf::ZERO, Gf::ZERO);
     for (i, qi) in q.iter().enumerate() {
         qs += *qi * grid.area[grid.row(i)];
@@ -298,10 +313,17 @@ pub fn heated_winds(
     let mut all_met = true;
     let mut residual = Gf::ZERO;
     let idx = |r: usize, c: usize| r * cols + (c % cols);
-    for _ in 0..DRAG_ROUNDS {
-        let r_drag: Vec<Gf> = (0..n)
-            .map(|i| cd[i] * (spd[i] * spd[i] + gust2).sqrt() / depth)
-            .collect();
+    // The drag's speed, gust included: never nought, so its geometric mean is always defined.
+    let mut drag_s: Vec<Gf> = spd.iter().map(|&u| (u * u + gust2).sqrt()).collect();
+    let drag_tol = Gf::from_f64(DRAG_TOL_M_S);
+    let mut drag_rounds = 0;
+    let mut drag_met = false;
+    let mut accel = super::accel::Anderson::new();
+    let mut drag_next = vec![Gf::ZERO; n];
+    let drag_range = (Gf::from_f64(GUST_M_S), Gf::from_f64(f64::MAX));
+    while drag_rounds < DRAG_BOUND {
+        drag_rounds += 1;
+        let r_drag: Vec<Gf> = (0..n).map(|i| cd[i] * drag_s[i] / depth).collect();
         // THE OPERATOR: each cell's outflow through its four faces, each face's normal wind eliminated.
         let mut m = vec![Row::new(); n];
         for j in 0..rows {
@@ -356,9 +378,6 @@ pub fn heated_winds(
             }
         }
         phi = solve_in_band_order(&m, &rhs, rows, cols);
-        let (its, met) = (0usize, true);
-        worst = worst.max(its);
-        all_met &= met;
         {
             let mut ax = vec![Gf::ZERO; n];
             apply(&m, &phi, &mut ax);
@@ -382,12 +401,31 @@ pub fn heated_winds(
                 let den = rr * rr + ff * ff;
                 east[k] = (-rr * phx - ff * phy) / den;
                 north[k] = (-rr * phy + ff * phx) / den;
+                // THE CELL'S OWN DRAG BALANCE under this round's field, exactly: `|U| = G/√(r² + f²)` with
+                // `r = (C_D/h)·√(|U|² + w_g²)` is `α²·x² + (α²·w_g² + f²)·x − G² = 0` in `x = |U|²` (`α = C_D/h`, `G` the
+                // field's gradient), its root in the form that loses no digits where the spin rules.
+                let g2 = phx * phx + phy * phy;
+                let alpha = cd[k] / depth;
+                let b = alpha * alpha * gust2 + ff * ff;
+                let x = Gf::TWO * g2 / (b + (b * b + Gf::from_i64(4) * alpha * alpha * g2).sqrt());
+                drag_next[k] = (x + gust2).sqrt();
             }
         }
+        let mut moved = Gf::ZERO;
         for i in 0..n {
             spd[i] = (east[i] * east[i] + north[i] * north[i]).sqrt();
+            moved = moved.greater((drag_next[i] - drag_s[i]).abs());
         }
+        if moved < drag_tol {
+            drag_s.copy_from_slice(&drag_next);
+            drag_met = true;
+            break;
+        }
+        // Anderson's acceleration over the drag's rounds (the cells' exact balance under each round's field as `G`).
+        accel.step(&mut drag_s, &drag_next, moved, drag_range);
     }
+    worst = worst.max(drag_rounds);
+    all_met &= drag_met;
     // THE STORMS' WESTERLIES beyond the edges, when the cells' torque is easterly.
     let mut torque = Gf::ZERO;
     let mut shape_torque = Gf::ZERO;

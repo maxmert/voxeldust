@@ -22,6 +22,7 @@
     reason = "the seasons run inside the macro solve on the CPU, never in a kernel; integer-exact on every host"
 )]
 
+pub mod accel;
 pub mod balance;
 pub mod chain;
 pub mod gill;

@@ -492,6 +492,13 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     the cells' winds + Gill's departures, the evaporation cure, the mountains' rain; the home planet's land 423 mm/yr, 2.2 %
     desert); THE DESERT LAWS POSTPONED (Charney's sink, the surface energy split → the saturation law, the trades' mixing,
     the storm belts; registered); THE GAME FIRST — B99's order continues.
+    ★ B101 (2026-10-16, the owner on the comparison pictures: "Looks ok. What's next?"): GENERATOR 27's CLIMATE IS THE MOIST
+    FORM (the heated winds by the gross moist stability, Neelin & Held 1987, `h_T` by quasi-equilibrium — the lagged latent
+    heating kept the climate in more than one state; amends B100 item 1), EVERY 8th PASS with the sea every pass (B47's
+    tolerance met on every global reading and the tracked plates; 63 min against 2 h 6 min a home-planet solve); the
+    numerics (Anderson's acceleration, exact drag balance, the spin-up) no law change; NEXT the chain into the game's solve.
+    ★ B102 (2026-10-16, "Let's not do (The coverage tests (HR5)) … it will take ages"): THE SEASONS MODULES' COVERAGE TESTS
+    WAIT (HR5 owed, registered; before the base freezes or on the owner's word); one commit; generator 27 into the game.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION
