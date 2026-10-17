@@ -2004,3 +2004,63 @@ climate every 8th pass against every pass — land, plains, mountains, relief, h
 against 2 h 6 min; the lakes' budget now the largest part. Pictures `5_*` (every 8th) and `6_*` (every pass).
 - 2026-10-16 (evening) — RULING B101: the moist-form world's look given ("Looks ok"); generator 27's climate = the moist form
 every 8th pass; NEXT the chain into the game's solve (B99 step 1's close).
+- 2026-10-16/17 — B99 STEP 1b–1c: GENERATOR 27 IN THE GAME'S SOLVE (rulings B100–B102; built, linted, NOT committed, no test
+run). CODE: `solve::ClimateSource` — a body with air reads the seasons' chain (warm from call to call, spun up first) every
+8th pass with the running sea every pass; an airless body keeps the temperature law; GENERATOR_VERSION 27,
+ARTIFACT_KEY_GENERATION 28. TWO DEFECTS FOUND AND CURED (2026-10-17): (1) the worker (`artifact_worker::run_solve_on`)
+computed the shipped rows' temperature, rain and dryness again by the OLD law after the solve ran with the chain — now
+`solve::solve_full_shipped_on` hands back the solve's own last reading over the final ground (a wet body: the lakes' last
+reading; a dry body: one more reading with no sea); (2) the worker gave a DRY body its sea's word (`i32::MIN`) as the datum,
+so the lapse shipped 173 K on every node of every dry world with air (MEASURED on the desert world, a 350 K world). AN
+INTERIM: the star-locked body with air (`Planet(17313999383825979787)`, the charter's locked flag) keeps the temperature
+law (registered in DEFERRED; the design stated none stood in the world). MEASURED: the game's home world (digest
+[0x6ac9_f81d_0b21_0db3, 0xd3b9_c08d_8919_5424], 2 520 s on 12 cores, the sea 3 666 m, the ocean 77.24 %) equals the bench's
+every-8th-pass world the owner judged (B101) byte for byte in its heights, water, receivers, discharge and provinces; 0.6 %
+of its rain rows differ (the bench read its rows from a cold start). The land's rain median 391 → 559 mm/yr, under 250 mm
+37.7 → 0.0 %, the land over 1 km 13.2 → 10.7 %. The desert world's ground and digest do not move (a dry world's ground does
+not read the climate); only its rows move with the cure. Pictures `~/Downloads/voxeldust_gen27_worlds_2026-10-17/`.
+THE PINS RE-RECORDED by the one-core solve (`golden_z_record`, 11 766 s): the digest equals the 12-core solve's (the same
+bytes on 1 and 12 cores, B64), the identity's measured word 0x3253_a7dc_533b_0994, the sea 3 666 m, the ocean 7 724; the
+release pin gate NOT run (the owner's word, B74). THE FAR WORLDS: the water world `Planet(6548333207712198820)` 594 s
+(its floor's heights move on 1.1 % of the nodes), the desert world 7 213 s (the year's mean 76.1 °C against its charter's
+76.5 °C; before the cure −100 °C on every node). THE STORES: slot 22's home, water and desert stores hold the new worlds
+(`planet_stand store-put`, read back after a reopening); the generator-26 stores kept as `realms/slot-22-gen26-backup`.
+- 2026-10-17 — RULING B103: THE OWNER'S LOOK ON GENERATOR 27 in the window: "Looks ok" (slot 22; every far world of the home
+system opened from its stored generator-27 world, the moon solved itself; the release binaries built from this change).
+FOUND: the stand rule (`window_stand`, `solved::walkable_stand`) reads the 8 km rows only — its stand, 76 m over the sea on
+the row, stood 240 m under the sea on the 16 m floor (the 8 km node holds the coast; dry land 2–4 km away); the walker
+stood at the nearest dry, gentle place on the stored floor (`valley_hull … dry`, 4.4 km away, 305 m over the sea) with
+hull 21 berthed 80 m away. The large dry world's temperature row reads its ceiling (428 K) on every node against its
+charter's 456 K. Both registered in DEFERRED.
+- 2026-10-17 — B99 STEP 2's FIRST BENCH: THE 4 m COMB AGAINST THE SOIL LAW (the owner: "Please proceed"; bench only, nothing
+in the game reads it; generator 27's world `/tmp/vd-fast/home27.art`, the stands of 2026-10-15: the hills (3, 18, 4) and the
+mountain (3, 20, 66), sixteenths). CODE: `fine::refine::SoilLaw` and `steady(…, soil)` — each 4 m point the gentler of the
+river law's slope and the soil law's (Roering et al. 1999/2007's closed form, K_h Oregon's 0.003 m²/yr, ρr/ρs 2, S_c the
+level's tan 35°; its area drained per unit of contour); with no soil law the 16 m level's steady pass is unchanged;
+`planet_stand l3` with `VD_L3_SOIL=1`. MEASURED (river law alone → river and soil laws; Earth's 4 m): THE HILLS — 95 % of the
+points on the soil law; the detail under today's 16 m curve 1.38 → 0.07 m RMS (Oregon 0.71); links over 35° / 45°
+15.87 / 1.33 → 6.08 / 0.08 % (Oregon 9.38 / 0.52); the comb gone, the hills as today's 16 m ground. THE MOUNTAIN — 93 % on
+the soil law; the detail 1.17 → 0.21 m RMS (San Gabriel 1.22); over 35° / 45° 24.93 / 5.31 → 21.19 / 2.24 % (San Gabriel
+21.63 / 5.01; today's 16 m curve 20.33 / 1.83); the gullies shallow, the rough face gone. THE CAUSE OF BOTH: this planet's
+rates (hills 0.55, mountain 8.6 mm/kyr) are ~100× under Oregon's and the San Gabriel's, so the soil carries the rock almost
+everywhere; Earth's own hill texture (ridge and chute, tree throw) and rock (the soil production limit, joints, ledges)
+need facts the world lacks (the design's later families). EVERY 4 m TILE STOPS AT THE 180-PASS BOUND in both runs
+(registered). A tile 20–23 s with the soil law, 28–48 s without. Pictures `~/Downloads/voxeldust_4m_soil_2026-10-17/`
+(each: today's 16 m ground, the river law alone, the river and soil laws). The owner's choice owed.
+- 2026-10-17 — G-OUTLETS COUNTED FOR THE ONE-VOLUME REVISION's Q1 (`planet_stand lakes`): generator 27's home planet holds
+155 CLOSED lakes (331 925 km², 0.29 % of the land) and 1 009 SPILLING lakes (715 115 km², 0.62 %; the largest 231 098 km²,
+4 383 nodes); of the spilling, 77 cover ten nodes or more with water 100 m deep or more, and 151 more two to nine nodes at
+that depth (generator 26: 132 closed, 1 517 spilling; W11 counted 2 spilling at generator 14). So the receiver-end form
+(Q1 a) leaves two thirds of the lakes' area without a floor; Q1 (b) (each standing water's level read by the ground's
+solid pass, amending B79 item 3) is the revision's own answer when they are many. The owner's choice owed.
+- 2026-10-17 — RULING B104: THE 4 m LEVEL PARKED (its price against its lawful gain on this planet; amends B99 item 2); the
+16 m ground stays the finest shape; THE WATER NEXT (B99 step 4) on the one-volume revision's answers.
+- 2026-10-17 — RULING B105: the one-volume revision ruled (Q1 (b), Q2–Q10 as recommended); one local commit after the copy's
+control; the game's parallel track opens in its own worktree (B99 steps 5–6 move there); this worktree: step 4, then the
+weather. FOUND AND CURED ON THE WAY: the bench's copy of the solve (`solve_copy`) still read generator 26's climate through
+one global switch and one global warm state — now it follows the game (`CopyClimate`: the chain on a body with air that is
+not star-locked, every 8th pass, its warm state per solve, the shipped climate kept in `Solved`); `-seasons` takes it out.
+THE TESTS (B105 item 3's check): the generator 367 + 5 cured of 372 (the five read the solve's own climate, a cut in whole
+metres, the moon's tile with the most land now (NegX, 7, 2)); the bins crate 113 of 114 (the copy's control, rerun on the
+cured copy); the terrain crate now about an hour and the bins crate over three hours (the seasons' chain in the moon
+solves; registered).

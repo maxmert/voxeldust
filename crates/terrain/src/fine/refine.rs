@@ -55,6 +55,27 @@ pub(crate) fn median(mut v: Vec<Gf>) -> Option<Gf> {
     (!v.is_empty()).then(|| v[(v.len() - 1) >> 1])
 }
 
+/// ★ THE SOIL LAW (Roering, Kirchner & Dietrich 1999; Roering, Perron & Kirchner 2007; the landforms design §2.0 S1): the
+/// creep flux `q = K_h·S / (1 − (S/S_c)²)` carries what a steady hillslope sheds, `q = (ρ_r/ρ_s)·E·x` (E the rate, x the
+/// area drained per unit of contour). Near a divide it carries the rock at a gentler slope than the river law, so there
+/// it sets the slope; downstream the river law does; the channel head is where the two slopes meet (the slope–area
+/// plot's rollover, Montgomery & Foufoula-Georgiou 1993). Bench only (the 4 m level's comb, ruling B99 step 2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SoilLaw {
+    /// The creep coefficient `K_h`, m²/yr (an Earth interim: Oregon's 0.003, Roering et al. 1999).
+    pub kh_m2_yr: f64,
+    /// The rock's density over the soil's (Roering et al. 2007's 2).
+    pub rock_over_soil: f64,
+}
+
+/// The soil law's slope for the rate `e` and the area `x` drained per unit of contour under the threshold `sc`:
+/// `S = 2q / (K_h + √(K_h² + 4q²/S_c²))`, the closed form of the nonlinear flux law.
+pub(crate) fn soil_slope(law: &SoilLaw, e: Gf, x: Gf, sc: Gf) -> Gf {
+    let kh = Gf::from_f64(law.kh_m2_yr);
+    let q = Gf::from_f64(law.rock_over_soil) * e * x;
+    Gf::from_i64(2) * q / (kh + (kh * kh + Gf::from_i64(4) * q * q / (sc * sc)).sqrt())
+}
+
 /// The joint law's slope for the rate `u` and the water `q` (`(U/(K·Q))^(1/n)`); unbounded (a large word) where no water.
 pub(crate) fn river_slope(u: Gf, q: Gf) -> Gf {
     let k = Gf::from_f64(JOINT_K_LP);
@@ -382,14 +403,17 @@ pub(crate) fn setup(
 /// (the first from the drawn coarser ground), brings each point the water its tree carries, and stands each point over
 /// its receiver by the joint law's slope for its rate and that water, never steeper than `tan`; from the second pass each
 /// point moves HALF way to that form (the 128 m level's half step, B92). The passes stop when no coarser cell's mean
-/// (over its `ncell` coarser points) moves more than `settle` metres, within `bound`. Returns the heights and the passes.
+/// (over its `ncell` coarser points) moves more than `settle` metres, within `bound`. With a `soil` law each point takes
+/// the gentler of the river law's slope and the soil law's (its area drained per unit of contour: the area through it
+/// over the square root of its own). Returns the heights, the passes and how many points the soil law set in the last.
 pub(crate) fn steady(
     s: &Setup,
     ncell: usize,
     tan: Gf,
     settle: Gf,
     bound: usize,
-) -> (Vec<Gf>, usize) {
+    soil: Option<&SoilLaw>,
+) -> (Vec<Gf>, usize, usize) {
     let cell_means = |h: &[Gf]| -> Vec<Gf> {
         let (mut sum, mut area) = (vec![Gf::ZERO; ncell], vec![Gf::ZERO; ncell]);
         for ((&c, &hp), &ap) in s.cell_of.iter().zip(h).zip(&s.geom.area) {
@@ -411,10 +435,19 @@ pub(crate) fn steady(
     let mut h = s.base.clone();
     let mut last = cell_means(&h);
     let mut passes = 0usize;
+    let mut on_soil = 0usize;
     for pass in 1..=bound {
         passes = pass;
+        on_soil = 0;
         let t = tree(&h, &s.outlet, &s.graph, &s.geom.len);
         let q = accumulate(&t, &s.water);
+        let per_width: Option<Vec<Gf>> = soil.map(|_| {
+            accumulate(&t, &s.geom.area)
+                .iter()
+                .zip(&s.geom.area)
+                .map(|(&a, &own)| a / own.sqrt())
+                .collect()
+        });
         for &c in &t.order {
             let c = c as usize;
             let r = t.recv[c];
@@ -422,7 +455,15 @@ pub(crate) fn steady(
                 h[c] = s.base[c];
                 continue;
             }
-            let full = h[r as usize] + river_slope(s.rate[c], q[c]).lesser(tan) * t.link[c];
+            let mut slope = river_slope(s.rate[c], q[c]).lesser(tan);
+            if let (Some(law), Some(x)) = (soil, &per_width) {
+                let creep = soil_slope(law, s.rate[c], x[c], tan);
+                if creep < slope {
+                    slope = creep;
+                    on_soil += 1;
+                }
+            }
+            let full = h[r as usize] + slope * t.link[c];
             h[c] = if pass == 1 {
                 full
             } else {
@@ -440,7 +481,7 @@ pub(crate) fn steady(
             break;
         }
     }
-    (h, passes)
+    (h, passes, on_soil)
 }
 
 /// ★ THE RASTER IN B96's FORM over `(ri0, rj0, rside)` (cells of the level's rung, `n` a face edge, `down` rungs under the

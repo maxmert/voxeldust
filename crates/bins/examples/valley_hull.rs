@@ -6,7 +6,8 @@
 //!
 //! **Example.** On the valley floor at (NegY, 19, 65): the hull 40 m to one side on the floor, not 25 m up the slope.
 //!
-//! `VD_REALM_STORE=<a copy of the home planet's store> cargo run --release -p vd-bins --example valley_hull -- X,Y,Z`
+//! `VD_REALM_STORE=<a copy of the home planet's store> cargo run --release -p vd-bins --example valley_hull -- X,Y,Z [dry]`
+//! (`dry`: the walker first moved to the nearest dry, gentle place within 8 km, and its eye printed).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -66,8 +67,9 @@ fn main() {
     .expect("the stored rows agree with their head")
     .expect("an artifact is stored");
     let at = DVec3::new(eye[0], eye[1], eye[2]);
-    let up = at.normalize();
+    let mut up = at.normalize();
     let drawn = artifact.drawn_range_m(&lattice);
+    let sea_r = body.radius_m() + f64::from(artifact.sea_m);
     let body = body.with_sea_m(artifact.sea());
     let book = |level: FineLevel| {
         let mut book =
@@ -114,11 +116,63 @@ fn main() {
         vd_terrain::height::height_field_m(&body, &field, d.normalize().to_array(), 0)
             .expect("the ground is held")
     };
-    let own = ground(up);
+    let mut own = ground(up);
     println!(
-        "the walker's ground {own:.2} m from the centre; the spawn {:.2} m over it",
+        "the walker's ground {own:.2} m from the centre ({:.1} m over the sea); the spawn {:.2} m over it",
+        own - sea_r,
         at.length() - own
     );
+    // ★ `dry`: the walker moved to the nearest place within 8 km whose stored floor stands 20 m or more over the sea and
+    // slopes under 10° over 16 m (rings every 100 m, 32 ways), the eye 1.8 m over that floor.
+    if std::env::args().nth(2).as_deref() == Some("dry") {
+        let east = DVec3::Z.cross(up).normalize();
+        let north = up.cross(east);
+        let gentle = |d: DVec3, h: f64| {
+            let e = DVec3::Z.cross(d).normalize();
+            let n = d.cross(e);
+            [e, -e, n, -n]
+                .iter()
+                .all(|&w| (ground(d * h + w * 16.0) - h).abs() < 16.0 * 10f64.to_radians().tan())
+        };
+        for km in [0.5, 1.0, 2.0, 4.0, 8.0, 16.0] {
+            let hs: Vec<f64> = (0..32)
+                .map(|k| {
+                    let a = f64::from(k) * std::f64::consts::TAU / 32.0;
+                    ground(
+                        (up * own + (east * a.cos() + north * a.sin()) * (km * 1_000.0))
+                            .normalize(),
+                    ) - sea_r
+                })
+                .collect();
+            println!(
+                "at {km} km the floor over the sea: lowest {:.0} m, highest {:.0} m, dry {} of 32",
+                hs.iter().copied().fold(f64::MAX, f64::min),
+                hs.iter().copied().fold(f64::MIN, f64::max),
+                hs.iter().filter(|&&h| h > 0.0).count()
+            );
+        }
+        let found = (1..=80).find_map(|ring| {
+            (0..32).find_map(|k| {
+                let a = f64::from(k) * std::f64::consts::TAU / 32.0;
+                let d = (up * own + (east * a.cos() + north * a.sin()) * (f64::from(ring) * 100.0))
+                    .normalize();
+                let h = ground(d);
+                (h - sea_r >= 20.0 && gentle(d, h)).then_some((d, h, ring))
+            })
+        });
+        let (d, h, ring) = found.expect("a dry, gentle place within 8 km");
+        up = d;
+        own = h;
+        let eye = d * (h + 1.8);
+        println!(
+            "DRY STAND {} m away: the floor {:.1} m over the sea; the eye {},{},{}",
+            ring * 100,
+            h - sea_r,
+            eye.x,
+            eye.y,
+            eye.z
+        );
+    }
     // A tangent frame at the walker.
     let east = DVec3::Z.cross(up).normalize();
     let north = up.cross(east);

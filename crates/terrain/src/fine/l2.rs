@@ -253,12 +253,13 @@ pub fn solve_l2(
     key: super::l1::TileKey,
 ) -> Option<L2Tile> {
     let d = l2_domain(body, lattice, artifact, book, key)?;
-    let (h, passes) = steady(
+    let (h, passes, _) = steady(
         &d.s,
         d.f1.h.len(),
         Gf::from_f64(TAN_REPOSE),
         Gf::from_f64(STEADY_SETTLE_M),
         STEADY_BOUND,
+        None,
     );
     // THE RASTER: the tile and half its buffer, cell centres at rung 4.
     let node4 = 1i32 << d.shift4;

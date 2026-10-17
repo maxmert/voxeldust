@@ -12154,6 +12154,38 @@ generation alone), so a body solves once per generation on a machine, not once p
       exact solve: a pass 13–33 s, one call in ten still at the round bound — design §11.5), ExoPlaSim's home-planet reading (running),
       the macro solve with the chain (S3, running) and the owner's look; sea ice; the moon with air and the star-locked
       body (refused by the chain's scope); Milly's seasonal runoff; the client's snow line from the realm.
+      ★ 2026-10-17: BUILT INTO THE GAME'S SOLVE as generator 27 (rulings B100–B102; `vd_terrain::solve::ClimateSource`,
+      the chain every 8th pass; the shipped rows are the solve's own last reading, `solve::solve_full_shipped_on`). The
+      star-locked body keeps the temperature law (the entry below); the desert laws wait (B100).
+    - 🟨 THE STAR-LOCKED BODY WITH AIR KEEPS THE TEMPERATURE LAW — AN INTERIM (found 2026-10-17): the seasons design §2
+      stated that no star-locked body with air stands in the world, so the chain's refusal would never bind; the home
+      system holds one, `Planet(17313999383825979787)` (28.7 bar, 456 K, dry, its day its year, the charter's
+      `WORD_FLAG_TIDALLY_LOCKED`). A refusal that stops its solve leaves the planet without solved ground, and the chain run
+      as a slow turner is the silent wrong the design forbids, so `solve::ClimateSource` gives it the temperature law of
+      `vd_terrain::climate`, as an airless body has (its ground does not read the climate: a dry world's ground came out
+      byte for byte the same under the old law and the chain, MEASURED on the desert world). MISSING: a day–night law for
+      a locked body's air (the heat carried from the day side to the night side). WHEN: on the owner's word. **Example.**
+      The large dry world keeps one face to its star; its rows read one zonal temperature by latitude, never a hot day
+      side and a cold night side.
+    - 🟥 THE STAND RULE READS THE 8 km ROWS ONLY (found 2026-10-17, ruling B103): `solved::walkable_stand` (the gate's
+      stands, `window_stand`) chooses dry land by the 8 km row, so a node that holds a coast can place the walker on the
+      16 m floor's sea bed (MEASURED: a row 76 m over the sea, the floor 240 m under it; dry land 2–4 km away). The cure:
+      the rule reads the finest stored ground, or a stand is checked on it (`valley_hull … dry` does so by hand). WHEN:
+      before the next gate run that stands on the fine ground. **Example.** The owner's stand for generator 27 moved
+      4.4 km inland to stand on land.
+    - 🟨 THE 4 m LEVEL — PARKED by ruling B104 (2026-10-17): a tile 20–48 s on one core, 3–15 minutes and 17–45 MB at each
+      new place, never planet-wide; its lawful gain on this planet 0.07–0.21 m RMS (the soil law) or the comb (the river
+      law alone). Bench-only code: `fine::l3`, `fine::refine::SoilLaw`, `planet_stand l3`. WHEN: only with a lawful rock
+      form (ledges, talus, the rock-cover share) whose visible gain is worth the price, on the owner's word.
+    - 🟥 THE 4 m TILES STOP AT THEIR PASS BOUND (found 2026-10-15, read again 2026-10-17; parked with the level, B104): every 4 m tile on the bench
+      (`fine::l3`, hills and mountain, with and without the soil law) ends at 180 passes before its settle law (one stored
+      unit a 16 m cell) holds. The 4 m level is bench-only; before it is built its readings need B39's check (N against
+      2N passes) or a settle law it meets. WHEN: B99 step 2's build.
+    - 🟨 THE TEMPERATURE ROW'S RANGE (found 2026-10-17): the artifact's temperature class spans 173–428 K
+      (`artifact::TEMPERATURE_FLOOR_DK`, one class a kelvin, one byte), so a hotter world reads its ceiling on every node
+      (`Planet(17313999383825979787)`: 428 K against its charter's 456 K). A cap by the row's form, not a law. The cure:
+      a wider class (a coarser step or a second byte, a format change) when a reader needs the hot worlds' true value.
+      WHEN: with the volume's substances (B99 step 4) or when a reader of the row asks for it.
     - 🟥 THE SEASONS' COVERAGE (HR5) — WAITS by ruling B102 (2026-10-16): `vd_terrain::seasons` (sun, grid, balance, wind,
       gill, vapour, orography, accel, chain) holds only its 16 module tests, not 100 % of its regions and branches; the
       terrain crate's coverage gate reports the misses. WHEN: before the base freezes (B99 step 7) or on the owner's word.

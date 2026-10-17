@@ -16,7 +16,7 @@ use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::par::Cores;
 
 /// The committed digest of the home planet's artifact on this build.
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6f92_ab73_2b8f_e622, 0xab3a_2d52_064b_b265];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6ac9_f81d_0b21_0db3, 0xd3b9_c08d_8919_5424];
 
 #[test]
 fn the_home_planets_artifact_digests_to_its_committed_words() {
@@ -44,9 +44,10 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
         digest[0],
         digest[1]
     );
-    if std::env::var_os("VD_ARTIFACT_RECORD").is_some() {
+    let recording = std::env::var_os("VD_ARTIFACT_RECORD").is_some();
+    if recording {
+        // Record mode prints every word this gate pins (the digest above, the sea below) before it returns.
         println!("home_artifact_pin: RECORD — commit the digest above as HOME_ARTIFACT_DIGEST");
-        return;
     }
     // ★ GATE G-SEA (slice 8c stage C5; ruling T8's cure): the sea's level the solve found over the
     // eroded field, and the share of the globe under it, pinned — read here from the artifact's own
@@ -74,7 +75,7 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
         "home_artifact_pin: G-SEA the sea stands {sea} m over the ladder radius; ocean share {:.2} % ({share_q4} / 10 000)",
         wet / all * 100.0
     );
-    if std::env::var_os("VD_ARTIFACT_RECORD").is_some() {
+    if recording {
         println!(
             "home_artifact_pin: RECORD — commit HOME_PLANET_SEA_M = {sea}, HOME_PLANET_OCEAN_SHARE_Q4 = {share_q4}"
         );
@@ -89,7 +90,7 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
     // `ARTIFACT_KEY_GENERATION`, or every realm opens an artifact of the old solve.
     assert_eq!(
         vd_terrain::ARTIFACT_KEY_GENERATION,
-        27,
+        28,
         "the artifact's key generation belongs to the digest above: bump both together"
     );
     assert_eq!(

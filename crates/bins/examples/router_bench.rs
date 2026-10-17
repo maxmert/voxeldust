@@ -52,7 +52,7 @@ use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
 use vd_terrain::solve::{DRY, MacroSolve, Schedule};
 
 /// The artifact the pin records (`crates/bins/tests/home_artifact_pin.rs`).
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6f92_ab73_2b8f_e622, 0xab3a_2d52_064b_b265];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6ac9_f81d_0b21_0db3, 0xd3b9_c08d_8919_5424];
 
 /// The cone's slope (grid_bias's own).
 const CONE_SLOPE: f64 = 0.05;
@@ -260,7 +260,7 @@ fn planet_stage(write: Option<&str>, check_stock: bool) {
     let solved = solve_copy(&body, &words, schedule, &Laws::default(), false)
         .expect("the home planet solves");
     println!("the copy solved in {:.1} s", t.elapsed().as_secs_f64());
-    let artifact = artifact_of(&body, &words, &solved);
+    let artifact = artifact_of(&words, &solved);
     let digest = artifact.digest();
     println!(
         "ARTIFACT d8 digest [{:#018x}, {:#018x}]",

@@ -48,16 +48,7 @@ fn rained(mut c: vd_terrain::climate::Climate) -> vd_terrain::climate::Climate {
     c
 }
 
-/// ★ A CANDIDATE UNDER MEASUREMENT, NOT A RULED LAW (2026-10-15, ruling B99 step 1, generator 27's bench step S3; the design
-/// `docs/investigation/2026-10-15/rain_seasons_design.md`): every climate call of the copy reads the SEASONS' CHAIN
-/// (`vd_terrain::seasons::chain`) — the seasonal energy balance, the winds, the vapour and the mountains' rain — warm from
-/// the copy's last call ([`SEASON_STATE`]). The bench sets it (`belts_bench … +seasons`); off, the copy is the game's.
-pub static SEASONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// The seasons' chain's warm state across the copy's calls (one solve at a time; the bench clears it before a case).
-pub static SEASON_STATE: std::sync::Mutex<Option<vd_terrain::seasons::chain::SeasonState>> =
-    std::sync::Mutex::new(None);
-
-/// The seasons' chain on `cores`, warm from [`SEASON_STATE`].
+/// The seasons' chain on `threads`, warm from this solve's `state`.
 fn seasons_on(
     body: &BodyDefinition,
     lattice: &vd_terrain::macro_lattice::MacroLattice,
@@ -65,10 +56,8 @@ fn seasons_on(
     z: &[i32],
     sea: Option<vd_terrain::climate::SeaView<'_>>,
     threads: usize,
+    state: &mut vd_terrain::seasons::chain::SeasonState,
 ) -> vd_terrain::climate::Climate {
-    let mut guard = SEASON_STATE.lock().expect("the season state");
-    let state =
-        guard.get_or_insert_with(|| vd_terrain::seasons::chain::SeasonState::new(lattice, threads));
     let clock = std::time::Instant::now();
     let c =
         vd_terrain::seasons::chain::seasonal_climate(body, lattice, words, z, sea, threads, state);
@@ -97,42 +86,55 @@ fn seasons_on(
     c
 }
 
-/// The game's climate, then [`rained`]; the seasons' chain where [`SEASONS`] is set.
-fn climate_on(
-    body: &BodyDefinition,
-    lattice: &vd_terrain::macro_lattice::MacroLattice,
-    words: &vd_terrain::solve::SolveWords,
-    z: &[i32],
-    sea: Option<vd_terrain::climate::SeaView<'_>>,
-    cores: vd_terrain::par::Cores,
-) -> vd_terrain::climate::Climate {
-    if SEASONS.load(std::sync::atomic::Ordering::Relaxed) {
-        return seasons_on(body, lattice, words, z, sea, cores.threads());
-    }
-    rained(vd_terrain::climate::climate_on(
-        body, lattice, words, z, sea, cores,
-    ))
+/// ★ THE COPY'S ONE CLIMATE (the game's `vd_terrain::solve` climate source, ruling B101): with [`Laws::seasons`] in, a
+/// body with air that is not locked to its star reads the seasons' chain, warm from call to call within this solve
+/// (never shared between two solves); elsewhere — and with the law out, generator 26's climate — the temperature law of
+/// `vd_terrain::climate`, then [`rained`].
+struct CopyClimate {
+    seasons: Option<vd_terrain::seasons::chain::SeasonState>,
 }
 
-/// The game's climate on the default cores, then [`rained`]; the seasons' chain where [`SEASONS`] is set.
-fn climate_of(
-    body: &BodyDefinition,
-    lattice: &vd_terrain::macro_lattice::MacroLattice,
-    words: &vd_terrain::solve::SolveWords,
-    z: &[i32],
-    sea: Option<vd_terrain::climate::SeaView<'_>>,
-) -> vd_terrain::climate::Climate {
-    if SEASONS.load(std::sync::atomic::Ordering::Relaxed) {
-        return seasons_on(
-            body,
-            lattice,
-            words,
-            z,
-            sea,
-            vd_terrain::par::Cores::default().threads(),
-        );
+impl CopyClimate {
+    fn of(
+        lattice: &vd_terrain::macro_lattice::MacroLattice,
+        words: &vd_terrain::solve::SolveWords,
+        laws: &Laws,
+        cores: vd_terrain::par::Cores,
+    ) -> CopyClimate {
+        let air = words.p_surf_pa.is_some_and(|p| p > 0);
+        let locked = words.flags & vd_terrain::solve::WORD_FLAG_TIDALLY_LOCKED != 0;
+        CopyClimate {
+            seasons: (laws.seasons && air && !locked)
+                .then(|| vd_terrain::seasons::chain::SeasonState::new(lattice, cores.threads())),
+        }
     }
-    rained(vd_terrain::climate::climate(body, lattice, words, z, sea))
+
+    /// The passes between two climates: [`Laws::rain_every`] for the chain, every pass for the temperature law.
+    fn every(&self, laws: &Laws) -> u32 {
+        if self.seasons.is_some() {
+            laws.rain_every
+        } else {
+            1
+        }
+    }
+
+    /// The climate over `z` as it stands.
+    fn at(
+        &mut self,
+        body: &BodyDefinition,
+        lattice: &vd_terrain::macro_lattice::MacroLattice,
+        words: &vd_terrain::solve::SolveWords,
+        z: &[i32],
+        sea: Option<vd_terrain::climate::SeaView<'_>>,
+        cores: vd_terrain::par::Cores,
+    ) -> vd_terrain::climate::Climate {
+        match self.seasons.as_mut() {
+            Some(state) => seasons_on(body, lattice, words, z, sea, cores.threads(), state),
+            None => rained(vd_terrain::climate::climate_on(
+                body, lattice, words, z, sea, cores,
+            )),
+        }
+    }
 }
 use vd_terrain::Gf;
 use vd_terrain::artifact::Artifact;
@@ -196,10 +198,14 @@ pub struct Laws {
     /// and the running sea re-solved every this many passes. The game re-solves both every pass (ruling B69 item 1),
     /// so the default is one; a larger spacing measures the error the game's twenty passes carried until generator 26.
     pub climate_every: u32,
-    /// ★ THE CLIMATE'S OWN SPACING — A RESOLUTION UNDER MEASUREMENT, NOT A LAW (2026-10-16, the owner: "Let's try every 8th
-    /// pass please"; the bench's `+seasonsN`): the climate re-solved every this many passes, the running sea still every
-    /// pass (ruling B68 found the sea's stale spacing, not the climate's, made the jump near the present). One by default.
+    /// ★ THE CLIMATE'S OWN SPACING — A RESOLUTION, NOT A LAW (ruling B101; the bench's `+seasonsN`): the seasons' chain
+    /// re-solved every this many passes, the running sea still every pass (ruling B68 found the sea's stale spacing, not
+    /// the climate's, made the jump near the present). The game's [`vd_terrain::solve::SEASONS_EVERY`] by default; the
+    /// temperature law is re-solved every pass whatever it states.
     pub rain_every: u32,
+    /// ★ THE SEASONS' CLIMATE (rulings B99–B102, generator 27): a body with air that is not locked to its star reads the
+    /// seasons' chain every [`Laws::rain_every`] passes, as the game does. Out: generator 26's climate, every pass.
+    pub seasons: bool,
     /// ★ THE INITIAL LAND (rulings B58 item 2, B59–B61; [`crate::land_copy`]): the game's own by default (generator
     /// 26), or the bench land copy with a law taken out or a diagnostic in.
     pub land: crate::land_copy::LandLaws,
@@ -215,7 +221,8 @@ impl Default for Laws {
             pass_share: false,
             routing_flats: false,
             climate_every: 1,
-            rain_every: 1,
+            rain_every: vd_terrain::solve::SEASONS_EVERY as u32,
+            seasons: true,
             land: crate::land_copy::LandLaws::default(),
         }
     }
@@ -466,6 +473,8 @@ fn rock_way(
 pub struct Solved {
     pub state: MacroSolve,
     pub facies: Vec<u8>,
+    /// The climate the artifact ships: the solve's own last reading over its final ground (ruling B101).
+    pub climate: vd_terrain::climate::Climate,
     pub report: FullReport,
     /// The belts the wedges raised, where the law is in (`None` where [`Laws::wedge`] took it out).
     pub belts: Option<Belts>,
@@ -620,7 +629,6 @@ pub type Watch<'a> = &'a mut dyn FnMut(usize, u64, &str, &MacroSolve);
 
 /// [`solve_copy`] with a bench's [`Watch`] called at the end of every pass (ruling B58: where a grid mark forms in the
 /// solve's history). The watch only reads, so the solve is the copy's own whether a watch is given or not.
-#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn solve_copy_watched(
     body: &BodyDefinition,
@@ -628,9 +636,8 @@ pub fn solve_copy_watched(
     schedule: Schedule,
     laws: &Laws,
     ledger_on: bool,
-    mut watch: Option<Watch<'_>>,
+    watch: Option<Watch<'_>>,
 ) -> Option<Solved> {
-    let lattice = body.macro_lattice()?;
     // ★ THE COPY'S CORES (ruling B64): `VD_BENCH_CORES` threads for the game's own steps the copy calls (a bench
     // setting; the same bytes on any number), one when unset.
     let cores = vd_terrain::par::Cores(
@@ -639,6 +646,34 @@ pub fn solve_copy_watched(
             .and_then(|v| v.parse().ok())
             .unwrap_or(1),
     );
+    solve_copy_inner(body, words, schedule, laws, ledger_on, watch, cores)
+}
+
+/// [`solve_copy`] on `cores` threads (the same bytes on any number, ruling B64): for a test that solves the copy as the
+/// shared test solves do, on all the host's cores (ruling B74 item 2).
+#[must_use]
+pub fn solve_copy_on(
+    body: &BodyDefinition,
+    words: &SolveWords,
+    schedule: Schedule,
+    laws: &Laws,
+    ledger_on: bool,
+    cores: vd_terrain::par::Cores,
+) -> Option<Solved> {
+    solve_copy_inner(body, words, schedule, laws, ledger_on, None, cores)
+}
+
+#[allow(clippy::too_many_lines)]
+fn solve_copy_inner(
+    body: &BodyDefinition,
+    words: &SolveWords,
+    schedule: Schedule,
+    laws: &Laws,
+    ledger_on: bool,
+    mut watch: Option<Watch<'_>>,
+    cores: vd_terrain::par::Cores,
+) -> Option<Solved> {
+    let lattice = body.macro_lattice()?;
     // LAND (B58 item 2, B59–B61): the game's own initial land, or the bench land copy with a law out.
     let mut land = if laws.land == crate::land_copy::LandLaws::default() {
         vd_terrain::land::initial_land_on(body, &lattice, &words.land(), cores)
@@ -688,7 +723,9 @@ pub fn solve_copy_watched(
     let mut state = MacroSolve::from_land(body, &land)?;
     state.cores = cores;
     let gravity = body.facts().gravity_mm_s2;
-    let pre_climate = climate_on(body, &lattice, words, &land.z, land.sea_view(), cores);
+    let mut source = CopyClimate::of(&lattice, words, laws, cores);
+    let rain_every = source.every(laws);
+    let pre_climate = source.at(body, &lattice, words, &land.z, land.sea_view(), cores);
     let surface = vd_terrain::craters::Surface {
         crust: &land.crust,
         boundary_m: &land.boundary_m,
@@ -719,7 +756,7 @@ pub fn solve_copy_watched(
         vec![i32::MAX; n]
     };
     let mut since_climate = laws.climate_every;
-    let mut since_rain = laws.rain_every;
+    let mut since_rain = rain_every;
     let mut climate: Option<vd_terrain::climate::Climate> = None;
     let mut talus_done = 0u32;
     let mut ledger: Vec<PassLedger> = Vec::new();
@@ -817,9 +854,9 @@ pub fn solve_copy_watched(
                 report.sea_reseeded |= sea.reseeded;
                 report.sea_unsettled |= !sea.settled;
             }
-            if since_rain >= laws.rain_every {
+            if since_rain >= rain_every {
                 let clock = std::time::Instant::now();
-                let c = climate_on(
+                let c = source.at(
                     body,
                     &lattice,
                     words,
@@ -1082,7 +1119,7 @@ pub fn solve_copy_watched(
     report.craters = report.crater_record.len();
     let climate = match climate {
         Some(c) => c,
-        None => climate_on(
+        None => source.at(
             body,
             &lattice,
             words,
@@ -1124,7 +1161,7 @@ pub fn solve_copy_watched(
     let mut final_climate = climate;
     let mut budget = None;
     if has_water {
-        let mut climate = climate_on(
+        let mut climate = source.at(
             body,
             &lattice,
             words,
@@ -1141,7 +1178,7 @@ pub fn solve_copy_watched(
             volume,
             &mut report.routes,
             &mut |s: &MacroSolve| {
-                climate = climate_on(body, &lattice, words, &s.z, Some(s.sea_view()), cores);
+                climate = source.at(body, &lattice, words, &s.z, Some(s.sea_view()), cores);
                 lakes = vd_terrain::lakes::budget(s, &climate);
                 lakes.report.volume_m3
             },
@@ -1167,7 +1204,21 @@ pub fn solve_copy_watched(
     };
     drop(budget);
     report.tree = state.follow_the_water(tree, &final_climate.runoff_mm_yr);
-    drop(final_climate);
+    // ★ THE CLIMATE THE ARTIFACT SHIPS, as the game's (`solve_full_shipped_on`): the lakes' last reading on a wet body
+    // with the chain, else one more reading over the final ground (a dry body reads no sea).
+    let shipped = if has_water && source.seasons.is_some() {
+        final_climate
+    } else {
+        drop(final_climate);
+        source.at(
+            body,
+            &lattice,
+            words,
+            &state.z,
+            has_water.then_some(state.sea_view()),
+            cores,
+        )
+    };
     report.raise_yr.clone_from(&raise_yr);
     let widened = if laws.wedge {
         belts.plateau.clone()
@@ -1180,6 +1231,7 @@ pub fn solve_copy_watched(
     Some(Solved {
         state,
         facies,
+        climate: shipped,
         belts: wedge,
         craters: report.crater_record.clone(),
         collapsed: report.peak.0,
@@ -1197,10 +1249,8 @@ pub fn solve_copy_watched(
 
 /// The artifact exactly as `vd_bins::artifact_worker::run_solve` makes it from a solved state.
 #[must_use]
-pub fn artifact_of(body: &BodyDefinition, words: &SolveWords, s: &Solved) -> Artifact {
-    let lattice = body.macro_lattice().expect("a lattice");
-    let climate = climate_of(body, &lattice, words, &s.state.z, Some(s.state.sea_view()));
-    Artifact::of(&s.state, &s.facies, &climate, words.water_km3 > 0)
+pub fn artifact_of(words: &SolveWords, s: &Solved) -> Artifact {
+    Artifact::of(&s.state, &s.facies, &s.climate, words.water_km3 > 0)
 }
 
 #[cfg(test)]
@@ -1209,7 +1259,6 @@ mod tests {
     use vd_terrain::home::{
         HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words, home_solve_words,
     };
-    use vd_terrain::solve::solve_full;
 
     /// ★ THE CONTROL (ruling B38 item 1): with every law in, the copy is the game's own solve, bit for bit — the state's
     /// ground, water, facies and report — on the home moon, dry and with the home planet's air and a sea; and a law
@@ -1221,10 +1270,16 @@ mod tests {
             water_km3: 3_000_000,
             ..home_solve_words()
         };
+        // Every solve on all the host's cores, as the shared test solves (ruling B74 item 2): the same bytes on any number.
+        let cores =
+            vd_terrain::par::Cores(std::thread::available_parallelism().map_or(1, usize::from));
         for words in [home_moon_solve_words(), wet] {
             let schedule = Schedule::standard(HOME_SYSTEM_AGE_YR);
-            let (state, facies, report) = solve_full(&moon, &words, schedule).expect("a solve");
-            let copy = solve_copy(&moon, &words, schedule, &Laws::default(), true).expect("a copy");
+            let (state, facies, report, climate) =
+                vd_terrain::solve::solve_full_shipped_on(&moon, &words, schedule, cores)
+                    .expect("a solve");
+            let copy = solve_copy_on(&moon, &words, schedule, &Laws::default(), true, cores)
+                .expect("a copy");
             assert_eq!(copy.state.z, state.z);
             assert_eq!(copy.state.water_z, state.water_z);
             assert_eq!(copy.state.receiver, state.receiver);
@@ -1254,28 +1309,18 @@ mod tests {
                 }
             }
             assert_eq!(
-                artifact_of(&moon, &words, &copy).digest(),
-                Artifact::of(
-                    &state,
-                    &facies,
-                    &climate_of(
-                        &moon,
-                        &moon.macro_lattice().expect("a lattice"),
-                        &words,
-                        &state.z,
-                        Some(state.sea_view())
-                    ),
-                    words.water_km3 > 0
-                )
-                .digest()
+                artifact_of(&words, &copy).digest(),
+                Artifact::of(&state, &facies, &climate, words.water_km3 > 0).digest()
             );
         }
         // The water's paths or the craters' own time taken out moves the wet moon's ground; the landscape's time or the
         // wedge taken out moves nothing, because the moon is a stagnant lid — no ridge opens an ocean, so no belt rises
         // and no plate is reworked (every raise time is already the system's age).
         let schedule = Schedule::standard(HOME_SYSTEM_AGE_YR);
-        let all = solve_copy(&moon, &wet, schedule, &Laws::default(), false).expect("a copy");
-        let out = |laws: Laws| solve_copy(&moon, &wet, schedule, &laws, false).expect("a copy");
+        let all =
+            solve_copy_on(&moon, &wet, schedule, &Laws::default(), false, cores).expect("a copy");
+        let out =
+            |laws: Laws| solve_copy_on(&moon, &wet, schedule, &laws, false, cores).expect("a copy");
         let water = out(Laws {
             water_paths: false,
             ..Laws::default()

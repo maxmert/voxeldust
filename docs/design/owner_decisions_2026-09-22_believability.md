@@ -2610,3 +2610,65 @@ avoid that."*
 
 **Example.** The coverage gate, when the owner next runs it, lists the seasons' untested branches (a drag that stops at its
 bound, a spin-up that stops at its bound) as misses; the game's solve runs them meanwhile.
+
+## B103 (2026-10-17) — GENERATOR 27'S LOOK GIVEN IN THE WINDOW
+
+In the window (slot 22) on generator 27's home world — the seasons' climate in the game's solve, the shipped rows read from
+the solve's own last climate — the owner: *"Looks ok."*
+
+1. **THE LOOK GIVEN** on the world the pins record (digest [0x6ac9_f81d_0b21_0db3, 0xd3b9_c08d_8919_5424], the sea 3 666 m),
+   which equals the bench world of B101 byte for byte in its heights, water, receivers, discharge and provinces.
+2. **THE STAND** stood 4.4 km inland of the stand rule's own (`window_stand`): the rule reads the 8 km rows only, and its
+   stand (76 m over the sea on the row) stood 240 m under the sea on the 16 m floor (registered). Hull 21 berthed 80 m away.
+3. **OWED, unanswered**: the star-locked body's interim (it keeps the temperature law), the generator's and the bins crate's
+   tests once, one local commit.
+
+**Example.** A walker on the new ground 305 m over the sea sees the belt's sea-facing slopes cut by valleys that the
+generator-26 world did not have.
+
+## B104 (2026-10-17) — THE 4 m LEVEL PARKED; THE WATER NEXT
+
+On the 4 m level's price (the owner: "4m level — does it cost much of compute?") and the recommendation to park it, the
+owner: *"Ok, agreed."*
+
+1. **THE 4 m LEVEL IS PARKED** (amends B99 item 2: it is not in the terrain base). MEASURED and ESTIMATED: a 4 m tile
+   20–48 s on one core, the work of a 16 m tile for a sixteenth of its area; the ring around a new place 58–150 tiles —
+   about 3–15 minutes of the shard's terrain cores and 17–45 MB to the client at each place a player first visits; a whole
+   planet about 17 core-years and 8 TB, so never solved ahead. Its lawful gain on this planet: 0.07 m RMS on the hills and
+   0.21 m on the mountain with the soil law; the comb with the river law alone.
+2. **THE 16 m GROUND STAYS THE FINEST SHAPE.** Digging and building work on the volume's own cells. The fine look near the
+   eye (small chutes, rock texture) comes from the surface look (textures, normal detail), which costs no solve and no
+   download. The 4 m level returns only with a lawful rock form (ledges, talus, the rock-cover share) whose visible gain
+   is worth its price. Its bench code (`fine::l3`, `fine::refine::SoilLaw`, `planet_stand l3`) stays bench-only.
+3. **THE WATER NEXT** (B99 step 4: the solid pass, then the water fill), on the one-volume revision's answers.
+
+**Example.** A walker on the hills at hull 17 sees today's 16 m ground; nobody's arrival makes the planet's shard spend
+minutes on a 4 m ring that would add a few centimetres.
+
+## B105 (2026-10-17) — THE ONE-VOLUME REVISION RULED; THE GAME'S PARALLEL TRACK OPENS
+
+On the one-volume revision's questions (`docs/investigation/2026-10-15/one_volume_revision.md` §0.7), with G-OUTLETS
+counted on generator 27 (155 closed lakes, 0.29 % of the land; 1 009 spilling, 0.62 %, 77 of them ten nodes or more and
+100 m deep or more), the owner chose every recommendation:
+
+1. **Q1 (b) — EVERY STANDING WATER'S POINTS UNDER ITS LEVEL ARE OUTLETS**, read from the water word and bounded by the
+   smooth base's own contour, never by node squares: every lake, closed or spilling, keeps a floor and is filled. AMENDS
+   B79 item 3 (the ground's solid pass reads a water level).
+2. **Q2–Q10 AS RECOMMENDED**: Q2 the water map crosses with the tile (SL6 YES, about a tenth to a sixth more data a tile);
+   Q3 rivers at every level by one law, before the base freezes (a basin dug beside a river fills to its lowest joint; a
+   dig leaving a step over one cell is refused); Q4 the soil's depth by the published soil law; Q5 glacier ice above the
+   climate's ice line by the ice law; Q6 a built area stores its own ground, its water the newest world's, its edge at
+   the hillsides' own angle; Q7 a dig reaches every viewer by distance (amends B87/B88's session rows); Q8 caves solid
+   until a dig breaks in, a cave under land dry until a groundwater law exists; Q9 the shore's slide judged by the ground's
+   own line under a pixel, measured first; Q10 the far map from the 8 km water now, from the tiles' own average once a
+   planet is whole.
+3. **ONE LOCAL COMMIT** of generator 27 and the day's work once the copy's control passes; no push.
+4. **THE GAME'S PARALLEL TRACK OPENS NOW** (B72 item 2; amends B74's and B75's "not now"): its own worktree and session
+   from that commit, with copies of today's solved stores — the risk tests SPIKE-6a and SPIKE-10a first, then physics on
+   the terrain's solid cells, then the block record and the dig/place path. B99 STEPS 5–6 MOVE THERE (the edit system,
+   the frozen patch, standing, collision, delivery); this worktree keeps the terrain: step 4 (the volume and the water
+   fill), then the clouds and the weather (B35's weather step), on one contract — height, solid or empty, substance, water.
+
+**Example.** The 231 000 km² spilling lake on the home planet keeps its floor and stands filled at its level; in the
+other worktree a walker first stands on that floor by collision, not by a height rule.
+

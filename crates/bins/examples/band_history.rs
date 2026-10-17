@@ -165,7 +165,7 @@ fn main() {
     )
     .expect("the home planet solves");
     std::fs::write(format!("{dir}/index.txt"), &index).expect("the index");
-    let digest = vd_bins::solve_copy::artifact_of(&body, &words, &solved).digest();
+    let digest = vd_bins::solve_copy::artifact_of(&words, &solved).digest();
     println!(
         "THE HISTORY: {passes} passes in {:.0} s, a snapshot every {every} passes in {dir}; the copy's digest [{:#x}, {:#x}]",
         started.elapsed().as_secs_f64(),

@@ -7,7 +7,17 @@
 //! - `stands PLANET WORLD.art OUT_DIR`: three stands chosen by the world's own 25 km relief — the land node whose window
 //!   reads nearest Kansas's 46 m (a plain), Germany's 175 m (hills) and 1 500 m (a belt) — each one's 128 m tile solved by
 //!   the game's tile solve (`l1::solve_l1`), read by `relief_scales`' rule (the relief at 1 km and 5 km over land
-//!   windows) and drawn from the side by its camera (2 km up, 8° down, 60° wide).
+//!   windows) and drawn from the side by its camera (2 km up, 8° down, 60° wide);
+//! - `maps PLANET WORLD.art OUT_DIR TAG [LAT0 LAT1 LON0 LON1]`: the world as the rain bench's three maps (relief, rain,
+//!   rivers; optionally only a window between two latitudes and two east longitudes) and its readings;
+//! - `moon-with PLANET [cores]`: a bench reading, never a world — the home moon's small lattice solved by the game's
+//!   worker with PLANET's words, and its temperature rows read;
+//! - `diff PLANET A.art B.art`: two worlds of one body, the nodes that differ in each row field;
+//! - `lakes PLANET WORLD.art`: G-OUTLETS — every lake closed (no node passes water on) or spilling, with their areas;
+//! - `words PLANET`: the solve's words as the shard reads them from the charter;
+//! - `store-get PLANET OUT.art` / `store-put PLANET IN.art` (the store file named by `VD_REALM_STORE`): a stored world out
+//!   to a file under the key its own head names, or a solved world into the store under this build's key by the shard's
+//!   own writer and read back as the shard reads it.
 //!
 //! `cargo run --release -p vd-bins --example planet_stand -- solve 18348864443750092586 /tmp/p3.art 8`
 
@@ -1497,6 +1507,239 @@ fn print_berth(
     );
 }
 
+/// The rain bench's rain scale (`climate_bench`'s own): a logarithmic ramp from 10 mm/yr (pale sand) through 250 and
+/// 1 000 to 4 000 mm/yr (deep blue); the sea grey-blue.
+fn rain_colour(mm_yr: f64) -> [u8; 3] {
+    if mm_yr.is_nan() {
+        return [70, 80, 96];
+    }
+    const STOPS: [(f64, [f64; 3]); 6] = [
+        (10.0, [244.0, 236.0, 214.0]),
+        (100.0, [222.0, 196.0, 140.0]),
+        (250.0, [190.0, 200.0, 120.0]),
+        (600.0, [110.0, 170.0, 90.0]),
+        (1_500.0, [40.0, 120.0, 150.0]),
+        (4_000.0, [20.0, 40.0, 120.0]),
+    ];
+    let x = mm_yr.max(STOPS[0].0).log10();
+    let mut c = STOPS[STOPS.len() - 1].1;
+    for w in STOPS.windows(2) {
+        let (a, b) = (w[0].0.log10(), w[1].0.log10());
+        if x <= b {
+            let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+            c = [0, 1, 2].map(|k| w[0].1[k] + (w[1].1[k] - w[0].1[k]) * t);
+            break;
+        }
+    }
+    c.map(|v| v.round() as u8)
+}
+
+/// The year's mean temperature, °C, on one ramp: deep blue at −60, white at 0, red at 40, dark red from 100.
+fn temperature_colour(c: f64) -> [u8; 3] {
+    const STOPS: [(f64, [f64; 3]); 7] = [
+        (-60.0, [40.0, 40.0, 140.0]),
+        (-20.0, [90.0, 150.0, 220.0]),
+        (0.0, [240.0, 240.0, 240.0]),
+        (20.0, [240.0, 190.0, 90.0]),
+        (40.0, [210.0, 80.0, 40.0]),
+        (100.0, [120.0, 20.0, 20.0]),
+        (160.0, [60.0, 0.0, 0.0]),
+    ];
+    let x = c.clamp(STOPS[0].0, STOPS[STOPS.len() - 1].0);
+    let mut out = STOPS[STOPS.len() - 1].1;
+    for w in STOPS.windows(2) {
+        if x <= w[1].0 {
+            let t = (x - w[0].0) / (w[1].0 - w[0].0);
+            out = [0, 1, 2].map(|k| w[0].1[k] + (w[1].1[k] - w[0].1[k]) * t);
+            break;
+        }
+    }
+    out.map(|v| v.round() as u8)
+}
+
+/// The temperature row's class in °C (class 0 is 173 K, one class a kelvin).
+fn row_celsius(class: u8) -> f64 {
+    f64::from(vd_terrain::artifact::TEMPERATURE_FLOOR_DK) / 10.0 + f64::from(class) - 273.15
+}
+
+/// ★ ANY WORLD AS THE RAIN BENCH'S THREE MAPS (`maps`; `climate_bench art-maps` drew them for the home planet only): one
+/// even longitude–latitude picture each — `TAG_relief.png` (the ground by its height over the datum, shaded by a light
+/// from the north-west; the sea's floor in blues, shaded the same, so a world under one sea shows its floor),
+/// `TAG_rain.png` (the rain rows on the one rain scale), `TAG_rivers.png` (the discharge rows) and `TAG_temperature.png`
+/// (the year's mean temperature row) — and the readings. THE
+/// DATUM is the sea's level; a dry world (no sea) and a world under one sea have none, so their datum is the median
+/// ground, the caption says so, and the land takes sand and rock by height in place of the lowland's green.
+fn world_maps(
+    lattice: &MacroLattice,
+    radius_m: f64,
+    a: &Artifact,
+    out: &str,
+    tag: &str,
+    window: Option<[f64; 4]>,
+) {
+    const MAP_W: u32 = 1_440;
+    let [lat0, lat1, lon0, lon1] = window.unwrap_or([-90.0, 90.0, 0.0, 360.0]);
+    std::fs::create_dir_all(out).expect("the output folder");
+    let wet = |i: usize| {
+        (a.rows[i].receiver_facies >> vd_terrain::artifact::FACIES_SHIFT)
+            & vd_terrain::solve::FACIES_SEA
+            != 0
+    };
+    let sea_stated = a.sea_m != i16::MIN && a.sea_m != i16::MAX;
+    let datum = if sea_stated {
+        f64::from(a.sea_m)
+    } else {
+        let mut z: Vec<i16> = a.rows.iter().map(|r| r.z_m).collect();
+        z.sort_unstable();
+        f64::from(z[z.len() / 2])
+    };
+    let node_at = |lat: f64, lon: f64| {
+        let d = vd_core::glam::DVec3::new(
+            lat.to_radians().cos() * lon.to_radians().cos(),
+            lat.to_radians().cos() * lon.to_radians().sin(),
+            lat.to_radians().sin(),
+        );
+        vd_bins::drainage_gates::node_under(lattice, d) as usize
+    };
+    let h = ((f64::from(MAP_W) * (lat1 - lat0) / (lon1 - lon0)).round() as u32).max(1);
+    let (mut relief, mut rain, mut rivers, mut temperature) = (
+        image::RgbImage::new(MAP_W, h),
+        image::RgbImage::new(MAP_W, h),
+        image::RgbImage::new(MAP_W, h),
+        image::RgbImage::new(MAP_W, h),
+    );
+    let height = |lat: f64, lon: f64| f64::from(a.rows[node_at(lat, lon)].z_m) - datum;
+    let step = (lon1 - lon0) / f64::from(MAP_W);
+    let km_per_px = 2.0 * std::f64::consts::PI * radius_m / 1_000.0 * step / 360.0;
+    for y in 0..h {
+        let lat = lat1 - (f64::from(y) + 0.5) * (lat1 - lat0) / f64::from(h);
+        let dlon = (lat.to_radians().cos()).max(0.05);
+        for x in 0..MAP_W {
+            let lon = lon0 + (f64::from(x) + 0.5) * step;
+            let i = node_at(lat, lon);
+            let hm = f64::from(a.rows[i].z_m) - datum;
+            let dzx = (height(lat, lon + step) - height(lat, lon - step))
+                / (2.0 * km_per_px * 1_000.0 * dlon);
+            let dzy =
+                (height(lat + step, lon) - height(lat - step, lon)) / (2.0 * km_per_px * 1_000.0);
+            // A light from the north-west, 45° up; the slope exaggerated ten times on the globe, three in a window.
+            let ex = if window.is_some() { 3.0 } else { 10.0 };
+            let (nx, ny, nz) = (-dzx * ex, -dzy * ex, 1.0);
+            let l = (nx * nx + ny * ny + nz * nz).sqrt();
+            let shade = ((-nx * 0.5 + ny * 0.5 + nz * 0.707) / l).clamp(0.15, 1.0);
+            // A world with no stated sea takes sand and rock by height (its low ground is no green lowland).
+            let base: [f64; 3] = if wet(i) {
+                [50.0, 80.0, 130.0]
+            } else if !sea_stated {
+                if hm < 0.0 {
+                    [175.0, 150.0, 115.0]
+                } else if hm < 1_000.0 {
+                    [160.0, 125.0, 90.0]
+                } else if hm < 2_500.0 {
+                    [130.0, 105.0, 85.0]
+                } else {
+                    [200.0, 195.0, 190.0]
+                }
+            } else if hm < 300.0 {
+                [110.0, 140.0, 90.0]
+            } else if hm < 1_000.0 {
+                [150.0, 150.0, 100.0]
+            } else if hm < 2_500.0 {
+                [150.0, 120.0, 90.0]
+            } else {
+                [200.0, 195.0, 190.0]
+            };
+            relief.put_pixel(x, y, image::Rgb(base.map(|v| (v * shade).round() as u8)));
+            let r = &a.rows[i];
+            temperature.put_pixel(
+                x,
+                y,
+                image::Rgb(temperature_colour(row_celsius(r.temperature))),
+            );
+            let lo = decode_class(r.rain, 4) as f64;
+            let hi = decode_class(r.rain.saturating_add(1), 4) as f64;
+            rain.put_pixel(
+                x,
+                y,
+                image::Rgb(rain_colour(if wet(i) { f64::NAN } else { 0.5 * (lo + hi) })),
+            );
+            let q = f64::from(r.discharge_log);
+            let v = if wet(i) {
+                20.0
+            } else {
+                ((q - 60.0) * 2.0).clamp(0.0, 255.0)
+            };
+            rivers.put_pixel(
+                x,
+                y,
+                image::Rgb([(v * 0.3) as u8, (v * 0.6) as u8, v as u8]),
+            );
+        }
+    }
+    for (img, kind) in [
+        (&relief, "relief"),
+        (&rain, "rain"),
+        (&rivers, "rivers"),
+        (&temperature, "temperature"),
+    ] {
+        img.save(format!("{out}/{tag}_{kind}.png")).expect("saves");
+    }
+    let mut all_c: Vec<f64> = a.rows.iter().map(|r| row_celsius(r.temperature)).collect();
+    all_c.sort_by(f64::total_cmp);
+    let area_mean = all_c.iter().sum::<f64>() / all_c.len() as f64;
+    println!(
+        "{tag}: the year's mean temperature over every node: mean {area_mean:.1} °C, 10th {:.1}, median {:.1}, 90th {:.1}, coldest {:.1}, warmest {:.1}",
+        all_c[all_c.len() / 10],
+        all_c[all_c.len() / 2],
+        all_c[all_c.len() * 9 / 10],
+        all_c[0],
+        all_c[all_c.len() - 1]
+    );
+    let land: Vec<usize> = (0..a.rows.len()).filter(|&i| !wet(i)).collect();
+    println!(
+        "{tag}: the datum {} ({datum:.0} m over the ladder radius); the land {:.2} % of the nodes",
+        if sea_stated {
+            "the sea's level"
+        } else {
+            "the median ground (no sea stated)"
+        },
+        100.0 * land.len() as f64 / a.rows.len() as f64
+    );
+    if land.is_empty() {
+        return;
+    }
+    let mut land_rain: Vec<f64> = land
+        .iter()
+        .map(|&i| {
+            let r = &a.rows[i];
+            0.5 * (decode_class(r.rain, 4) as f64
+                + decode_class(r.rain.saturating_add(1), 4) as f64)
+        })
+        .collect();
+    land_rain.sort_by(f64::total_cmp);
+    let dry = land_rain.iter().filter(|&&p| p < 250.0).count();
+    let mut land_h: Vec<f64> = land
+        .iter()
+        .map(|&i| f64::from(a.rows[i].z_m) - datum)
+        .collect();
+    land_h.sort_by(f64::total_cmp);
+    let over =
+        |m: f64| 100.0 * land_h.iter().filter(|&&v| v > m).count() as f64 / land_h.len() as f64;
+    println!(
+        "{tag}: the land's rain median {:.0} mm/yr (10th {:.0}, 90th {:.0}), under 250 mm {:.1} %; its height median {:.0} m, 90th {:.0} m, top {:.0} m; over 1 / 2 / 3 km {:.1} / {:.1} / {:.1} %",
+        land_rain[land_rain.len() / 2],
+        land_rain[land_rain.len() / 10],
+        land_rain[land_rain.len() * 9 / 10],
+        100.0 * dry as f64 / land_rain.len() as f64,
+        land_h[land_h.len() / 2],
+        land_h[land_h.len() * 9 / 10],
+        land_h[land_h.len() - 1],
+        over(1_000.0),
+        over(2_000.0),
+        over(3_000.0)
+    );
+}
+
 /// Each whole land tile (all 64 nodes inland land) with its nodes' median 25 km relief.
 fn tile_medians(rel: &[Option<f32>], lattice: &MacroLattice) -> Vec<((u8, i32, i32), f32)> {
     let mut by_tile: std::collections::BTreeMap<(u8, i32, i32), Vec<f32>> =
@@ -1564,6 +1807,223 @@ fn main() {
                 .flatten()
                 .collect();
             summary("the whole land, 3 × 3 nodes (~25 km)", &mut r);
+        }
+        Some("maps") => {
+            let artifact = vd_bins::artifact_file::read(args.get(2).expect("WORLD.art"))
+                .expect("the world reads");
+            let window = (args.len() >= 9).then(|| {
+                [5, 6, 7, 8].map(|k| args[k].parse::<f64>().expect("LAT0 LAT1 LON0 LON1"))
+            });
+            world_maps(
+                &lattice,
+                body.radius_m(),
+                &artifact,
+                args.get(3).expect("OUT_DIR"),
+                args.get(4).expect("TAG"),
+                window,
+            );
+        }
+        Some("moon-with") => {
+            // ★ A BENCH READING, NEVER A WORLD: the home moon's small lattice solved by the game's worker with PLANET's
+            // words, so a climate rule is read in minutes before a planet's solve spends hours on it.
+            let cores: usize = args.get(2).map_or(8, |s| s.parse().expect("cores"));
+            let started = std::time::Instant::now();
+            let artifact = vd_bins::artifact_worker::run_solve_on(
+                &vd_bins::artifact_worker::SolveJob {
+                    body: vd_terrain::home::home_moon(),
+                    words: vd_bins::solve_words_of(&charter),
+                },
+                vd_terrain::par::Cores(cores),
+            )
+            .expect("the moon solves");
+            let mut c: Vec<f64> = artifact
+                .rows
+                .iter()
+                .map(|r| row_celsius(r.temperature))
+                .collect();
+            c.sort_by(f64::total_cmp);
+            println!(
+                "the home moon with Planet({planet})'s words, {:.1} s: the temperature rows {:.1} / {:.1} / {:.1} °C (coldest / median / warmest), the charter's surface {:?} mK",
+                started.elapsed().as_secs_f64(),
+                c[0],
+                c[c.len() / 2],
+                c[c.len() - 1],
+                vd_bins::solve_words_of(&charter).t_surface_mk
+            );
+        }
+        Some("diff") => {
+            // ★ TWO WORLDS OF ONE BODY, ROW FIELD BY ROW FIELD: how many nodes differ in each, and the sea.
+            let a = vd_bins::artifact_file::read(args.get(2).expect("A.art")).expect("A reads");
+            let b = vd_bins::artifact_file::read(args.get(3).expect("B.art")).expect("B reads");
+            assert_eq!(a.rows.len(), b.rows.len(), "one body's lattice");
+            let count = |f: &dyn Fn(&vd_terrain::artifact::Row) -> i32| {
+                a.rows
+                    .iter()
+                    .zip(&b.rows)
+                    .filter(|(x, y)| f(x) != f(y))
+                    .count()
+            };
+            println!(
+                "{} nodes; differ: height {}, water {}, receiver and facies {}, discharge {}, temperature {}, rain {}, dryness {}, province {}; the sea {} / {} m; digests [{:#x}, {:#x}] / [{:#x}, {:#x}]",
+                a.rows.len(),
+                count(&|r| i32::from(r.z_m)),
+                count(&|r| i32::from(r.water_m)),
+                count(&|r| i32::from(r.receiver_facies)),
+                count(&|r| i32::from(r.discharge_log)),
+                count(&|r| i32::from(r.temperature)),
+                count(&|r| i32::from(r.rain)),
+                count(&|r| i32::from(r.aridity)),
+                count(&|r| i32::from(r.province)),
+                a.sea_m,
+                b.sea_m,
+                a.digest()[0],
+                a.digest()[1],
+                b.digest()[0],
+                b.digest()[1]
+            );
+        }
+        Some("lakes") => {
+            // ★ G-OUTLETS (the one-volume revision §3.2, Q1): every lake — a connected patch of nodes whose water stands
+            // over their ground and which are not the sea — CLOSED when none of its nodes passes water on (no receiver),
+            // SPILLING when one does; their counts and areas.
+            use vd_terrain::artifact::{DRY_M, FACIES_SHIFT, RECEIVER_NONE};
+            let a = vd_bins::artifact_file::read(args.get(2).expect("WORLD.art"))
+                .expect("the world reads");
+            let n = a.rows.len();
+            let sea = |i: usize| {
+                (a.rows[i].receiver_facies >> FACIES_SHIFT) & vd_terrain::solve::FACIES_SEA != 0
+            };
+            let lake = |i: usize| {
+                let r = &a.rows[i];
+                !sea(i) && r.water_m != DRY_M && r.water_m > r.z_m
+            };
+            let mut seen = vec![false; n];
+            let (mut closed, mut spilling) = ((0usize, 0f64), (0usize, 0f64));
+            let mut biggest_spilling: Vec<(f64, usize)> = Vec::new();
+            // By kind (closed, spilling), size (1, 2–9, 10+ nodes) and deepest water (<1, 1–9, 10–99, 100+ m).
+            let mut classes = [[[0usize; 4]; 3]; 2];
+            for start in 0..n {
+                if seen[start] || !lake(start) {
+                    continue;
+                }
+                let (mut stack, mut area, mut nodes, mut spills) =
+                    (vec![start], 0f64, 0usize, false);
+                let mut deepest = 0i32;
+                seen[start] = true;
+                while let Some(i) = stack.pop() {
+                    area += lattice.area_m2(i as u32) as f64;
+                    nodes += 1;
+                    deepest = deepest.max(i32::from(a.rows[i].water_m) - i32::from(a.rows[i].z_m));
+                    spills |= a.rows[i].receiver_facies & RECEIVER_NONE == 0;
+                    for m in lattice.neighbours(i as u32) {
+                        if m != vd_terrain::macro_lattice::NO_NODE
+                            && !seen[m as usize]
+                            && lake(m as usize)
+                        {
+                            seen[m as usize] = true;
+                            stack.push(m as usize);
+                        }
+                    }
+                }
+                let size = [2usize, 10].iter().filter(|&&b| nodes >= b).count();
+                let deep = [1i32, 10, 100].iter().filter(|&&b| deepest >= b).count();
+                classes[usize::from(spills)][size][deep] += 1;
+                if spills {
+                    spilling.0 += 1;
+                    spilling.1 += area;
+                    biggest_spilling.push((area, nodes));
+                } else {
+                    closed.0 += 1;
+                    closed.1 += area;
+                }
+            }
+            biggest_spilling.sort_by(|x, y| y.0.total_cmp(&x.0));
+            let land: f64 = (0..n)
+                .filter(|&i| !sea(i))
+                .map(|i| lattice.area_m2(i as u32) as f64)
+                .sum();
+            println!(
+                "lakes: {} closed ({:.0} km², {:.3} % of the land), {} spilling ({:.0} km², {:.3} % of the land); the largest spilling: {:?}",
+                closed.0,
+                closed.1 / 1e6,
+                100.0 * closed.1 / land,
+                spilling.0,
+                spilling.1 / 1e6,
+                100.0 * spilling.1 / land,
+                biggest_spilling
+                    .iter()
+                    .take(5)
+                    .map(|(km2, nodes)| format!("{:.0} km² ({nodes} nodes)", km2 / 1e6))
+                    .collect::<Vec<_>>()
+            );
+            for (k, kind) in ["closed", "spilling"].iter().enumerate() {
+                for (z, size) in ["1 node", "2–9 nodes", "10+ nodes"].iter().enumerate() {
+                    println!(
+                        "  {kind}, {size}: deepest under 1 m {}, 1–9 m {}, 10–99 m {}, 100 m or more {}",
+                        classes[k][z][0], classes[k][z][1], classes[k][z][2], classes[k][z][3]
+                    );
+                }
+            }
+        }
+        Some("words") => println!("{:?}", vd_bins::solve_words_of(&charter)),
+        Some("store-get") => {
+            // ★ A STORED WORLD OUT TO A FILE, read under the key its own head names, so an older generation's world
+            // reads too (the "before" of a world change).
+            use vd_sim::io::Store as _;
+            let store = vd_bins::open_realm_store(&vd_bins::process_env(), RealmId::Planet(planet))
+                .expect("the store opens")
+                .expect("VD_REALM_STORE names a file");
+            let head = vd_sim::stub::built_store::decode_artifact_head(
+                &store
+                    .get(&vd_sim::stub::built_store::artifact_head_key())
+                    .expect("the store holds a world"),
+            )
+            .expect("the head decodes");
+            let artifact = vd_bins::artifact_store::read_artifact(&store, head.world_tag, &lattice)
+                .expect("the stored world reads")
+                .expect("the stored world is whole");
+            let out = args.get(2).expect("OUT.art");
+            vd_bins::artifact_file::write(out, &artifact).expect("the world writes");
+            let d = artifact.digest();
+            println!(
+                "the world under key {:#x} (this build's key {:#x}): digest [{:#x}, {:#x}], the sea {} m; written to {out}",
+                head.world_tag,
+                vd_terrain::artifact_world_tag(UNIVERSE),
+                d[0],
+                d[1],
+                artifact.sea_m
+            );
+        }
+        Some("store-put") => {
+            // ★ A SOLVED WORLD INTO A REALM'S STORE under this build's key, by the shard's own writer
+            // (`artifact_store::write_artifact`), then read back as the shard reads it at its boot.
+            let mut store =
+                vd_bins::open_realm_store(&vd_bins::process_env(), RealmId::Planet(planet))
+                    .expect("the store opens")
+                    .expect("VD_REALM_STORE names a file");
+            let artifact = vd_bins::artifact_file::read(args.get(2).expect("IN.art"))
+                .expect("the world reads");
+            let tag = vd_terrain::artifact_world_tag(UNIVERSE);
+            vd_bins::artifact_store::write_artifact(&mut store, tag, &artifact);
+            // The store commits behind the call, so a read in the same opening can still see the older head: closed and
+            // opened again, as a shard opens it at its boot.
+            drop(store);
+            let store = vd_bins::open_realm_store(&vd_bins::process_env(), RealmId::Planet(planet))
+                .expect("the store opens again")
+                .expect("VD_REALM_STORE names a file");
+            let back = vd_bins::artifact_store::read_artifact(&store, tag, &lattice)
+                .expect("the stored world reads")
+                .expect("the stored world is whole");
+            assert_eq!(
+                back.digest(),
+                artifact.digest(),
+                "the store gives back the world it took"
+            );
+            let d = artifact.digest();
+            println!(
+                "stored under key {tag:#x}: digest [{:#x}, {:#x}], the sea {} m",
+                d[0], d[1], artifact.sea_m
+            );
         }
         Some("stands") => {
             let world = args.get(2).expect("WORLD.art");
@@ -2447,25 +2907,41 @@ fn main() {
                 .iter()
                 .map(|&(dx, dy)| node(lx + dx, ly + dy))
                 .collect();
+            // ★ THE SOIL LAW (`VD_L3_SOIL=1`, ruling B99 step 2's bench): each 4 m point the gentler of the river law's
+            // slope and the soil law's (K_h Oregon's 0.003 m²/yr, ρr/ρs 2, S_c the level's tan 35°).
+            let soil = std::env::var_os("VD_L3_SOIL").map(|_| vd_terrain::fine::refine::SoilLaw {
+                kh_m2_yr: SOIL_KH_M2_YR,
+                rock_over_soil: ROCK_OVER_SOIL,
+            });
+            println!(
+                "the 4 m law: {}",
+                if soil.is_some() {
+                    "the river law and the soil law (each point the gentler slope)"
+                } else {
+                    "the river law alone (today's bench)"
+                }
+            );
             let started = std::time::Instant::now();
             let solved: Vec<Option<vd_terrain::fine::l3::L3Tile>> = std::thread::scope(|sc| {
                 let handles: Vec<_> = l3keys
                     .iter()
                     .map(|&k| {
-                        let (body, lattice, record, book2) = (&body, &lattice, &record, &book2);
+                        let (body, lattice, record, book2, soil) =
+                            (&body, &lattice, &record, &book2, &soil);
                         let sea_m = artifact.sea_m;
                         sc.spawn(move || {
                             let t0 = std::time::Instant::now();
-                            let t = solve_l3(body, lattice, sea_m, record, book2, k);
+                            let t = solve_l3(body, lattice, sea_m, record, book2, k, soil.as_ref());
                             println!(
                                 "  the 4 m tile ({}, {}): {:.1} s{}",
                                 k.tx,
                                 k.ty,
                                 t0.elapsed().as_secs_f64(),
                                 t.as_ref().map_or(" — DID NOT SOLVE".to_owned(), |t| format!(
-                                    ", {} points, {} passes, the law's detail median / largest {:.2} / {:.2} m",
+                                    ", {} points, {} passes, {:.1} % of them on the soil law, the law's detail median / largest {:.2} / {:.2} m",
                                     t.points,
                                     t.passes,
+                                    100.0 * t.on_soil as f64 / t.points.max(1) as f64,
                                     t.detail_cm[0] as f64 / 100.0,
                                     t.detail_cm[1] as f64 / 100.0
                                 ))
@@ -2687,7 +3163,7 @@ fn main() {
             println!("pictures in {out}");
         }
         _ => panic!(
-            "solve PLANET OUT.art [cores] | stands PLANET WORLD.art OUT_DIR | forms PLANET WORLD.art F,TX,TY OUT_DIR [EARTH.hgt…]"
+            "solve PLANET OUT.art [cores] | maps PLANET WORLD.art OUT_DIR TAG [LAT0 LAT1 LON0 LON1] | words PLANET | store-get PLANET OUT.art | store-put PLANET IN.art | stands PLANET WORLD.art OUT_DIR | forms PLANET WORLD.art F,TX,TY OUT_DIR [EARTH.hgt…]"
         ),
     }
 }

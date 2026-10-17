@@ -24,8 +24,8 @@
 //!   own is eight, ruling B62).
 //! - any case `@R` (last of all): the water routed R times a pass, the pass's sweeps shared among the routings — a
 //!   resolution (ruling B63 item 1 measured with it; the solve's own is four, ruling B65).
-//! - the candidate `+seasonsN` (2026-10-16, under measurement): the seasons' chain as the climate, re-solved every N passes,
-//!   the running sea every pass (`Laws::rain_every`).
+//! - `+seasons` / `+seasonsN`: the seasons' chain (the game's climate since generator 27, every 8th pass) re-solved every
+//!   pass / every N passes, the running sea every pass (`Laws::rain_every`); `-seasons` takes it out (generator 26's climate).
 //! - any case `^C` (just before `@R`): the climate and the running sea re-solved every C passes, counted in passes on
 //!   either axis — a resolution (ruling B68: the sea's stale spacing near the present; `Laws::climate_every`); without
 //!   it every pass, the solve's own since ruling B69 item 1 (`^20` is the game's spacing until then).
@@ -76,7 +76,7 @@ fn inner_relief_m(e_mm_yr: f64) -> f64 {
 }
 
 /// The release gate's pinned digest of the home planet's artifact (`crates/bins/tests/home_artifact_pin.rs`).
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6f92_ab73_2b8f_e622, 0xab3a_2d52_064b_b265];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6ac9_f81d_0b21_0db3, 0xd3b9_c08d_8919_5424];
 
 /// Whole metres of a height in sixteenths, rounded half up: the artifact's own rounding.
 fn metres(sixteenths: i32) -> i32 {
@@ -773,14 +773,10 @@ fn main() {
         assert_eq!(
             parts.next(),
             Some("phase2"),
-            "a case is phase2[-water][-lt][-craters][-wedge][-cell][-margins][-spread][-relief][-share][+pass|+flats|+cellK|+airy|+flex|+blendM|+scatterA][~fine][%K]"
+            "a case is phase2[-water][-lt][-craters][-wedge][-seasons][-cell][-margins][-spread][-relief][-share][+pass|+flats|+cellK|+airy|+flex|+blendM|+scatterA][~fine][%K]"
         );
         let mut laws = Laws::default();
         vd_bins::solve_copy::RAIN_RENORMALISED.store(false, std::sync::atomic::Ordering::Relaxed);
-        vd_bins::solve_copy::SEASONS.store(false, std::sync::atomic::Ordering::Relaxed);
-        *vd_bins::solve_copy::SEASON_STATE
-            .lock()
-            .expect("the season state") = None;
         if let Some(every) = climate_every {
             laws.climate_every = every;
         }
@@ -791,13 +787,10 @@ fn main() {
                 // Ruling B94 step 2: the rain belt renormalised (`solve_copy::RAIN_RENORMALISED`, a probe).
                 "rain" => vd_bins::solve_copy::RAIN_RENORMALISED
                     .store(true, std::sync::atomic::Ordering::Relaxed),
-                // Ruling B99 step 1 (generator 27's S3): the seasons' chain as the copy's climate.
-                "seasons" => {
-                    vd_bins::solve_copy::SEASONS.store(true, std::sync::atomic::Ordering::Relaxed)
-                }
-                // The seasons' chain every N passes, the sea every pass (`Laws::rain_every`, under measurement).
+                // Ruling B99 step 1 (generator 27's S3): the seasons' chain every pass (the game's: every 8th).
+                "seasons" => laws.rain_every = 1,
+                // The seasons' chain every N passes, the sea every pass (`Laws::rain_every`).
                 every if every.starts_with("seasons") => {
-                    vd_bins::solve_copy::SEASONS.store(true, std::sync::atomic::Ordering::Relaxed);
                     laws.rain_every = every["seasons".len()..]
                         .parse()
                         .expect("a pass count after seasons");
@@ -835,6 +828,8 @@ fn main() {
                 "lt" => laws.landscape_time = false,
                 "craters" => laws.craters_at_own_age = false,
                 "wedge" => laws.wedge = false,
+                // Generator 27's climate (rulings B99–B102) out: generator 26's, every pass.
+                "seasons" => laws.seasons = false,
                 // Generator 26's land laws (rulings B59–B61), each taken out in the land copy only.
                 "cell" => laws.land.cell = None,
                 "margins" => laws.land.margins = false,
@@ -842,7 +837,7 @@ fn main() {
                 "relief" => laws.land.relief = vd_bins::land_copy::Relief::None,
                 "share" => laws.land.share = false,
                 other => panic!(
-                    "a law taken out is water, lt, craters, wedge, cell, margins, spread, relief or share, not {other}"
+                    "a law taken out is water, lt, craters, wedge, seasons, cell, margins, spread, relief or share, not {other}"
                 ),
             }
         }
@@ -891,13 +886,13 @@ fn main() {
         }
         if let Some(dir) = &artifact_dir {
             let path = format!("{dir}/{case}.art");
-            match vd_bins::artifact_file::write(&path, &artifact_of(&body, &words, &solved)) {
+            match vd_bins::artifact_file::write(&path, &artifact_of(&words, &solved)) {
                 Ok(()) => println!("  the artifact: {path}"),
                 Err(e) => println!("  the artifact: could not write {path}: {e}"),
             }
         }
         if case == "phase2" {
-            let digest = artifact_of(&body, &words, &solved).digest();
+            let digest = artifact_of(&words, &solved).digest();
             println!(
                 "CONTROL the copy with every law as the game runs it: digest [{:#x}, {:#x}] {} the release gate's pin",
                 digest[0],

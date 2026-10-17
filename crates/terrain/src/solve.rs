@@ -3070,10 +3070,82 @@ fn route_for_pass(state: &mut MacroSolve, has_water: bool) -> RouteReport {
     report
 }
 
+/// ★ THE SEASONS' CLIMATE EVERY THIS MANY PASSES, THE RUNNING SEA EVERY PASS (ruling B101): the climate is one function of
+/// the ground (the gross moist stability, `crate::seasons::gill`), so its cadence is a resolution of the axis. MEASURED
+/// against every pass on the home planet: every global reading and the tracked plates within B47's tolerance; a first
+/// solve 63 min against 2 h 6 min on seven shared cores.
+pub const SEASONS_EVERY: usize = 8;
+
+/// ★ THE SOLVE'S ONE CLIMATE (ruling B101; the seasons design's §2 scope): a body with air reads the seasons' chain
+/// (`crate::seasons::chain`), warm from call to call and spun up at its first; an AIRLESS body keeps the temperature law
+/// of `crate::climate`, because no air carries its heat or its vapour (its rows and digest do not move). A STAR-LOCKED
+/// body with air (the charter's [`WORD_FLAG_TIDALLY_LOCKED`]: its day is its year, one face always to its star) has no
+/// seasonal sun the chain can read — its air carries heat from the day side to the night side, which no zonal law
+/// holds — so it keeps the temperature law too until its own law is built (registered in DEFERRED; the design named a
+/// refusal and stated that no such body stood in the world, but the home system holds one,
+/// `Planet(17313999383825979787)`).
+struct ClimateSource {
+    seasons: Option<crate::seasons::chain::SeasonState>,
+}
+
+impl ClimateSource {
+    /// The source for `words`' body. A body with air and no day of its own has no lawful seasonal sun in its charter: the
+    /// chain refuses it by name (none stands in the world today; the seasons design's §2).
+    fn of(
+        lattice: &crate::macro_lattice::MacroLattice,
+        words: &SolveWords,
+        cores: crate::par::Cores,
+    ) -> ClimateSource {
+        let air = words.p_surf_pa.is_some_and(|p| p > 0);
+        assert!(
+            !air || words.day_s.is_some(),
+            "the seasons' chain refuses a body with air and no day of its own: its charter states no seasonal sun"
+        );
+        let locked = words.flags & WORD_FLAG_TIDALLY_LOCKED != 0;
+        ClimateSource {
+            seasons: (air && !locked)
+                .then(|| crate::seasons::chain::SeasonState::new(lattice, cores.threads())),
+        }
+    }
+
+    /// The passes between two climates: [`SEASONS_EVERY`] for the chain, every pass for the airless law.
+    fn every(&self) -> usize {
+        if self.seasons.is_some() {
+            SEASONS_EVERY
+        } else {
+            1
+        }
+    }
+
+    /// The climate over `z` as it stands.
+    fn at(
+        &mut self,
+        body: &BodyDefinition,
+        lattice: &crate::macro_lattice::MacroLattice,
+        words: &SolveWords,
+        z: &[i32],
+        sea: Option<crate::climate::SeaView<'_>>,
+        cores: crate::par::Cores,
+    ) -> crate::climate::Climate {
+        match self.seasons.as_mut() {
+            Some(state) => crate::seasons::chain::seasonal_climate(
+                body,
+                lattice,
+                words,
+                z,
+                sea,
+                cores.threads(),
+                state,
+            ),
+            None => crate::climate::climate_on(body, lattice, words, z, sea, cores),
+        }
+    }
+}
+
 /// ★ THE FULL SOLVE (stage C3; the design's §4.11; ★ PHASE 2 OF THE GROUND STEP, rulings B39–B51): the land; the belts
 /// by their influx as critical wedges ([`crate::belts`]); the landscape's time; then the MIXED AXIS — each pass stamps
-/// the craters whose impact falls in it, re-solves the running sea and the climate over the relief as it stands (every
-/// pass, ruling B69 item 1), routes and follows the budget's own water ([`MacroSolve::follow_the_budget`]), sheds the talus, steps the
+/// the craters whose impact falls in it, re-solves the running sea (every pass, ruling B69 item 1) and the climate over
+/// the relief as it stands (the seasons' chain every [`SEASONS_EVERY`] passes on a body with air, ruling B101), routes and follows the budget's own water ([`MacroSolve::follow_the_budget`]), sheds the talus, steps the
 /// ice through the glacial epoch's share it holds, raises the belts and the even uplift by the pass's share of time,
 /// and runs `sub_sweeps` sweeps of the joint law with a rebound after each, then the peak law — and at the end the
 /// talus's remainder, the sea re-solved, the final routing, the ice's mask, the lakes and the sea's fixed point, and
@@ -3095,20 +3167,37 @@ pub fn solve_full(
     solve_full_on(body, words, schedule, crate::par::Cores::default())
 }
 
-/// [`solve_full`] ON THE SOLVE'S CORES (ruling B64): the first land, every pass's climate, routing, descent, sweeps and
-/// rebounds on `cores` threads — the same state, facies and report on any number of them, so the artifact's digest does
-/// not move. The passes stay one after another.
-///
-/// **Example.** The home planet's shard solves its planet on its share of the host's cores; the artifact it stores is
-/// the one a single core would have stored, byte for byte.
+/// [`solve_full_shipped_on`] without the climate its artifact ships.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn solve_full_on(
     body: &BodyDefinition,
     words: &SolveWords,
     schedule: Schedule,
     cores: crate::par::Cores,
 ) -> Option<(MacroSolve, Vec<u8>, FullReport)> {
+    let (state, facies, report, _) = solve_full_shipped_on(body, words, schedule, cores)?;
+    Some((state, facies, report))
+}
+
+/// [`solve_full`] ON THE SOLVE'S CORES (ruling B64): the first land, every pass's climate, routing, descent, sweeps and
+/// rebounds on `cores` threads — the same state, facies and report on any number of them, so the artifact's digest does
+/// not move. The passes stay one after another.
+///
+/// **Example.** The home planet's shard solves its planet on its share of the host's cores; the artifact it stores is
+/// the one a single core would have stored, byte for byte.
+///
+/// ★ THE CLIMATE THE ARTIFACT SHIPS (ruling B101) is the fourth value: the solve's own reading over the final ground —
+/// on a wet body the lakes' last reading (the final sea and ground, so the rows and the lakes agree), on a dry body one
+/// more reading by the solve's climate over the final ground with no sea, as every pass reads it. An airless body's law
+/// has no lapse, so its rows do not move.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn solve_full_shipped_on(
+    body: &BodyDefinition,
+    words: &SolveWords,
+    schedule: Schedule,
+    cores: crate::par::Cores,
+) -> Option<(MacroSolve, Vec<u8>, FullReport, crate::climate::Climate)> {
     let lattice = body.macro_lattice()?;
     let mut land = crate::land::initial_land_on(body, &lattice, &words.land(), cores);
     let n = lattice.node_count();
@@ -3127,8 +3216,8 @@ pub fn solve_full_on(
     let gravity = body.facts().gravity_mm_s2;
     // The craters: the impact record over the surface's own retention (ruling B2 step 2), each stamped in the pass its
     // impact falls in (ruling B37, the craters' own time), never one older than its ground's last raise.
-    let pre_climate =
-        crate::climate::climate_on(body, &lattice, words, &land.z, land.sea_view(), cores);
+    let mut source = ClimateSource::of(&lattice, words, cores);
+    let pre_climate = source.at(body, &lattice, words, &land.z, land.sea_view(), cores);
     let surface = crate::craters::Surface {
         crust: &land.crust,
         boundary_m: &land.boundary_m,
@@ -3171,8 +3260,8 @@ pub fn solve_full_on(
             .collect();
         crate::craters::apply_craters(&mut state.z, &lattice, &due, gravity);
         report.crater_record.extend_from_slice(&due);
-        // ★ THE RUNNING SEA (W7 step 2) over the CONNECTED ocean only (ruling B7 item 1), and the climate over the relief
-        // as it stands — both every pass (ruling B69 item 1).
+        // ★ THE RUNNING SEA (W7 step 2) over the CONNECTED ocean only (ruling B7 item 1) every pass (ruling B69 item 1),
+        // and the climate over the relief as it stands every [`ClimateSource::every`] passes (ruling B101).
         if let Some(sea) = crate::land::sea_level_connected_on(
             &lattice,
             &state.z,
@@ -3186,14 +3275,19 @@ pub fn solve_full_on(
             report.sea_reseeded |= sea.reseeded;
             report.sea_unsettled |= !sea.settled;
         }
-        let c: &crate::climate::Climate = climate.insert(crate::climate::climate_on(
-            body,
-            &lattice,
-            words,
-            &state.z,
-            has_water.then_some(state.sea_view()),
-            cores,
-        ));
+        if climate.is_none() || pass % source.every() == 0 {
+            climate = Some(source.at(
+                body,
+                &lattice,
+                words,
+                &state.z,
+                has_water.then_some(state.sea_view()),
+                cores,
+            ));
+        }
+        let c: &crate::climate::Climate = climate
+            .as_ref()
+            .expect("the climate stands from the first pass");
         state.rain.clone_from(&c.rain_mm_yr);
         report.routes.push(route_for_pass(&mut state, has_water));
         let mut basins = state.follow_the_budget(c, has_water);
@@ -3249,7 +3343,7 @@ pub fn solve_full_on(
     // The climate over the final relief, for the talus's angle and the ice's line.
     let climate = match climate {
         Some(c) => c,
-        None => crate::climate::climate_on(
+        None => source.at(
             body,
             &lattice,
             words,
@@ -3302,8 +3396,7 @@ pub fn solve_full_on(
         // the sea moves; the last reading is the one the solve keeps.
         let mut read: Option<(crate::climate::Climate, crate::lakes::Lakes)> = None;
         let mut again = |s: &MacroSolve| -> u128 {
-            let climate =
-                crate::climate::climate_on(body, &lattice, words, &s.z, Some(s.sea_view()), cores);
+            let climate = source.at(body, &lattice, words, &s.z, Some(s.sea_view()), cores);
             let lakes = crate::lakes::budget(s, &climate);
             let volume = lakes.report.volume_m3;
             read = Some((climate, lakes));
@@ -3344,11 +3437,25 @@ pub fn solve_full_on(
     };
     drop(budget);
     report.tree = state.follow_the_water(tree, &final_climate.runoff_mm_yr);
-    drop(final_climate);
+    // A dry body reads no sea, as every pass read it: its sea's word (`i32::MIN`) taken as the datum stood every node
+    // millions of metres up, and the lapse shipped the floor class (173 K) on every dry world with air until generator 27.
+    let shipped = if has_water && source.seasons.is_some() {
+        final_climate
+    } else {
+        drop(final_climate);
+        source.at(
+            body,
+            &lattice,
+            words,
+            &state.z,
+            has_water.then_some(state.sea_view()),
+            cores,
+        )
+    };
     report.belts = belts;
     report.raise_yr = raise_yr;
     let facies = state.facies(&ice_mask, report.coast_band, has_water);
-    Some((state, facies, report))
+    Some((state, facies, report, shipped))
 }
 
 /// ★ TWO HOLLOWS DUG INTO A SOLVED FIELD — compiled into the tests only, never into the game. Since phase 2 the wet moon
@@ -3539,9 +3646,10 @@ mod tests {
             ..Schedule::standard(HOME_SYSTEM_AGE_YR)
         };
         let (mut state, _, _) = crate::test_solves::solved(&moon, &words, schedule);
-        // The ground moves after the last routing (a block of nodes lifted, another cut), as a pass's sweeps move it.
+        // The ground moves after the last routing (a block of nodes lifted, another cut), as a pass's sweeps move it —
+        // in whole metres since generator 27 (MEASURED: on its solved moon a cut of 2.5 m left no hollow to fill).
         for (i, z) in state.z.iter_mut().enumerate().step_by(7) {
-            *z += [-40, 25][i & 1];
+            *z += [-40, 25][i & 1] * Z_STEPS_PER_M;
         }
         let lattice = state.lattice;
         let climate = crate::climate::climate_on(
@@ -4920,11 +5028,12 @@ mod tests {
             water_km3: 3_000_000,
             ..crate::home::home_solve_words()
         };
-        let (mut state, _, report) =
-            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
-        let lattice = moon.macro_lattice().expect("a lattice");
-        let climate =
-            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
+        // The solve's own climate over its final field (ruling B101: the seasons' chain on a body with air).
+        let (mut state, _, report, climate) = crate::test_solves::solved_shipped(
+            &moon,
+            &words,
+            Schedule::standard(HOME_SYSTEM_AGE_YR),
+        );
         let lakes = crate::lakes::budget(&state, &climate);
         assert_eq!(lakes.report, report.lakes, "the budget is the solve's own");
         assert_eq!((report.tree.cyclic, report.tree.shortfall), (0, 0));
@@ -4970,11 +5079,12 @@ mod tests {
             water_km3: 3_000_000,
             ..crate::home::home_solve_words()
         };
-        let (state, _, _) =
-            crate::test_solves::solved(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR));
-        let lattice = moon.macro_lattice().expect("a lattice");
-        let climate =
-            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
+        // The solve's own climate over its final field (ruling B101: the seasons' chain on a body with air).
+        let (state, _, _, climate) = crate::test_solves::solved_shipped(
+            &moon,
+            &words,
+            Schedule::standard(HOME_SYSTEM_AGE_YR),
+        );
         let lakes = crate::lakes::budget(&state, &climate);
         let mut again = state.clone();
         again.receiver = vec![NO_NODE; again.node_count()];

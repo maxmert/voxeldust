@@ -345,7 +345,27 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 ///
 /// The column rule for a chunk with NO artifact does not move, so the SEED-ONLY golden tables stand.
 /// `ARTIFACT_VERSION` stays 9: the artifact's rows keep their form and only their values change.
-pub const GENERATOR_VERSION: u32 = 26;
+///
+/// ★ VERSION 27 (2026-10-16; rulings B99 step 1, B100–B102, THE RAIN AND THE SEASONAL WINDS). THE SOLVE
+/// MOVES, so the artifact moves with it (`ARTIFACT_KEY_GENERATION` 28):
+///
+/// 1. **THE SEASONS' CLIMATE** (`seasons`; the design `docs/investigation/2026-10-15/rain_seasons_design.md`):
+///    a body with air reads the daily sun by season, the seasonal moist energy balance with the ice–albedo
+///    law, the cells' winds with the heated winds' departures by the gross moist stability (Neelin & Held
+///    1987), the vapour with the storms' mixing and the land's own evaporation, and the mountains' rain on
+///    the 8 km nodes. MEASURED before (generator 26): the land's rain under 250 mm on 37.7 % of the home
+///    planet's land, wet in the hollows and dry on the crests; after: the belts' windward faces wet, no
+///    desert (the desert laws postponed, B100).
+/// 2. **THE CLIMATE EVERY 8th PASS, THE SEA EVERY PASS** (`solve::SEASONS_EVERY`, ruling B101): the climate is
+///    one function of the ground, spun up before the first pass. An airless body keeps the temperature law.
+/// 3. **THE SHIPPED ROWS READ THE SOLVE'S OWN CLIMATE** (`solve::solve_full_shipped_on`): the worker computed the
+///    rows' temperature, rain and dryness again by the older law; now they are the solve's last reading over the
+///    final ground. A dry body reads no sea: its sea's word taken as the datum shipped 173 K on every node of every
+///    dry world with air (MEASURED on the desert world `Planet(17782101822166660494)`, a 350 K world).
+///
+/// The column rule for a chunk with NO artifact does not move, so the SEED-ONLY golden tables stand.
+/// `ARTIFACT_VERSION` stays 9: the artifact's rows keep their form and only their values change.
+pub const GENERATOR_VERSION: u32 = 27;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -371,13 +391,14 @@ pub fn declared_world_tag(universe_seed: u64) -> u64 {
 /// crust share and the capture, rulings B58–B62) and at 27 (generator 26 as pinned: a window preview
 /// of 2026-10-07 stored artifacts of an earlier generator-26 solve under 26, and the solve moved after
 /// it — the forearc's rock, four routings a pass, the climate and the sea every pass, rulings
-/// B63–B69) the solve moved and every stored artifact solves again.
+/// B63–B69) and at 28 (generator 27's seasons' climate, rulings B99–B102) the solve moved and every stored artifact solves
+/// again.
 ///
 /// **Example.** Generator 22 removes the shore law. The home planet's shard boots, finds its
 /// artifact stored under key generation 21, opens it and ships it at once; the client builds the
 /// chunks again under the new column rule, and nobody waits 205 s for a solve that would change
 /// nothing.
-pub const ARTIFACT_KEY_GENERATION: u32 = 27;
+pub const ARTIFACT_KEY_GENERATION: u32 = 28;
 
 /// The key a realm's stored artifact is written and read under: the artifact's own generation
 /// ([`ARTIFACT_KEY_GENERATION`]) folded with the universe seed.
@@ -433,7 +454,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 26,
+            GENERATOR_VERSION, 27,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -443,13 +464,12 @@ mod tests {
         );
     }
 
-    /// The artifact's key is its own generation: at 27 the solve moved (generator 26 as pinned, after the
-    /// preview of 2026-10-07 stored artifacts of an earlier generator-26 solve under 26), so every
-    /// artifact stored under 26 is refused, and it folds the seed like the declared tag.
+    /// The artifact's key is its own generation: at 28 the solve moved (generator 27's seasons' climate), so every
+    /// artifact stored under 27 is refused, and it folds the seed like the declared tag.
     #[test]
     fn the_artifact_key_is_its_own_generation_folded_with_the_seed() {
         assert_eq!(
-            ARTIFACT_KEY_GENERATION, 27,
+            ARTIFACT_KEY_GENERATION, 28,
             "bump by hand when the home planet's artifact pin moves, and say so"
         );
         assert_eq!(artifact_world_tag(2298), ARTIFACT_KEY_PIN);
@@ -480,9 +500,9 @@ mod tests {
         assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 6_435_761_202_656_745_901;
+    const DECLARED_PIN: u64 = 15_237_372_007_101_351_852;
 
-    /// The key the home world's artifacts are stored under: generation 26's, which equals generator
-    /// 26's declared tag (the solve moved at 26, so no artifact of an older key opens).
-    const ARTIFACT_KEY_PIN: u64 = 15_237_372_007_101_351_852;
+    /// The key the home world's artifacts are stored under: generation 28's (the solve moved at 28, generator 27's
+    /// seasons' climate, so no artifact of an older key opens).
+    const ARTIFACT_KEY_PIN: u64 = 9_071_234_423_133_970_475;
 }

@@ -499,6 +499,18 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     numerics (Anderson's acceleration, exact drag balance, the spin-up) no law change; NEXT the chain into the game's solve.
     ★ B102 (2026-10-16, "Let's not do (The coverage tests (HR5)) … it will take ages"): THE SEASONS MODULES' COVERAGE TESTS
     WAIT (HR5 owed, registered; before the base freezes or on the owner's word); one commit; generator 27 into the game.
+    ★ B103 (2026-10-17, the owner in the window on generator 27: "Looks ok"): THE LOOK GIVEN on the pinned world (equal to
+    B101's bench world in its ground); the stand moved 4.4 km inland (the stand rule reads the 8 km rows only; its stand
+    stood 240 m under the sea on the 16 m floor, registered); OWED: the star-locked body's interim, the tests, the commit.
+    ★ B104 (2026-10-17, the owner: "Ok, agreed"): THE 4 m LEVEL PARKED (amends B99 item 2; a tile 20–48 s, 3–15 min and
+    17–45 MB a new place, never planet-wide; its lawful gain here 0.07–0.21 m RMS); THE 16 m GROUND STAYS THE FINEST SHAPE
+    (the fine look near the eye from the surface look); the 4 m level returns only with a lawful rock form worth its price;
+    THE WATER NEXT (B99 step 4) on the one-volume revision's answers.
+    ★ B105 (2026-10-17, every recommendation): THE ONE-VOLUME REVISION RULED — Q1 (b) every standing water's points under
+    its level are outlets (amends B79 item 3); Q2 the water map crosses with the tile (SL6 YES); Q3–Q10 as recommended;
+    one local commit; THE GAME'S PARALLEL TRACK OPENS (amends B74/B75's "not now"): its own worktree — SPIKE-6a and
+    SPIKE-10a, physics on the solid cells, the block record and dig/place; B99 STEPS 5–6 MOVE THERE; this worktree keeps
+    step 4 (the volume and the water fill), then the clouds and the weather.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

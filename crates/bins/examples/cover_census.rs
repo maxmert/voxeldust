@@ -52,7 +52,8 @@ fn main() {
         pct(&mut t2, 0.5),
         pct(&mut t2, 0.9)
     );
-    let share = |f: &dyn Fn(usize) -> bool| 100.0 * (0..rain.len()).filter(|&i| f(i)).count() as f64 / n;
+    let share =
+        |f: &dyn Fn(usize) -> bool| 100.0 * (0..rain.len()).filter(|&i| f(i)).count() as f64 / n;
     println!(
         "rain under 250 mm {:.1} %, 250–650 {:.1} %, 650–1000 {:.1} %, over 1000 {:.1} %",
         share(&|i| rain[i] < 250.0),

@@ -754,13 +754,14 @@ mod tests {
             .count();
         assert_eq!(unheld, 0);
         // MEASURED on the bench (release, 2026-10-11): the rule picks (NegX, 7, 0), all 64 nodes land, 563 134 points,
-        // 3.4 s, the heights −0.8 … 80.8 m over the sea.
+        // 3.4 s, the heights −0.8 … 80.8 m over the sea; since generator 27 (the seasons' climate, 2026-10-17) it picks
+        // (NegX, 7, 2).
         assert_eq!(
             best.1,
             TileKey {
                 face: Face::NegX,
                 tx: 7,
-                ty: 0
+                ty: 2
             }
         );
     }

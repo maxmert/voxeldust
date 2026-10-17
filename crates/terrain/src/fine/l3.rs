@@ -159,6 +159,8 @@ pub struct L3Tile {
     pub metres: Vec<Option<f64>>,
     pub points: usize,
     pub passes: usize,
+    /// The points whose slope the soil law set in the last pass (nought with no soil law).
+    pub on_soil: usize,
     /// The law's detail added to today's 16 m ground: the median and the largest size, in centimetres.
     pub detail_cm: [i64; 2],
 }
@@ -174,6 +176,7 @@ pub fn solve_l3(
     record: &FlowRecord,
     book2: &FineBook,
     key: TileKey,
+    soil: Option<&crate::fine::refine::SoilLaw>,
 ) -> Option<L3Tile> {
     let shift2 = cells_per_node_shift(body, lattice, L3_RUNG)?;
     let shift4 = cells_per_node_shift(body, lattice, L2_RUNG)?;
@@ -216,12 +219,13 @@ pub fn solve_l3(
         &coarse,
         &drawn_at,
     )?;
-    let (h, passes) = steady(
+    let (h, passes, on_soil) = steady(
         &s,
         record.h.len(),
         Gf::from_f64(TAN_REPOSE),
         Gf::from_f64(STEADY_SETTLE_M),
         STEADY_BOUND,
+        soil,
     );
     let half = BUFFER_CELLS >> 1;
     let rside = ts + 2 * half;
@@ -240,6 +244,7 @@ pub fn solve_l3(
         metres: out.iter().map(|z| z.map(Gf::to_f64)).collect(),
         points: s.dirs.len(),
         passes,
+        on_soil,
         detail_cm: [
             detail.get(detail.len() >> 1).map_or(0, |&g| cm(g)),
             detail.last().map_or(0, |&g| cm(g)),

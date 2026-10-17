@@ -16,7 +16,7 @@
 use vd_terrain::BodyDefinition;
 use vd_terrain::artifact::Artifact;
 use vd_terrain::par::Cores;
-use vd_terrain::solve::{Schedule, SolveWords, solve_full_on};
+use vd_terrain::solve::{Schedule, SolveWords, solve_full_shipped_on};
 
 /// What the worker is asked: a body and its charter's words.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,23 +43,15 @@ pub fn run_solve(job: &SolveJob) -> Option<Artifact> {
 /// [`run_solve`] ON `cores` THREADS (ruling B64): the same artifact, byte for byte, on any number of them.
 #[must_use]
 pub fn run_solve_on(job: &SolveJob, cores: Cores) -> Option<Artifact> {
-    let lattice = job.body.macro_lattice()?;
-    let (state, facies, _) = solve_full_on(
+    // ★ THE CLIMATE THE SOLVE READ LAST OVER THE FINAL GROUND (ruling B101; before it, 2026-09-24, ruling B7 item 1, the
+    // climate over the connected ocean): the seasons' chain on a body with air, the same sea the solve's own budget read,
+    // so the artifact's climate bytes and its lakes agree.
+    let (state, facies, _, climate) = solve_full_shipped_on(
         &job.body,
         &job.words,
         Schedule::standard(job.words.age_yr),
         cores,
     )?;
-    // ★ THE CLIMATE OVER THE CONNECTED OCEAN (2026-09-24, ruling B7 item 1): the same sea the
-    // solve's own budget read, so the artifact's climate bytes and its lakes agree.
-    let climate = vd_terrain::climate::climate_on(
-        &job.body,
-        &lattice,
-        &job.words,
-        &state.z,
-        Some(state.sea_view()),
-        cores,
-    );
     Some(Artifact::of(
         &state,
         &facies,

@@ -2329,8 +2329,8 @@ mod tests {
             water_km3: 3_000_000,
             ..home_solve_words()
         };
-        let (state, _, report) =
-            crate::test_solves::solved(&moon, &words, Schedule::standard(words.age_yr));
+        let (state, _, report, climate) =
+            crate::test_solves::solved_shipped(&moon, &words, Schedule::standard(words.age_yr));
         let l = &report.lakes;
         assert!(l.runoff_total > 0);
         assert_eq!(l.runoff_total, l.evaporated_total + l.to_ocean + l.stranded);
@@ -2338,9 +2338,7 @@ mod tests {
             l.stranded, 0,
             "every hollow of a connected lattice meets another"
         );
-        let lattice = moon.macro_lattice().expect("a lattice");
-        let climate =
-            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
+        // The solve's own climate over its final field (ruling B101: the seasons' chain on a body with air).
         let lakes = budget(&state, &climate);
         assert_eq!(lakes.report, report.lakes, "the budget is the solve's own");
         for i in 0..state.node_count() {
