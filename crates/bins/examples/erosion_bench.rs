@@ -1704,6 +1704,12 @@ fn main() {
             r + 1.6,
             pixel,
             (chunk_m, lattice.node_m() * 8.0),
+            vd_terrain::artifact::handover_step_m(
+                &body,
+                &lattice,
+                vd_terrain::artifact::pyramid_levels(&lattice),
+                12,
+            ),
         )
         .unwrap_or(0.0);
         let named = vd_terrain::artifact::tiles_within_of(&lattice, dir, reach, 8);

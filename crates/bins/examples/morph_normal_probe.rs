@@ -72,6 +72,7 @@ fn main() {
         coast_parts: vd_bins::artifact_store::coast_parts_of(&artifact),
         low_m: drawn.0,
         high_m: drawn.1,
+        wind_parts: 0,
     });
     for (k, level) in artifact.pyramid.iter().enumerate().rev() {
         rx.accept(BulkMsg::ArtifactPyramid {

@@ -23,8 +23,9 @@ use vd_terrain::BodyDefinition;
 use vd_terrain::artifact::Artifact;
 use vd_terrain::solve::SolveWords;
 
-use crate::artifact_store::{read_artifact, write_artifact};
+use crate::artifact_store::{read_artifact, read_sea_wind, write_artifact, write_sea_wind};
 use crate::artifact_worker::{ArtifactWorker, SolveJob};
+use vd_terrain::sea_wind::SeaWind;
 
 /// Why the worker was started, for the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,12 +36,24 @@ pub enum SolveReason {
     AnotherBuild,
     /// No store to read.
     NoStore,
+    /// ★ The world is in the store but its sea's wind is not (ruling B109): the worker computes the wind alone.
+    SeaWind,
+}
+
+/// ★ WHAT A JOB LANDED (ruling B109): its wall time, and whether a new world landed with it (a solve) or only the wind
+/// of the world the store already held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Landed {
+    pub millis: u64,
+    pub new_artifact: bool,
 }
 
 /// The artifact's state on this shard.
 pub struct ArtifactBoot {
     world_tag: u64,
     artifact: Option<Arc<Artifact>>,
+    /// ★ THE SEA'S WIND (ruling B109), once computed or read; `None` while owed or where the world has none.
+    wind: Option<Arc<SeaWind>>,
     worker: Box<dyn ArtifactWorker>,
     /// Why the worker runs, while it runs.
     pub solving: Option<SolveReason>,
@@ -66,11 +79,27 @@ impl ArtifactBoot {
             None => SolveReason::NoStore,
             Some(store) => match read_artifact(store, world_tag, &lattice) {
                 Ok(Some(artifact)) => {
+                    // ★ THE SEA'S WIND (ruling B109): read beside the world, or computed once by the worker when the world
+                    // has one and the store does not hold it yet (a world solved before the wind was kept).
+                    let artifact = Arc::new(artifact);
+                    let wind = read_sea_wind(store, artifact.digest()).map(Arc::new);
+                    let owed = wind.is_none() & vd_terrain::sea_wind::blows(words, &artifact);
+                    if owed {
+                        let started = worker.start_wind(
+                            SolveJob {
+                                body: *body,
+                                words: *words,
+                            },
+                            Arc::clone(&artifact),
+                        );
+                        debug_assert!(started, "a fresh worker starts");
+                    }
                     return Ok(ArtifactBoot {
                         world_tag,
-                        artifact: Some(Arc::new(artifact)),
+                        artifact: Some(artifact),
+                        wind,
                         worker,
-                        solving: None,
+                        solving: owed.then_some(SolveReason::SeaWind),
                     });
                 }
                 Ok(None) => SolveReason::NeverSolved,
@@ -88,23 +117,42 @@ impl ArtifactBoot {
         Ok(ArtifactBoot {
             world_tag,
             artifact: None,
+            wind: None,
             worker,
             solving: Some(reason),
         })
     }
 
     /// ★ POLL, once a tick: when the worker answers, write the rows (if a store is here) and hold
-    /// the artifact. Returns the solve's wall time in milliseconds on the tick it lands.
-    pub fn poll(&mut self, store: Option<&mut dyn Store>) -> Option<u64> {
+    /// the artifact and its sea's wind. Returns what landed on the tick it lands.
+    pub fn poll(&mut self, store: Option<&mut dyn Store>) -> Option<Landed> {
         let done = self.worker.poll()?;
         self.solving = None;
         let done = done?;
-        if let Some(store) = store {
-            write_artifact(store, self.world_tag, &done.artifact);
+        let new_artifact = done.artifact.is_some();
+        if let Some(artifact) = done.artifact {
+            self.artifact = Some(Arc::new(artifact));
         }
-        let millis = done.millis;
-        self.artifact = Some(Arc::new(done.artifact));
-        Some(millis)
+        let digest = self.artifact.as_ref().map(|a| a.digest());
+        if let Some(store) = store {
+            if new_artifact && let Some(artifact) = self.artifact.as_ref() {
+                write_artifact(store, self.world_tag, artifact);
+            }
+            if let (Some(wind), Some(digest)) = (done.wind.as_ref(), digest) {
+                write_sea_wind(store, digest, wind);
+            }
+        }
+        self.wind = done.wind.map(Arc::new);
+        Some(Landed {
+            millis: done.millis,
+            new_artifact,
+        })
+    }
+
+    /// The sea's wind, once it is here (ruling B109).
+    #[must_use]
+    pub fn wind(&self) -> Option<&Arc<SeaWind>> {
+        self.wind.as_ref()
     }
 
     /// The artifact, once it is here.
@@ -149,10 +197,16 @@ mod tests {
         assert_eq!(boot.solving, Some(SolveReason::NeverSolved));
         assert!(boot.solving());
         assert!(boot.artifact().is_none());
-        let millis = boot
+        let landed = boot
             .poll(Some(&mut store))
             .expect("the inline worker answered");
-        assert_eq!(millis, 0);
+        assert_eq!(
+            landed,
+            Landed {
+                millis: 0,
+                new_artifact: true
+            }
+        );
         assert!(!boot.solving());
         let first = boot.artifact().expect("held").clone();
         assert_eq!(boot.poll(Some(&mut store)), None);

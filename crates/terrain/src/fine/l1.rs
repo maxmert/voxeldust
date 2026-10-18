@@ -561,6 +561,84 @@ fn fine_rounds_within(d: &Domain, u: &mut [Gf], h: &mut [Gf], bound: usize) -> u
     bound
 }
 
+/// ★ WHERE A TILE'S WATER ENDS ITS RIVERS (the one-volume revision §3.2; ruling B105 item 1, Q1 (b)): the rule the
+/// domain's outlets follow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutletRule {
+    /// Today's (the world's FINE_VERSION 3): every point whose smooth base stands under the sea's level, the 8 km
+    /// rivers' exits at the rim, and the rim's lowest point where neither stands.
+    Today,
+    /// ★ EVERY STANDING WATER'S POINTS UNDER ITS LEVEL (B105 Q1 (b); bench only until the world move): each water spreads
+    /// from its own 8 km nodes through the points whose smooth base stands under its level — the sea at its level from
+    /// the ocean's nodes, each lake at its water word from its own nodes — so a shore follows the base's own contour,
+    /// never a node square, and a pocket under the sea's level no path joins to the ocean is no sea; a dry end node's
+    /// points under its own row are its floor; the 8 km rivers' exits at the rim stay.
+    StandingWater,
+}
+
+/// The outlets of `d` under [`OutletRule::StandingWater`]: the domain's own river exits (its outlets over the sea's
+/// level), each standing water's spread through the points under its level, and each dry end node's floor.
+#[must_use]
+pub fn standing_water_outlets(d: &Domain, artifact: &Artifact) -> Vec<bool> {
+    use crate::artifact::{DRY_M, FACIES_SHIFT};
+    let sea = i32::from(artifact.sea_m);
+    let n = d.dirs.len();
+    // Each domain node's standing water over the sea (the sea at nought, a lake at its word), or none; and whether it
+    // is a dry end (no receiver, no water).
+    let (mut level, mut dry_end) = (
+        Vec::with_capacity(d.nodes.len()),
+        Vec::with_capacity(d.nodes.len()),
+    );
+    for &k in &d.nodes {
+        let r = &artifact.rows[k as usize];
+        let is_sea = (r.receiver_facies >> FACIES_SHIFT) & crate::solve::FACIES_SEA != 0;
+        let lake = r.water_m != DRY_M && r.water_m > r.z_m;
+        level.push(if is_sea {
+            Some(Gf::ZERO)
+        } else if lake {
+            Some(Gf::from_i32(i32::from(r.water_m) - sea))
+        } else {
+            None
+        });
+        dry_end.push(!is_sea && !lake && r.receiver_facies & RECEIVER_NONE != 0);
+    }
+    // The river exits: today's outlets over the sea's level (the sea's own rule set the rest).
+    let mut out: Vec<bool> = (0..n)
+        .map(|p| d.outlet[p] && d.base[p] > Gf::ZERO)
+        .collect();
+    // Each distinct level spreads from its own nodes' points under it, through the points under it.
+    let mut levels: Vec<Gf> = level.iter().flatten().copied().collect();
+    levels.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    levels.dedup();
+    for lam in levels {
+        let mut seen = vec![false; n];
+        let mut stack: Vec<usize> = (0..n)
+            .filter(|&p| level[d.pnode[p] as usize] == Some(lam) && d.base[p] <= lam)
+            .collect();
+        for &p in &stack {
+            seen[p] = true;
+        }
+        while let Some(p) = stack.pop() {
+            out[p] = true;
+            for &q in d.graph.neighbours(p) {
+                let q = q as usize;
+                if !seen[q] && d.base[q] <= lam {
+                    seen[q] = true;
+                    stack.push(q);
+                }
+            }
+        }
+    }
+    // A dry end node's floor: its points whose base stands at or under its own row.
+    for (o, (&k, &b)) in out.iter_mut().zip(d.pnode.iter().zip(&d.base)) {
+        let k = k as usize;
+        if dry_end[k] && b <= d.node_z[k] {
+            *o = true;
+        }
+    }
+    out
+}
+
 /// A solved 128 m tile: the tile and half its buffer as `side × side` heights in quarter metres over the sea (rows of
 /// the tile's face chart from its north-west corner), and the readings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -579,11 +657,30 @@ pub fn solve_l1(
     artifact: &Artifact,
     key: TileKey,
 ) -> Option<L1Tile> {
-    let coarse = domain(body, lattice, artifact, COARSE_RUNG, key)?;
+    solve_l1_with(body, lattice, artifact, key, OutletRule::Today)
+}
+
+/// [`solve_l1`] under the outlet `rule` (the bench's [`OutletRule::StandingWater`]; the game's is [`OutletRule::Today`]
+/// until the world move).
+#[must_use]
+pub fn solve_l1_with(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    key: TileKey,
+    rule: OutletRule,
+) -> Option<L1Tile> {
+    let mut coarse = domain(body, lattice, artifact, COARSE_RUNG, key)?;
+    if rule == OutletRule::StandingWater {
+        coarse.outlet = standing_water_outlets(&coarse, artifact);
+    }
     let mut uc = coarse.ref_u0.clone();
     let mut hc = coarse.base.clone();
     let mut passes = rounds(&coarse, &mut uc, &mut hc, COARSE_ROUNDS);
-    let fine = domain(body, lattice, artifact, L1_RUNG, key)?;
+    let mut fine = domain(body, lattice, artifact, L1_RUNG, key)?;
+    if rule == OutletRule::StandingWater {
+        fine.outlet = standing_water_outlets(&fine, artifact);
+    }
     // The fine rises: the coarse start's where it read the node, else the first rise by the row.
     let mut u: Vec<Gf> = fine
         .refs

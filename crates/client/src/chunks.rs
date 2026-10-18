@@ -179,6 +179,43 @@ pub struct ChunkGeometry {
     /// P-8: on the main thread it cost two square roots a vertex in the harvest loop). Zero for an
     /// empty geometry.
     pub bounds: ([f32; 3], [f32; 3]),
+    /// ★ THE SEA'S SHEET on this chunk's own ground triangles (rulings B105 Q10, B106; slice S1): empty on a dry chunk.
+    pub sea: SeaSheet,
+    /// ★ BUILT BEFORE THE COAST MASK LANDED (slice S1): a chunk of a body with a sea built while its realm's coast mask
+    /// was still on its way holds no sea; the lane builds it again once the mask is here ([`ChunkLane::upgradable`]).
+    pub dry: bool,
+}
+
+/// ★ THE SEA'S SHEET OF A CHUNK (rulings B105 Q10, B106; slice S1 of `docs/investigation/2026-10-17/sea_look_design.md`):
+/// one water triangle for each ground triangle that reaches the sea, its points the ground vertices' own directions at
+/// the water's radius (ruling W18: one lattice, so the ground crosses the water only at the shore), each with its morph
+/// metre (the water rides its ground's morph) and the box every place the vertex stage can put it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SeaSheet {
+    /// Water points in metres, relative to the chunk's `origin_m`.
+    pub vertices: Vec<[f32; 3]>,
+    /// Each point's unit radial (its ground vertex's own direction): the flat water faces up.
+    pub radials: Vec<[f32; 3]>,
+    /// Each point's morph metre along its radial (ruling W18): the same water rule read at its ground's target.
+    pub morph_m: Vec<f32>,
+    /// The water triangles.
+    pub triangles: Vec<[u32; 3]>,
+    /// ★ THE WATER'S DEPTH at each point and at its morph target, metres (ruling B109): its radius less its ground
+    /// vertex's, nought at a dry edge point. The medium's law colours the water by it.
+    pub depth_m: Vec<[f32; 2]>,
+    /// ★ THE FLOOR'S PAINT under each point: its ground vertex's surface word and height (the ground's own paint rule,
+    /// ruling B75 item 4), so the floor's colour shows through shallow water.
+    pub floor_surface: Vec<[u8; 4]>,
+    pub floor_height_m: Vec<f32>,
+    /// ★ THE SURFACE'S SLOPE VARIANCE at each point (Cox & Munk 1954, `0.003 + 0.00512·U`, U the year's wind speed of
+    /// the climate cells around it, m/s; ruling B109): the sun's glint reads its width from it.
+    pub slope_var: Vec<f32>,
+    /// The box of every point, its morph target and its sunk places (the ground's own rule).
+    pub bounds: ([f32; 3], [f32; 3]),
+    /// ★ THE FLOOR UNDER DEEP WATER (ruling W18): how many of the chunk's ground triangles, at the END of its list,
+    /// stand under the sea by more than the extractor's step at both ends of their morph — a floor no ray reaches. The
+    /// renderer leaves them out where it draws this sheet; the lane keeps them (the chunk still holds its ground).
+    pub floor_cut: u32,
 }
 
 /// The widest angle between a vertex's narrowed radial and the exact one: `f32`'s own rounding,
@@ -1423,6 +1460,9 @@ pub fn geometry_from(
     let mut morph: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
     let mut radials: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
     let mut heights: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
+    // Each ground vertex's radius and direction in the body's frame, for the sea's sheet (slice S1).
+    let mut ground_r: Vec<f64> = Vec::with_capacity(mesh.vertices.len());
+    let mut ground_dirs: Vec<vd_core::glam::DVec3> = Vec::with_capacity(mesh.vertices.len());
     let ladder_radius_m = body.ladder().radius_m();
     // The parent's shade at each vertex's target, where a parent triangle was hit (item 20).
     let mut shades: Vec<Option<DVec3>> = Vec::with_capacity(mesh.vertices.len());
@@ -1476,6 +1516,8 @@ pub fn geometry_from(
         let abs = vd_core::glam::DVec3::new(p[0], p[1], p[2]);
         let len = abs.length();
         let dir = abs / len;
+        ground_r.push(len);
+        ground_dirs.push(dir);
         let target_m = if coarser == key.rung {
             len
         } else {
@@ -1553,8 +1595,17 @@ pub fn geometry_from(
             })
             .collect()
     };
-    // ★ EVERY GROUND TRIANGLE IS DRAWN (2026-09-28, ruling B22): no water is drawn until the
-    // water fill, so no triangle is cut. Example: the belt's sea floor, 6.9 km down, shows dry.
+    // ★ THE SEA AGAIN (rulings B105 Q10, B106; slice S1): its sheet on the ground's own triangles, and the sea floor no
+    // ray can reach under it left out of the drawn ground (B22 drew every ground triangle; the dry sea floor showed).
+    let (sea, ground_triangles, dry) = sea_sheet(
+        body,
+        artifact,
+        key,
+        &mesh.triangles,
+        (&ground_dirs, &ground_r, &morph),
+        (&surface, &heights),
+        origin_m,
+    );
     let mut geometry = ChunkGeometry {
         key,
         origin_m,
@@ -1569,7 +1620,7 @@ pub fn geometry_from(
         morph_normals,
         surface,
         heights,
-        triangles: mesh.triangles,
+        triangles: ground_triangles,
         radials,
         bounds: ([0.0; 3], [0.0; 3]),
         skirt_start: 0,
@@ -1577,12 +1628,213 @@ pub fn geometry_from(
         built_on: None,
         rough,
         coarse,
+        sea,
+        dry,
     };
+    geometry.sea.bounds = sea_bounds(&geometry.sea, geometry.sink_m, geometry.stand_in_sink_m);
     let drop_m = skirt_drop_m(body, key.rung);
     let ceiling_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
     add_skirts(&mut geometry, drop_m, ceiling_m);
     geometry.bounds = geometry.measure_bounds();
     Some(geometry)
+}
+
+/// The 8 km node of `lattice` whose square holds the unit direction `dir` (the face, the inverse bend, the index — the
+/// same lookup the bins crate's `drainage_gates::node_under` makes). A drawing decision only: it reads which node's coast
+/// word a vertex takes, never the shape.
+fn node_under(lattice: &vd_terrain::macro_lattice::MacroLattice, dir: [f64; 3]) -> u32 {
+    let face = vd_seed::bend::face_of(dir);
+    let (t, s) = vd_seed::bend::face_coords(face, dir);
+    lattice.index(
+        face,
+        vd_seed::ladder::index_of(vd_seed::bend::unbend(t), lattice.edge),
+        vd_seed::ladder::index_of(vd_seed::bend::unbend(s), lattice.edge),
+    )
+}
+
+/// ★ THE WATER'S RADIUS OVER ONE GROUND VERTEX (ruling W18's rule, slice S1): the sea's level, held one placement step
+/// `q` off the drawn ground on the vertex's own side wherever the level would put it nearer — at least `r + q` over a
+/// vertex whose true ground stands under the sea, at most `r − q` under one that stands over it (or that holds no sea).
+/// The extractor places a drawn vertex only to a 128th of a cell (64 m at rung 13), so the side is the TRUE ground's and
+/// the picture follows it: a shelf 40 m deep never draws a dot of land at a far rung. ONE rule for the built sheet and
+/// for its morph target, so the water rides the land through every crossfade.
+#[must_use]
+pub fn water_radius_m(under: bool, sea_r: f64, ground_r: f64, q: f64) -> f64 {
+    if under {
+        sea_r.max(ground_r + q)
+    } else {
+        sea_r.min(ground_r - q)
+    }
+}
+
+/// ★ THE SEA'S SHEET AND THE GROUND THAT STILL SHOWS (rulings B105 Q10, B106; slice S1; ruling W18's lattice). For each
+/// ground vertex: its 8 km node's coast word (the shipped mask) says whether the sea may stand over it — the SEA's and
+/// LAND's nodes may, so the coast follows the fine ground and never a node square; a dry POCKET under the sea's level
+/// (ruling B7) and a LAKE's node (its own level comes with the water map, slice W2) hold no sea — and its TRUE ground (the
+/// chunk's own field at its direction) says whether it stands under the sea's level. A ground triangle gets a water
+/// triangle where one of its vertices holds the sea and one of them can stand within a step of the sea at either end of
+/// its morph; a ground triangle whose three vertices stand under the sea by more than the step at both ends of their
+/// morph goes to the END of the ground's list, counted in [`SeaSheet::floor_cut`]: the renderer leaves it out where it
+/// draws the sheet (no ray reaches it under an opaque sea; S2's clarity replaces the step with the water's own depth),
+/// and the lane keeps it (the chunk still holds its ground, so a chunk over the deep sea is never an empty one). Returns
+/// the sheet, the ground's triangles (the deep floor last), and whether the chunk was built before its realm's coast
+/// mask landed (no sea then; built again when it lands).
+///
+/// **Example.** A beach chunk at rung 4 on the coast stand: the sand 2 m over the sea holds no water; the bay's floor
+/// 6 m under it gets the sea at its level; a hollow behind the dune 1 m under the sea's level, on a LAND node, fills as a
+/// lagoon (the connection search of slice W2 decides it later); a salt pan inside a POCKET node 30 m under the sea stays
+/// dry.
+#[must_use]
+pub fn sea_sheet(
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    key: ChunkKey,
+    triangles: &[[u32; 3]],
+    (dirs, ground_r, morph): (&[vd_core::glam::DVec3], &[f64], &[f32]),
+    (surface, heights): (&[[u8; 4]], &[f32]),
+    origin_m: [f64; 3],
+) -> (SeaSheet, Vec<[u32; 3]>, bool) {
+    let none = |dry: bool| (SeaSheet::default(), triangles.to_vec(), dry);
+    if body.sea_m().is_none() {
+        return none(false);
+    }
+    let Some(artifact) = artifact else {
+        return none(false);
+    };
+    let Some(mask) = artifact.coast() else {
+        // A mask still on its way: no sea yet, and built again when it lands.
+        return none(artifact.head.coast_parts > 0);
+    };
+    if !artifact.wind_held() {
+        // ★ A WIND STILL ON ITS WAY (ruling B109): no sea yet, and built again when it lands.
+        return none(true);
+    }
+    let wind = sea_wind_reader(artifact.wind().map(AsRef::as_ref));
+    let Some(lattice) = body.macro_lattice() else {
+        return none(false);
+    };
+    let sea_r = body.sea_radius_m();
+    let q =
+        f64::from(vd_seed::ladder::cell_m(key.rung)) / vd_terrain::chunk::GAP_STEPS_PER_CELL as f64;
+    // Each vertex: whether the sea may stand over it, and whether its true ground stands under the sea's level. A drawn
+    // vertex farther than two steps from the level is on the side it is drawn on; nearer, the field decides.
+    let under: Vec<bool> = dirs
+        .iter()
+        .zip(ground_r)
+        .map(|(d, &r)| {
+            let dir = [d.x, d.y, d.z];
+            let may = matches!(
+                vd_terrain::artifact::coast_side(mask, node_under(&lattice, dir)),
+                Some(vd_terrain::artifact::Side::Sea | vd_terrain::artifact::Side::Land)
+            );
+            if !may {
+                return false;
+            }
+            if (r - sea_r).abs() > 2.0 * q {
+                return r < sea_r;
+            }
+            coarser_field_m(body, Some(artifact), dir, key.rung).unwrap_or(r) < sea_r
+        })
+        .collect();
+    let mut sheet = SeaSheet::default();
+    let mut index: Vec<u32> = vec![u32::MAX; dirs.len()];
+    for t in triangles {
+        let wet = t.iter().any(|&i| under[i as usize]);
+        let reach = t.iter().any(|&i| {
+            let (r, m) = (ground_r[i as usize], f64::from(morph[i as usize]));
+            r.min(r + m) <= sea_r + q
+        });
+        if !(wet & reach) {
+            continue;
+        }
+        let mut ids = [0u32; 3];
+        for (k, &i) in t.iter().enumerate() {
+            let g = i as usize;
+            if index[g] == u32::MAX {
+                index[g] = sheet.vertices.len() as u32;
+                let (d, r) = (dirs[g], ground_r[g]);
+                let own = water_radius_m(under[g], sea_r, r, q);
+                let target = water_radius_m(under[g], sea_r, r + f64::from(morph[g]), q);
+                sheet.vertices.push([
+                    (d.x * own - origin_m[0]) as f32,
+                    (d.y * own - origin_m[1]) as f32,
+                    (d.z * own - origin_m[2]) as f32,
+                ]);
+                sheet.radials.push([d.x as f32, d.y as f32, d.z as f32]);
+                sheet.morph_m.push((target - own) as f32);
+                let depth = |water: f64, ground: f64| (water - ground).max(0.0) as f32;
+                sheet
+                    .depth_m
+                    .push([depth(own, r), depth(target, r + f64::from(morph[g]))]);
+                sheet.floor_surface.push(surface[g]);
+                sheet.floor_height_m.push(heights[g]);
+                sheet.slope_var.push(cox_munk_slope_var(wind(d)));
+            }
+            ids[k] = index[g];
+        }
+        sheet.triangles.push(ids);
+    }
+    // The sea floor no ray reaches: three vertices under the sea by more than the step at both ends of their morph. Those
+    // triangles go to the end of the list, counted, and the renderer leaves them out where it draws the sheet.
+    let deep = |t: &[u32; 3]| {
+        t.iter().all(|&i| {
+            let g = i as usize;
+            let (r, m) = (ground_r[g], f64::from(morph[g]));
+            under[g] & (r.max(r + m) < sea_r - q)
+        })
+    };
+    let (cut, mut ground): (Vec<[u32; 3]>, Vec<[u32; 3]>) = triangles.iter().partition(|t| deep(t));
+    sheet.floor_cut = cut.len() as u32;
+    ground.extend(cut);
+    (sheet, ground, false)
+}
+
+/// ★ COX & MUNK (1954): THE SEA SURFACE'S SLOPE VARIANCE under a wind of `speed_mps` (their clean-surface fit,
+/// `σ² = 0.003 + 0.00512·U`, U at 12.5 m), the one law the sun's glint reads (ruling B109).
+#[must_use]
+pub fn cox_munk_slope_var(speed_mps: f64) -> f32 {
+    (0.003 + 0.00512 * speed_mps.max(0.0)) as f32
+}
+
+/// ★ THE WIND'S SPEED AT A DIRECTION, m/s: the bilinear reading of the year's wind over the climate cells around it
+/// (`vd_terrain::seasons::grid::ClimateGrid::reading`, the longitude wrapped, no cell edge drawn); nought with no wind.
+fn sea_wind_reader(
+    wind: Option<&vd_terrain::sea_wind::SeaWind>,
+) -> impl Fn(vd_core::glam::DVec3) -> f64 + '_ {
+    use vd_terrain::gf::Gf;
+    // The reading reads latitude and longitude alone, so the grid's radius is any one.
+    let grid = wind.map(|w| vd_terrain::seasons::grid::ClimateGrid::new(Gf::ONE, w.rows as usize));
+    move |d: vd_core::glam::DVec3| -> f64 {
+        let (Some(w), Some(grid)) = (wind, grid.as_ref()) else {
+            return 0.0;
+        };
+        grid.reading([Gf::from_f64(d.x), Gf::from_f64(d.y), Gf::from_f64(d.z)])
+            .iter()
+            .map(|(cell, weight)| {
+                weight.to_f64() * f64::from(w.speed_cms.get(*cell).copied().unwrap_or(0)) / 100.0
+            })
+            .sum()
+    }
+}
+
+/// The box of a sea sheet: every point, its morph target, and its places sunk by the rung's sink and the stand-in's
+/// (the ground's own rule, [`ChunkGeometry::measure_bounds`]); zero for an empty sheet.
+#[must_use]
+pub fn sea_bounds(sea: &SeaSheet, sink_m: f32, stand_in_sink_m: f32) -> ([f32; 3], [f32; 3]) {
+    if sea.vertices.is_empty() {
+        return ([0.0; 3], [0.0; 3]);
+    }
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for ((v, r), m) in sea.vertices.iter().zip(&sea.radials).zip(&sea.morph_m) {
+        for along in [0.0, *m, -sink_m, -stand_in_sink_m] {
+            for k in 0..3 {
+                let p = v[k] + r[k] * along;
+                lo[k] = lo[k].min(p);
+                hi[k] = hi[k].max(p);
+            }
+        }
+    }
+    (lo, hi)
 }
 
 /// The least a skirt hangs under a chunk's edge, in cells of its rung ([`skirt_drop_m`]).
@@ -1939,6 +2191,8 @@ pub struct ChunkLane {
     rough: BTreeSet<(RealmId, ChunkKey)>,
     /// ★ THE RESIDENT CHUNKS BUILT ON THE 128 m GROUND UNDER THE 16 m LEVEL (ruling B95).
     coarse: BTreeSet<(RealmId, ChunkKey)>,
+    /// ★ THE CHUNKS BUILT BEFORE THEIR REALM'S COAST MASK LANDED (slice S1): no sea yet; built again once it is here.
+    dry: BTreeSet<(RealmId, ChunkKey)>,
     upgrading: BTreeSet<(RealmId, ChunkKey)>,
     /// ★ THE ARTIFACT'S EPOCH AT WHICH A ROUGH OR COARSE CHUNK WAS LAST FOUND WAITING (ruling B95): whether it may be built
     /// again depends on its realm's artifact alone, so the check is made again only when that changed — never on every
@@ -1971,6 +2225,7 @@ impl ChunkLane {
             empty_frame: Vec::new(),
             rough: BTreeSet::new(),
             coarse: BTreeSet::new(),
+            dry: BTreeSet::new(),
             upgrading: BTreeSet::new(),
             waiting_at: BTreeMap::new(),
             empty_resident: BTreeMap::new(),
@@ -2380,7 +2635,8 @@ impl ChunkLane {
         });
     }
 
-    /// ★ WHETHER A CHUNK MAY BE BUILT AGAIN ON A FINER GROUND (ruling B86 item 7; ruling B95): not building again
+    /// ★ WHETHER A CHUNK MAY BE BUILT AGAIN ON A FINER GROUND (ruling B86 item 7; ruling B95; WITH ITS SEA, slice S1): not
+    /// building again
     /// already, and either resident on the rough ground with every 128 m tile it and its parents read here now (it is
     /// built again on the 128 m ground, or on the 16 m ground where that is here too), or resident on the 128 m ground
     /// under the 16 m level with every 16 m tile here now. So the login's loading screen, which waits for the rough
@@ -2388,13 +2644,22 @@ impl ChunkLane {
     #[must_use]
     pub fn upgradable(&self, realm: RealmId, key: ChunkKey) -> bool {
         let rough = self.rough.contains(&(realm, key));
-        if !(rough | self.coarse.contains(&(realm, key))) | self.upgrading.contains(&(realm, key)) {
+        let coarse = self.coarse.contains(&(realm, key));
+        let dry = self.dry.contains(&(realm, key));
+        if !(rough | coarse | dry) | self.upgrading.contains(&(realm, key)) {
             return false;
         }
         let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm))
         else {
             return false;
         };
+        // ★ A DRY CHUNK (slice S1) waits for its realm's coast mask; a dry chunk on the finished ground needs nothing more.
+        if dry & !(artifact.coast_held() & artifact.wind_held()) {
+            return false;
+        }
+        if !(rough | coarse) {
+            return true;
+        }
         body.macro_lattice().is_some_and(|lattice| {
             std::iter::once(key).chain(parent_keys(body, key)).all(|k| {
                 !artifact.is_rough(&lattice, k) && (rough || !artifact.is_coarse(&lattice, k))
@@ -2406,7 +2671,10 @@ impl ChunkLane {
     /// until the new one lands in its place. Nothing for a chunk [`ChunkLane::upgradable`] refuses; a chunk found waiting
     /// is asked again only when its realm's artifact changed.
     pub fn upgrade(&mut self, realm: RealmId, key: ChunkKey, priority: u32) {
-        if !(self.rough.contains(&(realm, key)) | self.coarse.contains(&(realm, key))) {
+        if !(self.rough.contains(&(realm, key))
+            | self.coarse.contains(&(realm, key))
+            | self.dry.contains(&(realm, key)))
+        {
             return;
         }
         let epoch = self.artifacts.get(&realm).map(|a| a.epoch);
@@ -2506,6 +2774,11 @@ impl ChunkLane {
             } else {
                 self.coarse.remove(&(ready.realm, ready.geometry.key));
             }
+            if ready.geometry.dry {
+                self.dry.insert((ready.realm, ready.geometry.key));
+            } else {
+                self.dry.remove(&(ready.realm, ready.geometry.key));
+            }
             self.waiting_at.remove(&(ready.realm, ready.geometry.key));
             if ready.geometry.triangles.is_empty() {
                 self.counters.empty_chunks += 1;
@@ -2533,6 +2806,7 @@ impl ChunkLane {
         self.empty_resident.remove(&(realm, key));
         self.rough.remove(&(realm, key));
         self.coarse.remove(&(realm, key));
+        self.dry.remove(&(realm, key));
         self.upgrading.remove(&(realm, key));
         self.waiting_at.remove(&(realm, key));
         let was_pending = self.pending.remove(&(realm, key)).is_some();
@@ -2889,9 +3163,9 @@ mod tests {
         assert_eq!(dry.snow_line(realm), None);
     }
 
-    /// ★ THE SEA FLOOR IS DRAWN (2026-09-28, ruling B22): no water is drawn until the water fill,
-    /// so a chunk under 20 km of sea keeps its ground triangles. THE CONTROL: the floor cut that
-    /// this rule replaces dropped every triangle of this same chunk.
+    /// ★ THE SEA FLOOR IS KEPT (2026-09-28, ruling B22; slice S1): a chunk under 20 km of sea built with no artifact (so no
+    /// coast mask) keeps every ground triangle and holds no sheet; with a sheet, its deep floor only moves to the end of
+    /// the list ([`sea_sheet`]).
     #[test]
     fn a_chunk_under_the_sea_draws_its_floor() {
         let wet = home_planet().with_sea_m(Some(20_000));
@@ -2900,6 +3174,285 @@ mod tests {
         assert!(
             !g.triangles.is_empty(),
             "the floor under 20 km of sea is drawn"
+        );
+        assert_eq!((g.sea.clone(), g.dry), (SeaSheet::default(), false));
+    }
+
+    /// A cache of the home planet's own lattice whose head announces one coast part; with `mask`, the part is here; with
+    /// `wind`, the head announces one wind part, and with its record that part is here (ruling B109).
+    fn coast_cache(
+        body: &BodyDefinition,
+        mask: Option<Vec<u8>>,
+        wind: Option<Option<vd_terrain::sea_wind::SeaWind>>,
+    ) -> ArtifactCache {
+        use crate::artifact_book::ArtifactReceiver;
+        use vd_wire::channels::BulkMsg;
+        let realm = planet();
+        let edge = body.macro_lattice().expect("a lattice").edge;
+        let mut rx = ArtifactReceiver::default();
+        rx.accept(BulkMsg::ArtifactHead {
+            realm,
+            world_tag: 9,
+            version: vd_terrain::artifact::ARTIFACT_VERSION,
+            edge,
+            digest: [5, 6],
+            tiles_per_edge: 1,
+            levels: 0,
+            sea_m: body.sea_m().expect("a sea") as i16,
+            coast_parts: 1,
+            low_m: -100,
+            high_m: 100,
+            wind_parts: u32::from(wind.is_some()),
+        });
+        if let Some(bits) = mask {
+            rx.accept(BulkMsg::ArtifactCoast {
+                realm,
+                part: 0,
+                parts: 1,
+                bits,
+            });
+        }
+        if let Some(record) = wind.flatten() {
+            rx.accept(BulkMsg::ArtifactWind {
+                realm,
+                part: 0,
+                parts: 1,
+                bytes: record.to_bytes(),
+            });
+        }
+        rx.book().get(realm).cloned().expect("a cache")
+    }
+
+    /// A year's wind of one speed over the smallest climate grid (two rows of four cells).
+    fn even_wind(speed_cms: u16) -> vd_terrain::sea_wind::SeaWind {
+        vd_terrain::sea_wind::SeaWind {
+            rows: 2,
+            east_cms: vec![0; 8],
+            north_cms: vec![0; 8],
+            speed_cms: vec![speed_cms; 8],
+        }
+    }
+
+    /// ★ COX & MUNK's SLOPE VARIANCE (ruling B109): the clean surface's floor with no wind, and its rise with the speed.
+    #[test]
+    fn the_slope_variance_is_cox_and_munks() {
+        assert_eq!(cox_munk_slope_var(0.0), 0.003);
+        assert_eq!(cox_munk_slope_var(-1.0), 0.003);
+        assert_eq!(cox_munk_slope_var(10.0), (0.003 + 0.0512) as f32);
+    }
+
+    /// ★ THE WATER'S RADIUS (slice S1, ruling W18's one-step hold): a point under the sea stands at the sea, or one step
+    /// over its ground where the ground stands higher; a point over the sea at the sea, or one step under its ground.
+    ///
+    /// **Example.** A bay's floor 6 m under the sea: its water point at the sea; the beach 2 m over it: its water point at
+    /// the sea, under the sand; a vertex the field calls wet 0.1 m over the level: one step over its own ground.
+    #[test]
+    fn the_water_stands_at_the_sea_and_one_step_off_its_ground() {
+        assert_eq!(water_radius_m(true, 100.0, 94.0, 0.5), 100.0);
+        assert_eq!(water_radius_m(true, 100.0, 100.1, 0.5), 100.6);
+        assert_eq!(water_radius_m(false, 100.0, 102.0, 0.5), 100.0);
+        assert_eq!(water_radius_m(false, 100.0, 99.9, 0.5), 99.4);
+    }
+
+    /// ★ NO SHEET WHERE NOTHING SAYS SEA (slice S1): a dry body, a body with no artifact, a body with no macro lattice, and
+    /// a mask still on its way hold no sheet and keep every triangle; only the last says the chunk is built again.
+    ///
+    /// **Example.** The home moon holds no sea: no sheet. The home planet's head has landed and its coast mask has not:
+    /// the chunk is built dry and marked, and built again when the mask lands.
+    #[test]
+    fn a_chunk_holds_no_sheet_until_the_sea_and_its_mask_are_here() {
+        let key = ChunkKey {
+            face: Face::PosZ,
+            rung: 4,
+            x: 0,
+            y: 0,
+            z: 0,
+        };
+        let tris = [[0u32, 1, 2]];
+        let dirs = [vd_core::glam::DVec3::Z; 3];
+        let (r, m) = ([1.0f64; 3], [0.0f32; 3]);
+        let inputs = (&dirs[..], &r[..], &m[..]);
+        let paint = (&[[0u8; 4]; 3][..], &[0.0f32; 3][..]);
+        let wet = home_planet().with_sea_m(Some(3_666));
+        let waiting = coast_cache(&wet, None, None);
+        let nodes = 6 * (wet.macro_lattice().expect("a lattice").edge as usize).pow(2);
+        let sea_mask = vec![0x55; vd_terrain::artifact::coast_bytes(nodes)];
+        let held = coast_cache(&wet, Some(sea_mask.clone()), None);
+        // ★ The mask is here and the wind the head announced is not (ruling B109): built again when it lands.
+        let windless = coast_cache(&wet, Some(sea_mask), Some(None));
+        let unannounced = crate::surface::tests::tiny_cache(planet(), 3_666, None);
+        for (body, cache, dry) in [
+            (home_planet(), Some(&waiting), false),
+            (wet, None, false),
+            (wet.without_macro_lattice(), Some(&held), false),
+            (wet, Some(&waiting), true),
+            (wet, Some(&windless), true),
+            (wet, Some(&unannounced), false),
+        ] {
+            assert_eq!(
+                sea_sheet(&body, cache, key, &tris, inputs, paint, [0.0; 3]),
+                (SeaSheet::default(), tris.to_vec(), dry)
+            );
+        }
+    }
+
+    /// ★ THE SEA'S SHEET ON THE GROUND'S OWN TRIANGLES (slice S1, ruling W18): a water triangle where a vertex holds the
+    /// sea, each ground vertex one water point (shared between its triangles), a pocket's node dry, the morph read at the
+    /// ground's target, and the floor no ray reaches moved to the end of the ground's list and counted.
+    ///
+    /// **Example.** Six triangles near the coast stand at rung 4: a deep bay (sheet, floor cut), the bay's edge and the
+    /// beach (sheet), the dunes (no sheet), a salt pan in a pocket node on the far side of the planet (dry), and a deep
+    /// vertex whose morph target stands over the sea (sheet; its floor stays drawn).
+    #[test]
+    fn the_sheet_stands_on_the_grounds_own_triangles_and_cuts_only_the_deep_floor() {
+        use vd_core::glam::DVec3;
+        use vd_terrain::artifact::coast_bytes;
+        let body = home_planet().with_sea_m(Some(3_666));
+        let lattice = body.macro_lattice().expect("a lattice");
+        let sea_r = body.sea_radius_m();
+        let key = ChunkKey {
+            face: Face::PosZ,
+            rung: 4,
+            x: 0,
+            y: 0,
+            z: 0,
+        };
+        let q =
+            f64::from(vd_seed::ladder::cell_m(4)) / vd_terrain::chunk::GAP_STEPS_PER_CELL as f64;
+        // The coast stand's direction and its neighbours a few metres east; the pocket on the far side.
+        let d0 = DVec3::new(-0.932_881_8, -0.224_127_5, -0.281_954_6).normalize();
+        let east = DVec3::Z.cross(d0).normalize();
+        let near = |k: f64| (d0 + east * (k * 1e-6)).normalize();
+        let pocket = -d0;
+        let pan = |k: f64| (pocket + east * (k * 1e-6)).normalize();
+        let mut mask = vec![0x55u8; coast_bytes(6 * (lattice.edge as usize).pow(2))];
+        for k in 0..3 {
+            let p = node_under(&lattice, pan(f64::from(k)).to_array()) as usize;
+            mask[p / 4] = (mask[p / 4] & !(3 << (2 * (p % 4)))) | (2 << (2 * (p % 4)));
+        }
+        let cache = coast_cache(&body, Some(mask), Some(Some(even_wind(700))));
+        let dirs = [
+            near(0.0),
+            near(1.0),
+            near(2.0),
+            near(3.0),
+            near(4.0),
+            near(5.0),
+            near(6.0),
+            pan(0.0),
+            pan(1.0),
+            pan(2.0),
+            near(7.0),
+        ];
+        let r = [
+            sea_r - 50.0,
+            sea_r - 50.0,
+            sea_r - 50.0,
+            sea_r + 0.1,
+            sea_r + 30.0,
+            sea_r - 0.1,
+            sea_r + 40.0,
+            sea_r - 50.0,
+            sea_r - 50.0,
+            sea_r - 50.0,
+            sea_r - 50.0,
+        ];
+        let mut morph = [0.0f32; 11];
+        morph[10] = 100.0;
+        let (a, b, c, d, e, f) = (
+            [0u32, 1, 2],
+            [1, 2, 5],
+            [3, 4, 5],
+            [3, 4, 6],
+            [7, 8, 9],
+            [0, 1, 10],
+        );
+        let origin = (d0 * sea_r).to_array();
+        // Each ground vertex's paint words: its index in the first byte, and its height.
+        let surface: Vec<[u8; 4]> = (0..11u8).map(|i| [i, 0, 0, 0]).collect();
+        let heights: Vec<f32> = (0..11).map(|i| -(i as f32)).collect();
+        let (sheet, ground, dry) = sea_sheet(
+            &body,
+            Some(&cache),
+            key,
+            &[a, b, c, d, e, f],
+            (&dirs, &r, &morph),
+            (&surface, &heights),
+            origin,
+        );
+        assert!(!dry);
+        assert_eq!(
+            sheet.triangles,
+            vec![[0, 1, 2], [1, 2, 3], [4, 5, 3], [0, 1, 6]],
+            "the bay, its edge, the beach and the rising floor; the dunes and the pocket none"
+        );
+        assert_eq!(sheet.floor_cut, 1);
+        assert_eq!(ground, vec![b, c, d, e, f, a], "the deep bay's floor last");
+        // The bay's water stands at the sea; the bay's edge, wet 0.1 m under the level, one step over its ground; the
+        // beach, dry 0.1 m over it, one step under its ground; the dunes' foot at the sea, under its sand.
+        let at = |g: usize, radius: f64| {
+            let w = dirs[g] * radius - DVec3::from_array(origin);
+            [w.x as f32, w.y as f32, w.z as f32]
+        };
+        assert_eq!(sheet.vertices[0], at(0, sea_r));
+        assert_eq!(sheet.vertices[3], at(5, sea_r - 0.1 + q));
+        assert_eq!(sheet.vertices[4], at(3, sea_r + 0.1 - q));
+        assert_eq!(sheet.vertices[5], at(4, sea_r));
+        assert_eq!(sheet.radials[6], dirs[10].as_vec3().to_array());
+        // The rising floor's water point morphs to one step over its target, 50 m over the sea.
+        assert_eq!(sheet.morph_m[6], (50.0 + q) as f32);
+        assert_eq!(sheet.morph_m[0], 0.0);
+        // ★ THE DEPTH AND THE FLOOR (ruling B109): the bay 50 m deep at both ends; the dry beach point at the water's
+        // edge, nought; the rising floor's target one step deep; each point the paint of its own ground vertex.
+        assert_eq!(sheet.depth_m[0], [50.0, 50.0]);
+        assert_eq!(sheet.depth_m[4], [0.0, 0.0]);
+        assert_eq!(sheet.depth_m[6], [50.0, q as f32]);
+        assert_eq!(
+            sheet.floor_surface,
+            vec![
+                [0, 0, 0, 0],
+                [1, 0, 0, 0],
+                [2, 0, 0, 0],
+                [5, 0, 0, 0],
+                [3, 0, 0, 0],
+                [4, 0, 0, 0],
+                [10, 0, 0, 0]
+            ]
+        );
+        assert_eq!(sheet.floor_height_m[3], -5.0);
+        // ★ THE GLINT'S SLOPE VARIANCE from the even 7 m/s trade, at every point.
+        assert!(
+            sheet
+                .slope_var
+                .iter()
+                .all(|v| (v - cox_munk_slope_var(7.0)).abs() < 1e-6),
+            "{:?}",
+            sheet.slope_var
+        );
+    }
+
+    /// ★ THE SHEET'S BOX (slice S1): nought for no sheet; else every point, its morph target and its two sunk places.
+    #[test]
+    fn the_sheets_box_holds_its_points_their_targets_and_their_sinks() {
+        assert_eq!(
+            sea_bounds(&SeaSheet::default(), 1.0, 2.0),
+            ([0.0; 3], [0.0; 3])
+        );
+        let sheet = SeaSheet {
+            vertices: vec![[0.0, 0.0, 10.0], [4.0, 0.0, 10.0]],
+            radials: vec![[0.0, 0.0, 1.0]; 2],
+            morph_m: vec![3.0, -1.0],
+            triangles: vec![],
+            depth_m: vec![],
+            floor_surface: vec![],
+            floor_height_m: vec![],
+            slope_var: vec![],
+            bounds: ([0.0; 3], [0.0; 3]),
+            floor_cut: 0,
+        };
+        assert_eq!(
+            sea_bounds(&sheet, 2.0, 5.0),
+            ([0.0, 0.0, 5.0], [4.0, 0.0, 13.0])
         );
     }
 
@@ -2962,6 +3515,7 @@ mod tests {
             coast_parts: 0,
             low_m: drawn_of(&artifact).0,
             high_m: drawn_of(&artifact).1,
+            wind_parts: 0,
         });
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
             rx.accept(BulkMsg::ArtifactPyramid {
@@ -3076,6 +3630,7 @@ mod tests {
             coast_parts: 0,
             low_m: drawn_of(&artifact).0,
             high_m: drawn_of(&artifact).1,
+            wind_parts: 0,
         });
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
             rx.accept(BulkMsg::ArtifactPyramid {
@@ -3217,6 +3772,7 @@ mod tests {
             coast_parts: 0,
             low_m: drawn_of(&artifact).0,
             high_m: drawn_of(&artifact).1,
+            wind_parts: 0,
         });
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
             rx.accept(BulkMsg::ArtifactPyramid {
@@ -3499,6 +4055,7 @@ mod tests {
                 coast_parts: 0,
                 low_m: other.low_m,
                 high_m: other.high_m,
+                wind_parts: 0,
             });
             rx2.book().get(realm).cloned().expect("a cache")
         };
@@ -3543,6 +4100,7 @@ mod tests {
             coast_parts: 0,
             low_m: drawn_of(&artifact).0,
             high_m: drawn_of(&artifact).1,
+            wind_parts: 0,
         });
         half.accept(BulkMsg::ArtifactPyramid {
             realm,
@@ -4871,6 +5429,8 @@ mod tests {
             built_on: None,
             rough: false,
             coarse: false,
+            sea: SeaSheet::default(),
+            dry: false,
         };
         assert_eq!(wide.upload_bytes(), 70_000 * UPLOAD_VERTEX_BYTES + 12);
         wide.vertices.truncate(3);
@@ -5090,6 +5650,8 @@ mod tests {
             built_on: None,
             rough: false,
             coarse: false,
+            sea: SeaSheet::default(),
+            dry: false,
         };
         assert_eq!(empty.measure_bounds(), ([0.0; 3], [0.0; 3]));
         assert!(empty.morph_targets().is_empty());
@@ -5186,6 +5748,7 @@ mod tests {
             coast_parts: 0,
             low_m: drawn_of(&artifact).0,
             high_m: drawn_of(&artifact).1,
+            wind_parts: 0,
         });
         let head = rx.book().get(realm).cloned().expect("a head");
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
@@ -5276,6 +5839,8 @@ mod tests {
                 built_on: None,
                 rough: false,
                 coarse: false,
+                sea: SeaSheet::default(),
+                dry: false,
             };
             add_skirts(&mut g, 5.0, 2.0);
             g

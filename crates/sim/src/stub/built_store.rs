@@ -145,10 +145,12 @@ const ARTIFACT_PYRAMID: u8 = 6;
 const ARTIFACT_PYRAMID_PART: u8 = 7;
 /// The coast mask's parts (2026-09-22, ruling W10).
 const ARTIFACT_COAST_PART: u8 = 8;
-/// ★ THE FINE TILES' families (B2): the raw solves and the finished tiles, each a tile's parts. Append-only numbering:
-/// 11 is the next free tag.
+/// ★ THE FINE TILES' families (B2): the raw solves and the finished tiles, each a tile's parts. Append-only numbering.
 const FINE_RAW: u8 = 9;
 const FINE_FINISHED: u8 = 10;
+/// ★ THE SEA'S WIND (ruling B109): one row per artifact digest, the generator's own record. Append-only numbering: 12 is
+/// the next free tag.
+const SEA_WIND: u8 = 11;
 
 /// The artifact rows' tags — their own numbering, one schema each, append-only.
 mod art {
@@ -463,6 +465,17 @@ pub struct ArtifactCoastPart {
     pub parts: u32,
     /// The bits, one per fine node, [`COAST_PART_BYTES`] at most.
     pub bits: Vec<u8>,
+}
+
+/// ★ THE SEA WIND'S ROW (ruling B109): the year's surface wind the realm's shard computed once on the artifact of
+/// `digest`, kept so a later boot ships it with no second run of the chain. The sim never names the generator: the row is
+/// bytes it stores and ships.
+#[must_use]
+pub fn sea_wind_key(digest: [u64; 2]) -> Vec<u8> {
+    let mut k = vec![SEA_WIND];
+    k.extend_from_slice(&digest[0].to_be_bytes());
+    k.extend_from_slice(&digest[1].to_be_bytes());
+    k
 }
 
 /// The key of the artifact's head: the family tag alone.
@@ -787,7 +800,7 @@ mod tests {
         decode_artifact_coast_part, decode_artifact_head, decode_artifact_pyramid_index,
         decode_artifact_pyramid_part, decode_artifact_tile, encode_artifact_coast_part,
         encode_artifact_head, encode_artifact_pyramid_index, encode_artifact_pyramid_part,
-        encode_artifact_tile,
+        encode_artifact_tile, sea_wind_key,
     };
     use super::{
         BERTH_SCHEMA, BODY_SCHEMA, BlockStoreTuning, CHUNK_DELTA_SCHEMA, CHUNK_PYRAMID_SCHEMA,
@@ -851,6 +864,11 @@ mod tests {
         assert!(encoded.len() < vd_core::tlv::MAX_FIELD_BYTES);
         assert_eq!(decode_artifact_pyramid_part(&encoded), Ok(part));
         assert_eq!(artifact_head_key(), vec![4]);
+        // ★ The sea wind's row (ruling B109): its own family, then the digest's two words.
+        assert_eq!(
+            sea_wind_key([1, 2]),
+            vec![11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]
+        );
         assert_eq!(artifact_pyramid_key(), vec![6]);
         assert_eq!(artifact_tile_prefix(), vec![5]);
         assert_eq!(artifact_pyramid_part_prefix(), vec![7]);

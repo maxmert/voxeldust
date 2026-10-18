@@ -702,21 +702,25 @@ impl FineTiles for FineWork {
         // served a tile this realm does not name.
         let ctx = &self.ctx;
         let pixel_rad = vd_core::geometry::drawable_theta_min_rad();
-        let ground_m = vd_terrain::height::height_field_m(&ctx.body, &*ctx.artifact, dir, 0)
+        // ★ THE GROUND THE CLIENT CAN DRAW (2026-10-18; the macro ring's own rule, `artifact_source`): the drawn 128 m and
+        // 16 m ground stands up to the level's law off the 8 km field, and the client reads its horizon and its height
+        // over it, so the reach reads the horizon over the field less that law and the height over the field plus it.
+        let field_m = vd_terrain::height::height_field_m(&ctx.body, &*ctx.artifact, dir, 0)
             .unwrap_or(radial_m);
-        let relief_m = ctx
+        let law_m = ctx.body.fine_law_m(ctx.artifact.sea_m);
+        let banded = ctx
             .body
             .with_fine_band_m(self.head_band.0, self.head_band.1, self.head_band.2)
-            .unwrap_or(ctx.body)
-            .ground_range_m()
-            .1;
+            .unwrap_or(ctx.body);
+        let relief_m = banded.ground_range_m().1;
         let needs = |level: FineLevel| -> Vec<(FineName, u8)> {
             fine_needs(
                 level,
+                &banded,
                 &ctx.lattice,
                 dir,
                 radial_m,
-                (ground_m, ground_m),
+                (field_m - law_m, field_m + law_m),
                 relief_m,
                 pixel_rad,
             )

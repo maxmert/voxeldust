@@ -12189,6 +12189,45 @@ generation alone), so a body solves once per generation on a machine, not once p
     - 🟥 THE SEASONS' COVERAGE (HR5) — WAITS by ruling B102 (2026-10-16): `vd_terrain::seasons` (sun, grid, balance, wind,
       gill, vapour, orography, accel, chain) holds only its 16 module tests, not 100 % of its regions and branches; the
       terrain crate's coverage gate reports the misses. WHEN: before the base freezes (B99 step 7) or on the owner's word.
+    - 🟨 THE SEA HAS ITS LIGHT, NOT ITS WAVES — SLICES S1 AND S2 BUILT (rulings B105 Q10, B106–B109; 2026-10-18): the
+      sheet on each chunk's own ground triangles, coloured by the water's depth law over its floor's paint and glinting by
+      the wind's slope variance (`docs/investigation/2026-10-18/sea_light_design.md`). The waves as normals (S3, B107's
+      plane waves), the foam (S4) and near displacement (S5) are owed. WHEN: S3–S5, each on the owner's look.
+    - 🟨 THE CHAIN'S SURFACE WIND IS WEAK BESIDE EARTH'S — A READING (2026-10-18, `water_bench wind`): the year's mean
+      speed over the home planet's cells is 2.9 m/s at the median, 8.3 at the 95th percentile, 12.1 at most (1.9 at the
+      coast stand), where Earth's oceans hold about 7 m/s; the glint is narrower than an Earth sea's. Not tuned (B23,
+      B38). WHEN: the weather step (the weather list modulates the wind) or the desert laws' trades (B100).
+    - 🟨 THE SEA'S WIND COSTS A FIRST LOAD (2026-10-18): the shard runs the seasons' chain once on a stored world before
+      it ships the world (216 s on 12 idle threads; 812 s on the solve's share under another project's build), and the
+      first login on that world waits for it; stored after, read at once. A new world's first solve adds it. WHEN: the
+      advance calculation (B86 item 6) may run it ahead.
+    - 🟥 THE SEA'S WIND HAS PART OF ITS TESTS (HR5; 2026-10-18): written — the record's bytes and rounding
+      (`vd_terrain::sea_wind`), the wire's arm (`vd_wire`), the store's key (`vd_sim`), the sheet's depth, paint and slope
+      variance and the "wind on its way" case (`vd_client::chunks`); NOT written — `sea_wind`/`blows` on a body with air,
+      the client's `accept_wind`, the gateway's wind arm, the boot's wind job (`vd_bins`), the band table's sun row. None
+      RUN (B74). WHEN: before the base freezes or on the owner's word.
+    - 🟥 TWO LINTS IN `vd_sim::rlm`'s TESTS (found 2026-10-18, not from this work): `clippy::manual_range_patterns` at
+      `crates/sim/src/rlm.rs:3288` and `:3293` (`0 | 1 | 2 | 3`) fail `-D warnings` under clippy 1.94. WHEN: the next gate.
+    - 🟨 A HOLLOW UNDER THE SEA'S LEVEL ON A LAND NODE TAKES THE SEA — AN INTERIM (slice S1): the sheet reads the 8 km
+      node's coast word, so a dune hollow or a dry valley under the sea's level inside a LAND node holds the sea at its
+      level, joined to the sea or not (G-PIT-RASTER, slice W0: 0.70 km² in 48 pits around the coast stand). A lake's node
+      and a pocket's floor hold no sea, so THE LAKES ARE NOT DRAWN yet. The cure: the water map in each tile (slice W2;
+      B105 Q1, Q2), whose search fills only what joins its water, and each lake at its own level. WHEN: slice W2.
+    - 🟥 THE LANE'S REBUILD PATH HAS NO UNIT TEST (HR5; found 2026-10-18): `ChunkLane::upgradable` and `upgrade` (the
+      rough ground of B86 item 7, the 128 m ground under the 16 m level of B95, and S1's chunks built before their
+      realm's coast mask) — no test in `vd-client` reaches them. WHEN: before the base freezes (B99 step 7) or on the
+      owner's word.
+    - 🟨 THE LOADING SCREEN STAYS HIGH UP (seen 2026-10-18; its two reach defects CURED the same day, the status file):
+      300 km up the shard names 7 656 tiles of the 128 m level and solves them on demand (~6.5 s each, seven at a time,
+      about two hours), since nothing solves them ahead (B86 item 6's advance calculation, not built); the pieces stand on
+      the rough ground meanwhile. From 100 m and 30 km the screen now goes (90 s, 102 s). `VD_LOADING_SCREEN=0` takes the
+      screen out for pictures (a dev switch); the client logs what the screen waits for every 600 frames. WHEN: with the
+      advance calculation.
+    - 🟥 ONE MISSING ROW RELEASES A REALM'S GROUND (seen 2026-10-18): under load (four capture clients and a nine-core
+      test; several shards over their tick budget) one frame's scene held no row for the client's own planet, so the
+      terrain forgot the ladder ("the terrain forgets a realm's ladder") and released 1 271 + 896 pieces; the ground came
+      back over minutes. The cure: a realm's ground goes only when its row is absent past the row's stated bound (SL1
+      clause 6), never on one frame. WHEN: with T4's readings or the next frame-stability work.
     - 🟨 THE DESERT LAWS — POSTPONED by ruling B100 (2026-10-16; "it looks good enough", the game first): the desert's
       radiative sink (Charney 1975), the land's surface energy split and the saturation law after it, the trades' downward
       momentum mixing (Stevens et al. 2002), the storm belts' closure (design §11.4). MISSING, so the chain is too wet where

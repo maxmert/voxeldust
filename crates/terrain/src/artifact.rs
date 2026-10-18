@@ -1002,16 +1002,50 @@ fn asked_ring_m(
     pixel_rad: f64,
     step_m: f64,
 ) -> f64 {
-    let rung = tile_rung(lattice, levels, top_rung);
-    // ★ THE RING IS THE ONE THE CLIENT ASKS AT (ruling W17): the tier rule's own switch distance,
-    // never nearer than the floor the handover's own step sets. `step_m` is that step — the
-    // octaves the coarser rung drops plus [`field_step_m`] where the field changes under them —
-    // and a caller that states zero gets the ladder every earlier flight flew.
+    rung_ask_m(tile_rung(lattice, levels, top_rung), pixel_rad, step_m)
+}
+
+/// ★ A RUNG'S ASK EDGE, ONE HOME (ruling W17; the fine tiles too since 2026-10-18): the ring the client asks the rung
+/// out to — the tier rule's own switch distance, never nearer than the floor the rung's handover step sets (ruling T7
+/// rule 3), at the band's outer edge with the ask's slack. `step_m` is that step ([`handover_step_m`]); a caller that
+/// states zero gets the ladder every flight before W17 flew.
+///
+/// **Example.** On the home planet rung 9 hands the ground to the 8 km field's first pyramid level with a step of
+/// 1 620 m, so it switches at 704 km, not at the 445 km its 512 m cell alone sets, and the client asks it out to 906 km.
+#[must_use]
+pub fn rung_ask_m(rung: u8, pixel_rad: f64, step_m: f64) -> f64 {
     let tier = switch_m(rung, pixel_rad);
     let floor = switch_floor_m(step_m, pixel_rad);
     // The comparison is written out: `f64::max` is disallowed here (SL10 clause 4).
     let at = if floor > tier { floor } else { tier };
     at * ASK_HYSTERESIS_OUT * (1.0 + ASK_SLACK)
+}
+
+/// ★ THE STEP A RUNG'S HANDOVER MAKES, ONE HOME (ruling T7, W17): the octaves the coarser rung drops
+/// ([`crate::BodyDefinition::step_bound_m`]) plus the field's own step where its level changes under them
+/// ([`field_step_m`]). The client's ladder, the shard and the gateway read this one number for a rung's ask edge.
+///
+/// **Example.** The home planet's rung 9 → 10 handover: 1 620 m, nearly all of it the rows handing the ground to
+/// pyramid level 1.
+#[must_use]
+pub fn handover_step_m(
+    body: &crate::body::BodyDefinition,
+    lattice: &MacroLattice,
+    levels: u32,
+    rung: u8,
+) -> f64 {
+    body.step_bound_m(rung) + field_step_m(body, lattice, levels, rung)
+}
+
+/// ★ HOW MANY PYRAMID LEVELS AN ARTIFACT OF THIS LATTICE FOLDS: every level the lattice can halve to — the solve's own
+/// fold ([`Artifact::of`]'s pyramid), so a host that holds no head reads the same count.
+#[must_use]
+pub fn pyramid_levels(lattice: &MacroLattice) -> u32 {
+    let mut levels = 0u32;
+    while lattice.coarser(levels + 1).is_some() {
+        levels += 1;
+    }
+    levels
 }
 
 /// ★ THE WHOLE TILE RING, NO HORIZON (2026-10-01): the finest tile-reading rung's ask ring and the
@@ -1029,7 +1063,8 @@ pub fn tile_ring_m(
     pixel_rad: f64,
     step_m: f64,
 ) -> f64 {
-    asked_ring_m(lattice, levels, top_rung, pixel_rad, step_m) + 2.0 * lattice.node_m()
+    asked_ring_m(lattice, levels, top_rung, pixel_rad, step_m)
+        + ring_margin_m(lattice, levels, top_rung)
 }
 
 /// ★ HOW FAR THE TILES MUST REACH under an eye standing `radial_m` from the body's centre over
@@ -1068,16 +1103,28 @@ pub fn tile_reach_m(
     let asked = asked_ring_m(lattice, levels, top_rung, pixel_rad, step_m);
     let seen = reach_m(ground_m, floored_altitude_m(radial_m - ground_m), relief_m);
     let ring_m = if seen < asked { seen } else { asked };
-    ring_m + 2.0 * lattice.node_m()
+    ring_m + ring_margin_m(lattice, levels, top_rung)
+}
+
+/// ★ WHAT A RING'S LAST PIECE READS PAST THE RING (2026-10-18): the client asks a piece of the finest tile-reading rung
+/// when its column stands inside the ring, and the piece reads the rows across its whole width — one chunk of that rung
+/// along its diagonal — and its sixteen-node stencil two nodes past that. MEASURED before (the stencil alone): 100 m over
+/// the sea off the coast stand, rung-9 pieces 32 km wide at the ring's edge waited on the next 8 km tile for good, and the
+/// login's loading screen with them.
+fn ring_margin_m(lattice: &MacroLattice, levels: u32, top_rung: u8) -> f64 {
+    let rung = tile_rung(lattice, levels, top_rung);
+    let chunk_m = crate::chunk::CHUNK_EDGE as f64 * f64::from(vd_seed::ladder::cell_m(rung));
+    chunk_m * std::f64::consts::SQRT_2 + 2.0 * lattice.node_m()
 }
 
 /// ★ HOW FAR THE FINE TILES MUST REACH (the fine ground's way in, B2) under an eye standing `radial_m` from the body's
 /// centre over ground at `ground_m`: the coarsest rung that reads them (`top_rung`; rung 12 for the 128 m level, B83 item
 /// 2) out to its own ask ring — the tier rule's switch distance at the ask's outer edge and slack, as [`tile_reach_m`]
 /// reads the artifact's — bounded by how far the ground can be seen ([`reach_m`]); then ONE CHUNK OF THAT RUNG past it
-/// (`chunk_m`: a chunk at the ring's edge builds only once its coarser parents can, and a parent stands up to one chunk
-/// past its child) and one fine tile (`tile_m`) for the stencil. The shard names the fine tiles within this of the
-/// occupant's direction, nearest first.
+/// along its diagonal (`chunk_m` the chunk's edge: a chunk at the ring's edge builds only once its coarser parents can,
+/// and a parent stands up to one chunk's diagonal past its child) and one fine tile (`tile_m`) for the stencil. The shard
+/// names the fine tiles within this of the occupant's direction, nearest first. MEASURED with the edge alone (2026-10-18,
+/// 30 km over the coast stand): rung-11 pieces at the ring's edge waited on their rung-12 parents' tiles for good.
 ///
 /// MEASURED before the chunk's span was added (the first window stand, 2026-10-12): the reach was the seen ring and one
 /// tile (508 km); the rung-11 chunks at the ring's edge waited on rung-12 parents reading tiles 640–770 km out, never
@@ -1092,6 +1139,12 @@ pub fn tile_reach_m(
 /// is the lowest ground's distance from the centre (the horizon), `top_m` the highest's (the eye's least height); a host
 /// that reads no tile passes the band's ends, and its ring holds the client's.
 ///
+/// ★ THE RUNG'S OWN ASK EDGE (2026-10-18; the login's loading screen that never went): the ask reads [`rung_ask_m`]
+/// with the rung's handover step (`step_m`), as the client's ladder does. MEASURED before (the tier rule alone): the
+/// client asked rung 9 out to 704 km × the band and slack (its handover pays the field's 1 620 m step), the shard named
+/// the 128 m tiles only to 445 km × the same at rung 9's mean level, and from 30 km over the coast stand the rung-9
+/// pieces between the two waited on the rough ground for good — and the loading screen with them.
+///
 /// **Example.** A pilot stands on the home planet's belt: the ground is seen to about 450 km (the horizon and the
 /// tallest summit's own), so the shard names the 128 m tiles within about 770 km, nearest first; from 5 000 km up it
 /// names none.
@@ -1103,8 +1156,9 @@ pub fn fine_reach_m(
     radial_m: f64,
     pixel_rad: f64,
     (chunk_m, tile_m): (f64, f64),
+    step_m: f64,
 ) -> Option<f64> {
-    let asked = switch_m(top_rung, pixel_rad) * ASK_HYSTERESIS_OUT * (1.0 + ASK_SLACK);
+    let asked = rung_ask_m(top_rung, pixel_rad, step_m);
     let seen = reach_m(ground_m, floored_altitude_m(radial_m - ground_m), relief_m);
     let height = radial_m - top_m;
     let height = if height > 0.0 { height } else { 0.0 };
@@ -1113,7 +1167,7 @@ pub fn fine_reach_m(
     }
     let across = (asked * asked - height * height).sqrt();
     // The comparison is written out: `f64::min` is disallowed here (SL10 clause 4).
-    Some((if seen < across { seen } else { across }) + chunk_m + tile_m)
+    Some((if seen < across { seen } else { across }) + chunk_m * std::f64::consts::SQRT_2 + tile_m)
 }
 
 /// ★ THE FINE TILES OF `level` A VIEW READS, EACH WITH THE FINEST MEAN LEVEL IT READS THEM AT (rulings B86 item 3 and
@@ -1124,11 +1178,20 @@ pub fn fine_reach_m(
 /// distance from the centre under the eye (the shard reads its artifact; the gateway, which reads no tile, passes the
 /// lowest ground, so its reach holds the shard's), `relief_m` the tallest ground over the radius.
 ///
+/// `body` states each rung's handover step ([`handover_step_m`] on the lattice's own pyramid count), so each reach is the
+/// rung's own ask edge, the client's.
+///
 /// **Example.** A pilot 10 m over the home belt reads the tiles within ~217 km whole (level 0), out to ~368 km from level
 /// 1, and the rest of the ring to ~770 km as their coarse copies only.
 #[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the level, the body and its lattice, and the eye over its ground: a struct here would be a second home \
+              for numbers the shard and the gateway already hold apart"
+)]
 pub fn fine_needs(
     level: crate::fine::level::FineLevel,
+    body: &crate::body::BodyDefinition,
     lattice: &MacroLattice,
     dir: [f64; 3],
     radial_m: f64,
@@ -1138,6 +1201,7 @@ pub fn fine_needs(
 ) -> Vec<((u8, u32, u32), u8)> {
     let tile_nodes = 1u32 << level.tile_nodes_shift();
     let tile_m = lattice.node_m() * f64::from(tile_nodes);
+    let levels = pyramid_levels(lattice);
     let reach = |k: u8| {
         let rung = level.rung() + k;
         let chunk_m = crate::chunk::CHUNK_EDGE as f64 * f64::from(vd_seed::ladder::cell_m(rung));
@@ -1148,6 +1212,7 @@ pub fn fine_needs(
             radial_m,
             pixel_rad,
             (chunk_m, tile_m),
+            handover_step_m(body, lattice, levels, rung),
         )
     };
     let top = level.top_rung() - level.rung();
@@ -1193,13 +1258,12 @@ pub fn fine_needs_of_head(
     else {
         return Vec::new();
     };
-    let (low, high) = body
-        .with_fine_band_m(low_m, high_m, sea_m)
-        .unwrap_or(*body)
-        .ground_range_m();
+    let banded = body.with_fine_band_m(low_m, high_m, sea_m).unwrap_or(*body);
+    let (low, high) = banded.ground_range_m();
     let r = body.radius_m();
     fine_needs(
         level,
+        &banded,
         &lattice,
         dir,
         radial_m,
@@ -2924,7 +2988,8 @@ mod tests {
         assert_eq!(horizon_m(r, -5.0), 0.0);
         let h20 = horizon_m(r, 20_000.0);
         assert!((h20 - 121_000.0).abs() < 1_000.0, "{h20}");
-        let margin = 2.0 * lattice.node_m();
+        // The stencil's two nodes and the width of the tile rung's last piece (`ring_margin_m`).
+        let margin = ring_margin_m(&lattice, 2, top);
         // ★ The reach is bounded by how far the ground can be SEEN: the horizon plus the relief's
         // own horizon (the ladder's skyline admits the peaks past the smooth horizon), never by
         // the smooth horizon alone.
@@ -2962,7 +3027,7 @@ mod tests {
         assert!(switch_m(top, pixel) > horizon_m(r, 5.0e6));
         assert_eq!(
             tile_reach_m(&lattice, 0, top, r, relief, r + 5.0e6, pixel, 0.0),
-            horizon_m(r, 5.0e6) + margin
+            horizon_m(r, 5.0e6) + ring_margin_m(&lattice, 0, top)
         );
     }
 
@@ -3072,7 +3137,7 @@ mod tests {
         let step = body.step_bound_m(rung) + field_step_m(&body, &lattice, levels, rung);
         let r = body.radius_m();
         let relief = body.relief_bound_m(0);
-        let margin = 2.0 * lattice.node_m();
+        let margin = ring_margin_m(&lattice, levels, top);
         let eye = r + 863.0;
         let floor = eye - 3_283.0;
         let over_radius = tile_reach_m(&lattice, levels, top, r, relief, eye, pixel, step);

@@ -1441,7 +1441,27 @@ impl BodyDefinition {
     #[must_use]
     pub fn with_fine_band_m(self, low_m: i32, high_m: i32, sea_m: i16) -> Option<BodyDefinition> {
         let octaves = self.fine_relief_bound();
-        let law = match self
+        self.band_with(
+            low_m,
+            high_m,
+            crate::units::greater(octaves, self.fine_law(sea_m)),
+        )
+    }
+
+    /// ★ HOW FAR THE FINE GROUND MAY STAND OFF ITS NODE'S ROW (ruling B83 item 3), in metres: the 128 m level's law,
+    /// `tan 35°` times the node's half-diagonal, where the level applies (the head states a sea), nought where it does
+    /// not. A host that reads the 8 km field under an eye reads the drawn ground no lower than the field less this.
+    ///
+    /// **Example.** On the home planet 4 055 m: the shard's tile ring reads an eye 100 m over the sea as up to 4.2 km
+    /// over the drawn sea floor, so its ring holds every piece the client asks.
+    #[must_use]
+    pub fn fine_law_m(&self, sea_m: i16) -> f64 {
+        crate::units::metres_of_q28(self.fine_law(sea_m))
+    }
+
+    /// The 128 m level's law as a length (see [`BodyDefinition::fine_law_m`]).
+    fn fine_law(&self, sea_m: i16) -> Gi {
+        match self
             .macro_lattice()
             .filter(|_| crate::fine::read::applies(sea_m))
         {
@@ -1454,8 +1474,7 @@ impl BodyDefinition {
                 Gi::new(-(-m).floor().to_i64_floor()) << LENGTH_BITS
             }
             None => Gi::ZERO,
-        };
-        self.band_with(low_m, high_m, crate::units::greater(octaves, law))
+        }
     }
 
     /// The band sized from the drawn ground's two words and the most a surface can stand off them (`fine`).

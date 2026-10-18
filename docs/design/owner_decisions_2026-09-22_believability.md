@@ -2672,3 +2672,79 @@ counted on generator 27 (155 closed lakes, 0.29 % of the land; 1 009 spilling, 0
 **Example.** The 231 000 km² spilling lake on the home planet keeps its floor and stands filled at its level; in the
 other worktree a walker first stands on that floor by collision, not by a height rule.
 
+## B106 (2026-10-17) — THE WATER'S LOOK FROM PROVEN OPEN SOURCE, PORTED INTO OUR OWN DRAWING; THE SEA FIRST
+
+The owner: *"can we take some open source, maybe bevy, shaders, that will draw realistic water right away? Of course
+remember about our ground rules and laws"* → on the study's recommendation, *"Please proceed"*.
+
+1. **THE METHODS, NOT A PLUGIN.** The look is ported from permissive sources into the game's own water drawing:
+   bevy-aqua (MIT / Apache-2.0; WGSL; Bevy 0.19) and GodotOceanWaves (MIT; the TMA spectrum, FFT cascades, foam from the
+   displacement's Jacobian, the Atlas GDC lighting with GGX). No plugin enters the game: one needs Bevy 0.19 (B75: the
+   Bevy move waits), draws flat bodies with one level each, and promises no flicker-free picture.
+2. **THE LAWS THAT HOLD.** WHERE water stands and at which level is the server's water map (B105 Q2; SL10's one-hop
+   diff); the shader never decides it. The water stays drawn on the ground's own lattice (W18), one shape at every
+   distance (W16), no flicker or shape change between rungs (B16, B22); the waves fade with distance to normals and then
+   to roughness by ONE rule with no rung in it; the temporal reconstruction gets the waves' own motion. THE WAVES ARE
+   LOOK ONLY: nothing in the game reads them (no buoyancy, no physics) until a law both hosts compute alike (W3, the
+   ocean's step 8o; F4: the GPU's floats differ between machines).
+3. **THE ORDER:** a short study of both codes against these laws (1–2 days) → the sea first in the window on today's
+   ocean (3–6 days; the old water drawing B22 switched off is measured again where it comes back) → the lakes and rivers
+   when slices W1–W2 deliver the water map; the basins' base level continues on the bench beside it.
+
+**Example.** From the coast stand the sea shows moving swell near the eye, its glints and the sky's reflection farther
+out, and a calm sheen at the horizon — and the coastline stays where the server's water map puts it as the walker flies
+away.
+
+## B107 (2026-10-17) — THE SEA'S LOOK: THE FOUR ANSWERS
+
+On the sea's look design (`docs/investigation/2026-10-17/sea_look_design.md`):
+
+1. **THE WIND FROM THE CLIMATE** (SL6 YES): the seasons' chain's surface wind for each climate cell ships with the
+   artifact (about 0.1 MB on the home planet); the weather list modulates it later.
+2. **THE WAVES' DOMAIN — the owner: "What will produce the best quality please, but we should not use any seams — only
+   physics, only laws produced by the planet".** No chart: the waves are a sum of plane waves in the planet's own 3D space,
+   each a 1D profile of `x · d` along a fixed 3D direction (Jeschke et al. 2018, *Water Surface Wavelets*), weighted at each
+   place by the local wind's directional spectrum and the depth; unresolved bands become roughness (LEADR). No blend, no
+   re-anchor, no seam.
+3. **NEAR 3D WAVES LATER**, after the owner's look at the light and the wave normals.
+4. **THE NOTICES** in `THIRD_PARTY_NOTICES.md`; no third-party texture ships.
+
+**Example.** On a coast where the trade wind blows from the east the near swell runs west; two hundred kilometres north,
+where the climate's wind turns, the swell turns with it — through no line on the sea.
+
+
+## B108 (2026-10-18) — THE SEA'S FIRST LOOK GIVEN (SLICE S1)
+
+The owner in the window, 100 m over the sea 8 km off the coast stand, on slice S1 (the sea on the ground's own lattice, one
+plain colour): *"It looks good."* The look at S1 is given; S2 (the light) is next in the sea's order. Found on the way: the
+login's loading screen did not go over the sea or high up — the pieces at a ring's outer edge wait for 128 m tiles the
+shard names only at a coarser level (registered; the window ran with `VD_LOADING_SCREEN=0`).
+
+**Example.** From 100 m over the sea the walker sees the coast rise out of a dark-blue sea along one line; the sea has no
+waves, no depth colour and no glint of its own yet — those come with S2 and S3.
+
+## B109 (2026-10-18) — THE SEA'S LIGHT (SLICE S2): THE TWO ANSWERS
+
+On `docs/investigation/2026-10-18/sea_light_design.md`:
+
+1. **THE FLOOR THROUGH THE WATER BY THE DEPTH LAW, OPAQUE** (Q1 (a)): the sheet's colour is the medium's own law over the
+   depth each water point carries — the floor's paint lit through the water, Beer–Lambert down and up (Pope & Fry 1997),
+   single scatter (Morel 1974); the deep floor cut only where less than one 8-bit level of it comes through (B27's eye
+   rule). No screen-space transmission.
+2. **THE WIND COMPUTED BY THE PLANET'S SHARD AT LOAD** (Q2 (a)): the shard runs the seasons chain once on its stored
+   ground, keeps the cells' surface wind in its own store under the artifact's digest, and ships it as one bulk part
+   (SL6 yes, B107 Q1). No world change. The sun's glint reads it by Cox & Munk (1954); S3's waves read the same wind.
+
+**Example.** At the coast stand the bay's sand shows green-blue through 2 m of water and fades into deep blue 50 m out;
+the glint's width on the open sea follows the trade wind the planet's own climate blows there.
+
+## B110 (2026-10-18) — THE SEA'S LIGHT ACCEPTED; COMMIT; THE WAVES NEXT
+
+The owner in the window at 3 km over the coast stand, on slice S2: *"Looks amazing (and we don't have clouds for now, so I
+can't judge), let's commit and move to waves please."* The look at S2 is given (the sky's part waits for the clouds); one
+local commit of S1, the loading screen's cure and S2, no push; slice S3 (the waves, by B107's plane waves) next. The owner
+asked whether to buy art assets with textures (ground, mountains, rocks, water): the answer is in the session, and the
+art's own step stays where B99 put it (after the base), its questions per B36 Q14.
+
+**Example.** Over the coast stand the open sea is deep navy, the glint a narrow path under the 1.9 m/s wind, the sky's
+sheen stronger toward the horizon; next, the same sea moves with the wind's waves.

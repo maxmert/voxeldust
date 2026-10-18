@@ -2064,3 +2064,96 @@ THE TESTS (B105 item 3's check): the generator 367 + 5 cured of 372 (the five re
 metres, the moon's tile with the most land now (NegX, 7, 2)); the bins crate 113 of 114 (the copy's control, rerun on the
 cured copy); the terrain crate now about an hour and the bins crate over three hours (the seasons' chain in the moon
 solves; registered).
+- 2026-10-17 — B99 STEP 4, SLICE W0: G-PIT-RASTER READ (the one-volume revision §3.10; `examples/water_bench.rs pits`, bench
+only, on a copy of slot 22's store): around the coast stand of B103's window (16.3° S), each water spread from its own
+8 km nodes through the drawn points under its level (the sea at its level, each lake at its water word). THE 16 m GROUND,
+±4 km at 16 m: 23.0 km² under a water's level, 22.3 km² reached; PITS 0.70 km² (3.1 % of the points under a level) in 48
+pits, 7 of 100 points or more, the largest 0.20 km² with its floor 25 m under the sea. THE 128 m GROUND, ±20 km at 128 m:
+779 km² under a level; pits 0.74 km² (0.09 %) in 15, the largest 0.26 km² at −14 m. By the revision's rule (§3.4, no
+hanging pond) the fill leaves them dry; a groundwater law that fills them is deferred (B105 Q8). G-CAVE-SIZE moved to the
+game track with the dig path (its brief). NEXT: slice W1 (the outlets of Q1 (b), B94 item 1's exits, the river carve and
+the water map in a bench copy; G-DIVIDE, G-SEAM-WATER, G-FACE; side views).
+- 2026-10-17 (late) — SLICE W1 STARTED (bench only; no game path reads it): `fine::l1::OutletRule::StandingWater` and
+`standing_water_outlets` — each standing water spreads from its own 8 km nodes through the points whose smooth base stands
+under its level (the sea from the ocean's nodes, each lake at its word), a dry end node's floor, the rim's river exits kept;
+`solve_l1_with`; `planet_stand water1` (both rules, one first water map, readings, side views with still water). THE LAKES
+FOR THE STANDS (`planet_stand lakes`): the largest spilling lake 231 098 km² stands 3 089 m UNDER the sea's level (63 m
+deep), the largest closed lake 211 236 km² 88 m under it (2 m deep); deep lakes to 1 817 m. FOUND: (1) THE BASINS UNDER THE
+SEA'S LEVEL HAVE NO LAWFUL BASE LEVEL in the 128 m rounds — a node under the sea's level takes the sea's zero rise
+(`U0_SEA`) and no hold (the hold's ratio reads heights over the sea), so today every point there is an outlet and the
+ground is the smooth 8 km surface, and under the new rule the basin's dry slopes fall flat onto its lake's floor (tile
+3,97,21: every cell wet). The cure owed: B94's base level — a basin's ground rises over its own water's level or its dry
+floor, not over the sea; a short design first. (2) The bench's renderer drew water by whole 128 m cells (a staircase
+shore); the shore must follow the smooth ground's crossing of the level (the revision §3.4's column rule).
+- 2026-10-18 — SLICE S1 BUILT: THE SEA ON THE GROUND'S OWN LATTICE, PLAIN (rulings B105 Q10, B106, B107;
+`docs/investigation/2026-10-17/sea_look_design.md`; the shard and the client only, no world change, no pin moves). The
+shard ships the coast mask again (`artifact_source`: `BulkMsg::ArtifactCoast` parts after the pyramid; W9/W16's data
+class). The client builds the sea's sheet on each chunk's own ground triangles (`chunks::sea_sheet`, W18's rule): a vertex
+holds the sea where its 8 km node's word is the sea or land and its ground stands under the level (within two steps the
+coarser field decides); one water point per ground vertex, the one-step hold, the morph read at the ground's target; a
+pocket's and a lake's node hold none; a chunk built before the mask is built again when it lands. The floor under deep
+water goes to the END of the ground's list, counted (`SeaSheet::floor_cut`): the renderer leaves it out only under a drawn
+sheet, the lane keeps it. FOUND AND CURED: the first build cut that floor inside the builder, so a chunk over the deep sea
+held no triangle, the renderer gave it no entity (B89) and its sheet never spawned — the sea stood as a band along the
+coast with chunk-square steps, and the stars showed through the bare sea beyond it; now such a chunk stands as an empty
+parent of its sheet. MEASURED headless (`--capture --pilot`, slot 22, generator 27): from 3 km over the coast stand on
+four bearings, from 100 m over the sea 8 km off the coast (B20's gate stand), and from 30, 300 and 3 000 km facing the
+coast — the sea to the horizon, ONE coastline that follows the fine ground (no node squares, no teeth, no speckle on these
+stands), from 100 m no hole under the land and no skirt walls, the sun's glint from orbit. THE FRAME at the 30 km stand
+(unpaced, 5 858 pieces, the control test beside): 22.7 ms with the sea, 23.9 ms without it. NOT YET MEASURED: the climb
+through the rung swaps (W16) — the owner's look; W18's benches (`sheet_poke`, `mask_at_pixel`) not restored. SEEN BESIDE
+(registered): the loading screen stays over about 30 km (B86 item 6; `VD_LOADING_SCREEN=0` for pictures); under load one
+missing row released the planet's ground; a login whose planet shard boots slowly is closed by the gateway's boot limit
+(a second login works); a row of small regular hills about 1–2 km inland along the coast, seen from 30 km (the ground's
+census). Unit tests for the sea code written and compiled, NOT RUN (B74); the lane's rebuild path has none (HR5, registered).
+- 2026-10-18 — RULING B108: THE OWNER'S LOOK AT S1 GIVEN ("It looks good.", in the window 100 m over the sea off the coast
+stand). THE LOGIN'S SCREEN OVER THE SEA: the window at that stand never left the loading screen (22 pieces on the rough
+ground, the shard's fine work empty); a diagnostic ("THE SCREEN WAITS", every 600 frames) at the 30 km stand names the
+cause — rung-9 pieces at their ring's outer edge (NegX, x 72–73, y 99–109) lack the 128 m tiles NegX/34–35/47–53 at the
+mean level rung 9 reads, while the shard and the gateway name those tiles at a coarser level only (the reach rule
+`fine_reach_m` against the client's ring). The copy's control test PASSED overnight (18 905 s; the bins crate 114 of 114).
+- 2026-10-18 — THE LOGIN'S SCREEN CURED OVER THE SEA AND AT 30 km (B108's finding; the owner: "Proceed"). THREE CAUSES,
+each measured with the screen's own diagnostic ("THE SCREEN WAITS", every 600 frames: the pieces on the rough ground, the
+tiles each and its parents lack, wanted or a stand-in, the stand-in's cover facts) and `water_bench reach` / `rough`:
+(1) THE FINE REACH ASKED BY THE TIER RULE ALONE — the client asks rung 9 out to 704 km (its handover pays the 8 km
+field's 1 620 m step, ruling T7's floor), the shard named the 128 m tiles at rung 9's mean level only to 445 km. CURED in
+one home: `vd_terrain::artifact::rung_ask_m` (the tier rule raised by the floor of the rung's step, at the band's edge and
+slack; the macro ring reads it too), `handover_step_m` (the octaves the coarser rung drops plus the field's step) and
+`pyramid_levels` (the lattice's own count); `fine_reach_m` takes the rung's step, `fine_needs` the body. The client's
+switch and the shard's agree on every rung (`water_bench reach`: rung 9 704 km on both). (2) THE MACRO RING READ THE
+EYE OVER THE 8 km FIELD, the client over its drawn fine ground (100 m over the sea: 522 m against 857 m, the client's
+horizon 23 km the wider), and added only the stencil past the ring while a rung-9 piece there is 32 km wide: four
+rung-9 pieces waited on the next 8 km tile, the ladder never landed, and 22 coarse stand-ins over them stayed. CURED:
+`BodyDefinition::fine_law_m` (B83's law, 4 055 m on the home planet) — the shard's macro ring reads its horizon over the
+field less the law, its fine reach the horizon over the field less it and the height over the field plus it; the macro
+ring and the gateway's whole ring add one chunk of the tile rung along its diagonal (`ring_margin_m`). (3) THE FINE REACH
+ADDED ONE CHUNK'S EDGE where a parent reaches one chunk's DIAGONAL past its child (30 km: rung-11 pieces waited on their
+rung-12 parents' tiles). CURED: the diagonal. MEASURED after (headless, the screen on): 100 m over the sea the screen goes
+at 82–90 s, at 30 km at 102 s, no piece rough; 300 km up it waits on the on-demand solves (registered, B86 item 6). The
+terrain crate's two tile-ring tests take the new margin; tests NOT RUN (B74).
+- 2026-10-18 — SLICE S2 BUILT: THE SEA'S LIGHT (ruling B109: the depth law, opaque; the wind computed by the shard at
+load). THE WIND: the seasons' chain keeps the year's surface wind per climate cell (`SeasonState::last_wind`: the mean of
+the 16 seasons' winds east and north and the mean of their speeds); `vd_terrain::sea_wind` runs the chain once on a
+STORED world (the rows' ground, the ocean from their facies, the sea's level) and gives whole cm/s, 97 KB on the home
+planet (16 200 cells); `blows` is the one rule for whether a world has one (air with a day, not star-locked, a sea). THE
+SHARD: the solve worker computes it after a first solve, or alone for a world already stored (`start_wind`; the realm
+stays up meanwhile, B91); the store keeps it under the artifact's digest (`built_store::sea_wind_key`, family 11); the
+ship is armed only when it is settled, and the head announces `wind_parts` (PROTO_MINOR 40 and its floor: a field append),
+the parts `BulkMsg::ArtifactWind` (disc 8) after the coast's; the gateway caches them like the coast's and a cache is
+whole only with them; the client assembles them (`ArtifactCache::wind`, `wind_held`), and a sea piece built before them
+is built again when they land. THE LIGHT (`ladder_fade.wgsl`, `WATER_SURFACE`): each water point carries its depth at its
+place and its morph target, its floor's paint words and height, and the Cox–Munk slope variance from the wind's bilinear
+reading (`ClimateGrid::reading`, the longitude wrapped); the vertex stage colours it by Maritorena, Morel & Gentili (1994)
+over pure water's absorption (Pope & Fry 1997) and backscatter (Morel 1974) along the sun's ray bent by Snell's law (the
+sun's direction rides the band table's last row, since the view's lights are the fragment stage's alone), passed up by
+Austin's factor; the fragment stage sets GGX's roughness to √(√σ²); the material states water's F0 0.0204. MEASURED: the
+chain on the stored home planet 216 s on 12 threads (812 s on the solve's share under load, once; 83 s for another
+planet); the year's speed 2.9 m/s at the median, 8.3 at 95 %, 12.1 at most, 1.9 at the coast stand (σ² 0.013). PICTURES
+(headless): from 3 km the deep sea dark navy, the sun's glint a broad path, the sky's reflection toward the horizon; from
+100 m over 857 m of water the sea dark with the sky's sheen; from 3 000 km the glint a soft wide patch. Two faults on the
+way, cured: the vertex stage cannot read the view's lights (a pipeline error), and the sun's query met the placement's
+own; the deep floor's cut stays the extractor's step (under an opaque sheet the floor is never seen; its colour comes in
+the sheet's own law). Tests written in part, NOT RUN (B74; registered).
+- 2026-10-18 — RULING B110: THE OWNER'S LOOK AT S2 GIVEN in the window at 3 km over the coast stand ("Looks amazing"; the
+sky's part waits for the clouds); one local commit of S1, the loading screen's cure and S2; S3 (the waves) next.
+

@@ -5,11 +5,12 @@
 //! - the HEAD: one `BulkMsg::ArtifactHead` (the world tag, the version, the edge, the digest);
 //! - the PYRAMID: every level cut into parts of at most [`PYRAMID_PART_WORDS`] heights, each a
 //!   `BulkMsg::ArtifactPyramid`, coarsest level LAST so a client draws from the top down;
-//! - ★ NO COAST MASK AND NO WATER WORDS (2026-09-28, ruling B22 step 1): nothing draws them since
-//!   the shore law and the water sheet are removed, so the head states no coast part and every
-//!   pyramid part ships its heights alone (the wire's own "no water words" form). The artifact
-//!   still HOLDS both — the store keeps them and the digest folds them — for the one-volume fill
-//!   step;
+//! - ★ THE COAST MASK AGAIN (2026-10-17, rulings B105 Q10 and B106: the sea drawn again): the body's
+//!   side words (land, sea, pocket, lake for each 8 km node) cut into parts of at most
+//!   [`COAST_PART_BYTES`], each a `BulkMsg::ArtifactCoast`, AFTER the pyramid's parts in the one list
+//!   the sim pages through — the far view stands first, then the sea's sheet reads which node is sea.
+//!   The pyramid's parts still ship their heights alone (ruling B22: the lakes' water words return
+//!   with the water map, slice W2);
 //! - the TILES under a direction: the face and the macro cell the direction falls in through the
 //!   bend's inverse, then every tile whose rows lie within the radius on that face (a stated
 //!   limit: tiles across a cube edge from the occupant are owed — the next face's tiles arrive as
@@ -30,8 +31,8 @@ use vd_wire::channels::BulkMsg;
 
 use crate::artifact_store::tile_bytes;
 
-/// A coast part's size in BYTES: the store's own cut (32 KiB of bits). The shard ships no coast
-/// part since ruling B22; a probe that hands a client the stored mask cuts it at this size.
+/// A coast part's size in BYTES: the store's own cut (32 KiB of bits), so a shard ships what it
+/// stores.
 pub use vd_sim::stub::built_store::COAST_PART_BYTES;
 /// A pyramid part's size in heights: the store's own cut (16 384 words, 32 KB, a tile's weight),
 /// so a shard ships what it stores.
@@ -70,11 +71,19 @@ pub struct ArtifactTiles {
     /// its 181 pyramid parts (5.9 MB on the home planet when they carried their water words) are
     /// the same bytes on every ask. Filled on the first ask.
     parts: std::sync::OnceLock<Vec<Bytes>>,
+    /// ★ THE SEA'S WIND's record (ruling B109), the generator's own bytes, shipped after the coast's parts; empty where
+    /// the world has none.
+    wind: Vec<u8>,
 }
 
 impl ArtifactTiles {
     /// A source over `artifact`, the parts not yet encoded.
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the realm, its world, its body and lattice, the ring's two words and its sea's wind: each a fact the \
+                  shard holds apart, and a struct here would be a second home for them"
+    )]
     pub fn new(
         realm: vd_core::pose::RealmId,
         world_tag: u64,
@@ -83,6 +92,7 @@ impl ArtifactTiles {
         body: vd_terrain::BodyDefinition,
         top_rung: u8,
         step_m: f64,
+        wind: Option<&vd_terrain::sea_wind::SeaWind>,
     ) -> ArtifactTiles {
         let digest = artifact.digest();
         // ★ THE DRAWN GROUND'S RANGE (ruling B55), read once off every row and level: the head states
@@ -105,6 +115,7 @@ impl ArtifactTiles {
             step_m,
             digest,
             parts: std::sync::OnceLock::new(),
+            wind: wind.map_or_else(Vec::new, vd_terrain::sea_wind::SeaWind::to_bytes),
         }
     }
 
@@ -141,8 +152,42 @@ impl ArtifactTiles {
                 }));
             }
         }
+        // ★ THE COAST MASK, AFTER THE PYRAMID (2026-09-22, ruling W10; again 2026-10-17, B106): the same
+        // list, so the sim pages through one queue and the gateway caches one arrival order.
+        let parts = self.coast_parts();
+        for (part, bits) in self.artifact.coast.chunks(COAST_PART_BYTES).enumerate() {
+            out.push(encode(&BulkMsg::ArtifactCoast {
+                realm: self.realm,
+                part: part as u32,
+                parts,
+                bits: bits.to_vec(),
+            }));
+        }
+        // ★ THE SEA'S WIND, AFTER THE COAST (ruling B109): the same list and the same cut.
+        let parts = self.wind_parts();
+        for (part, bytes) in self.wind.chunks(COAST_PART_BYTES).enumerate() {
+            out.push(encode(&BulkMsg::ArtifactWind {
+                realm: self.realm,
+                part: part as u32,
+                parts,
+                bytes: bytes.to_vec(),
+            }));
+        }
         out
     }
+
+    /// How many parts the sea's wind is cut into: zero where the world has none.
+    #[must_use]
+    pub fn wind_parts(&self) -> u32 {
+        self.wind.len().div_ceil(COAST_PART_BYTES) as u32
+    }
+    /// How many coast parts this artifact's mask is cut into; ZERO for a body with no mask at all
+    /// (a lattice of no nodes), which no shipped body is.
+    #[must_use]
+    pub fn coast_parts(&self) -> u32 {
+        self.artifact.coast.len().div_ceil(COAST_PART_BYTES) as u32
+    }
+
     /// The tile that holds macro cell `(i, j)` of a face.
     #[must_use]
     pub fn tile_of(i: u32, j: u32) -> (u32, u32) {
@@ -158,6 +203,7 @@ pub fn artifact_source_of(
     world_tag: u64,
     body: &vd_terrain::BodyDefinition,
     artifact: &Arc<Artifact>,
+    wind: Option<&vd_terrain::sea_wind::SeaWind>,
 ) -> Option<Box<dyn TileSource>> {
     let lattice = body.macro_lattice()?;
     // ★ THE STEP THE TILE RING IS FLOORED BY (ruling W17), taken once with the source.
@@ -174,6 +220,7 @@ pub fn artifact_source_of(
         *body,
         top_rung,
         step_m,
+        wind,
     )))
 }
 
@@ -196,11 +243,10 @@ impl TileSource for ArtifactTiles {
             tiles_per_edge: self.artifact.tiles_per_edge(),
             levels: self.artifact.pyramid.len() as u32,
             sea_m: self.artifact.sea_m,
-            // ★ NO COAST PART FOLLOWS (ruling B22): the gateway and the client read ZERO as "no
-            // mask", and the far view is whole with its pyramid alone.
-            coast_parts: 0,
+            coast_parts: self.coast_parts(),
             low_m: self.drawn.0,
             high_m: self.drawn.1,
+            wind_parts: self.wind_parts(),
         })
     }
 
@@ -216,12 +262,17 @@ impl TileSource for ArtifactTiles {
         // A direction whose stencil the rows do not hold takes the whole ring, never a short one.
         let levels = self.artifact.pyramid.len() as u32;
         let pixel_rad = vd_core::geometry::drawable_theta_min_rad();
+        // ★ THE LOWEST GROUND THE CLIENT DRAWS (2026-10-18): since the fine ground (B2, B95) the client reads its horizon
+        // over the drawn 128 m and 16 m ground, which stands up to the level's law under the 8 km field this reads; the
+        // ring reads its horizon over that lowest ground, so it holds the client's. MEASURED before: 100 m over the sea,
+        // the client 857 m over its drawn floor, this 522 m over the field, the client's horizon 23 km the wider.
+        let below_m = self.body.fine_law_m(self.artifact.sea_m);
         let reach_m = match self.ground_m(dir) {
             Some(ground_m) => vd_terrain::artifact::tile_reach_m(
                 &self.lattice,
                 levels,
                 self.top_rung,
-                ground_m,
+                ground_m - below_m,
                 self.relief_m,
                 radial_m,
                 pixel_rad,
@@ -261,8 +312,8 @@ mod tests {
     use crate::artifact_worker::{SolveJob, run_solve};
     use vd_terrain::home::{home_moon, home_moon_solve_words};
 
-    /// The moon as a source: the head names the artifact and announces no coast part, the pyramid
-    /// comes coarsest first in parts with no water words and nothing after it, the tiles under a
+    /// The moon as a source: the head names the artifact and its coast parts, the pyramid comes
+    /// coarsest first in parts with no water words and the coast mask after it, the tiles under a
     /// direction are that face's tiles nearest first and every one decodes back to its rows, and a
     /// tile past the lattice is none.
     #[test]
@@ -291,6 +342,8 @@ mod tests {
                 moon.step_bound_m(rung)
                     + vd_terrain::artifact::field_step_m(&moon, &lattice, levels, rung)
             },
+            // The airless moon has no sea's wind (ruling B109).
+            None,
         );
         assert_eq!(source.digest(), artifact.digest());
         // ★ THE HEAD STATES THE DRAWN GROUND'S RANGE (ruling B55), and the source's own body and reach
@@ -313,9 +366,10 @@ mod tests {
                 tiles_per_edge: 2,
                 levels: 2,
                 sea_m: artifact.sea_m,
-                coast_parts: 0,
+                coast_parts: source.coast_parts(),
                 low_m: drawn.0,
                 high_m: drawn.1,
+                wind_parts: 0,
             }
         );
         let parts = source.artifact_parts();
@@ -328,11 +382,20 @@ mod tests {
                 .all(|(a, b)| Arc::ptr_eq(a, b))
         );
         // Level 2 (6 · 17² = 1 734 words) is one part; level 1 (6 · 34² = 6 936) is one part.
-        // ★ NOTHING RIDES AFTER THEM (ruling B22): no coast part, and no part carries water words,
-        // while the artifact itself still holds both.
-        assert_eq!(parts.len(), 2);
-        assert!(!artifact.coast.is_empty());
+        // ★ THE COAST MASK rides after them (2026-09-22; again 2026-10-17, ruling B106): the moon's side
+        // words are one part, the LAST of the list; no pyramid part carries water words (ruling B22).
+        assert_eq!(source.coast_parts(), 1);
+        assert_eq!(parts.len(), 3);
         assert_eq!(artifact.pyramid_water.len(), 2);
+        assert_eq!(
+            postcard::from_bytes::<BulkMsg>(&parts[2]).expect("decodes"),
+            BulkMsg::ArtifactCoast {
+                realm: vd_core::pose::RealmId::Planet(moon.seed()),
+                part: 0,
+                parts: 1,
+                bits: artifact.coast.clone(),
+            }
+        );
         assert_eq!(
             postcard::from_bytes::<BulkMsg>(&parts[0]).expect("decodes"),
             BulkMsg::ArtifactPyramid {
@@ -444,13 +507,21 @@ mod tests {
             5,
             &moon,
             &artifact,
+            None,
         )
         .expect("a source");
         assert_eq!(installed.head(), source.head());
         let pebble = moon.without_macro_lattice();
         assert!(pebble.macro_lattice().is_none());
         assert!(
-            artifact_source_of(vd_core::pose::RealmId::Planet(1), 5, &pebble, &artifact).is_none()
+            artifact_source_of(
+                vd_core::pose::RealmId::Planet(1),
+                5,
+                &pebble,
+                &artifact,
+                None
+            )
+            .is_none()
         );
     }
 }

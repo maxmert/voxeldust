@@ -563,6 +563,13 @@ pub(crate) const ATTRIBUTE_HEIGHT: MeshVertexAttribute =
     MeshVertexAttribute::new("LadderHeight", 0x5741_001A, VertexFormat::Float32);
 const HEIGHT_SHADER_LOCATION: u32 = 13;
 const SURFACE_SHADER_DEF: &str = "GROUND_SURFACE";
+/// ★ THE SEA'S WORDS (ruling B109): each water point's depth at its place and at its morph target, metres, and the
+/// surface's slope variance (Cox & Munk) — shader location 14, and the `WATER_SURFACE` define that colours the sheet by
+/// the medium's own law over its floor's paint.
+pub(crate) const ATTRIBUTE_WATER: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderWater", 0x5741_001B, VertexFormat::Float32x4);
+const WATER_SHADER_LOCATION: u32 = 14;
+const WATER_SHADER_DEF: &str = "WATER_SURFACE";
 const LIGHT_CASTER_SHADER_DEF: &str = "LIGHT_CASTER";
 const LIGHT_CASTER_ENV: &str = "VD_TERRAIN_LIGHT_CASTER";
 /// ★ THE MOTION'S CONTROL (the temporal path's T1, the design's control 1): `VD_MOTION_CONTROL=engine`
@@ -813,6 +820,14 @@ fn ground_vertex_layout(
         if let Some(fragment) = descriptor.fragment.as_mut() {
             fragment.shader_defs.push(SURFACE_SHADER_DEF.into());
             fragment.shader_defs.push("VERTEX_COLORS".into());
+        }
+        // ★ THE SEA (ruling B109): a sheet carries its water's words beside its floor's paint.
+        if layout.0.contains(ATTRIBUTE_WATER) {
+            attributes.push(ATTRIBUTE_WATER.at_shader_location(WATER_SHADER_LOCATION));
+            descriptor.vertex.shader_defs.push(WATER_SHADER_DEF.into());
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push(WATER_SHADER_DEF.into());
+            }
         }
     }
     // THE LIGHT CASTER: the prepass shader — the shadow passes' vertex stage, since no camera
@@ -3521,8 +3536,14 @@ fn hud_offscreen(
 ///
 /// **Example.** A player logs in aboard a hull over the home belt: the screen reads "Loading the ground" while the
 /// planet's shard ships the tiles and the client builds its chunks, and goes the frame the last coarse stand-in has sunk.
+///
+/// `VD_LOADING_SCREEN=0` (a dev switch for pictures) leaves the screen out: an eye 300 km up holds its pieces on the rough
+/// ground until the advance calculation (B86 item 6, not built) has solved the fine tiles of the whole disc it sees.
 fn draw_loading(ctx: &egui::Context, terrain: Option<&terrain::Terrain>) {
-    if terrain.is_some_and(|t| t.ground_ready) {
+    static SHOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let shown =
+        *SHOWN.get_or_init(|| std::env::var("VD_LOADING_SCREEN").map_or(true, |v| v.trim() != "0"));
+    if !shown || terrain.is_some_and(|t| t.ground_ready) {
         return;
     }
     let (resident, wanted) = terrain.map_or((0, 0), |t| t.ground_progress);

@@ -14,6 +14,8 @@
 //!   worker with PLANET's words, and its temperature rows read;
 //! - `diff PLANET A.art B.art`: two worlds of one body, the nodes that differ in each row field;
 //! - `lakes PLANET WORLD.art`: G-OUTLETS — every lake closed (no node passes water on) or spilling, with their areas;
+//! - `water1 PLANET WORLD.art F,TX,TY OUT_DIR`: B99 step 4's slice W1 on the bench — the 128 m tile under today's outlets
+//!   and under each standing water's (B105 Q1 (b)), each filled by the same first water map, the readings and side views;
 //! - `words PLANET`: the solve's words as the shard reads them from the charter;
 //! - `store-get PLANET OUT.art` / `store-put PLANET IN.art` (the store file named by `VD_REALM_STORE`): a stored world out
 //!   to a file under the key its own head names, or a solved world into the store under this build's key by the shard's
@@ -1307,6 +1309,55 @@ fn render_view(
     pitch_deg: f64,
     path: &str,
 ) {
+    render_view_water(
+        z,
+        None,
+        w,
+        cell_m,
+        (ex, ey),
+        eye_m,
+        heading_deg,
+        pitch_deg,
+        path,
+    );
+}
+
+/// [`render_view`] with an optional WATER surface (`water`: each cell's water level over the sea, NaN where dry): the
+/// ray meets the higher of the ground and the water, and a water hit is drawn as still water (the sky's colour over a
+/// dark blue, by the angle) — the bench's first look at the fill, no wave, no clarity.
+#[allow(clippy::too_many_arguments)]
+fn render_view_water(
+    z: &[f32],
+    water: Option<&[f32]>,
+    w: usize,
+    cell_m: f64,
+    (ex, ey): (f64, f64),
+    eye_m: f64,
+    heading_deg: f64,
+    pitch_deg: f64,
+    path: &str,
+) {
+    let raw = z;
+    let surf_ground_at = |k: usize| raw[k];
+    let surf: Vec<f32> = match water {
+        Some(wl) => z
+            .iter()
+            .zip(wl)
+            .map(|(&g, &l)| if l.is_finite() && l > g { l } else { g })
+            .collect(),
+        None => z.to_vec(),
+    };
+    let z = &surf[..];
+    let is_water = |x: f64, y: f64| -> bool {
+        let Some(wl) = water else { return false };
+        let (cx, cy) = ((x / cell_m).floor() as i64, (y / cell_m).floor() as i64);
+        let h = wl.len() / w;
+        if cx < 0 || cy < 0 || cx >= w as i64 || cy >= h as i64 {
+            return false;
+        }
+        let k = cy as usize * w + cx as usize;
+        wl[k].is_finite() && wl[k] > surf_ground_at(k)
+    };
     let h = z.len() / w;
     let (wpx, hpx) = (960u32, 540u32);
     let fov = 60f64.to_radians();
@@ -1356,6 +1407,16 @@ fn render_view(
             let sky = [150.0, 180.0, 215.0];
             let c = match hit {
                 None => sky,
+                Some((x, y, _, t)) if is_water(x, y) => {
+                    // Still water: the sky's colour by the angle of view over a dark blue.
+                    let grazing = (-d[2]).clamp(0.0, 1.0);
+                    let deep = [30.0, 60.0, 85.0];
+                    let mix = 0.35 + 0.5 * (1.0 - grazing);
+                    let haze = 1.0 - (-t / 45_000.0).exp();
+                    [0, 1, 2].map(|k| {
+                        (deep[k] * (1.0 - mix) + sky[k] * mix) * (1.0 - haze) + sky[k] * haze
+                    })
+                }
                 Some((x, y, gz, t)) => {
                     let e = cell_m * 0.5;
                     let dzx = ground(x + e, y).unwrap_or(gz) - ground(x - e, y).unwrap_or(gz);
@@ -1902,6 +1963,10 @@ fn main() {
             let mut biggest_spilling: Vec<(f64, usize)> = Vec::new();
             // By kind (closed, spilling), size (1, 2–9, 10+ nodes) and deepest water (<1, 1–9, 10–99, 100+ m).
             let mut classes = [[[0usize; 4]; 3]; 2];
+            // Each lake's first shore node and its 128 m tile, for the water's bench (`water1`).
+            // (spilling, area m², nodes, deepest m, level m, the shore's 128 m tile)
+            type Shore = (bool, f64, usize, i32, i16, (u8, i32, i32));
+            let mut shores: Vec<Shore> = Vec::new();
             for start in 0..n {
                 if seen[start] || !lake(start) {
                     continue;
@@ -1909,12 +1974,22 @@ fn main() {
                 let (mut stack, mut area, mut nodes, mut spills) =
                     (vec![start], 0f64, 0usize, false);
                 let mut deepest = 0i32;
+                let mut shore: Option<u32> = None;
                 seen[start] = true;
                 while let Some(i) = stack.pop() {
                     area += lattice.area_m2(i as u32) as f64;
                     nodes += 1;
                     deepest = deepest.max(i32::from(a.rows[i].water_m) - i32::from(a.rows[i].z_m));
                     spills |= a.rows[i].receiver_facies & RECEIVER_NONE == 0;
+                    if shore.is_none()
+                        && lattice.neighbours(i as u32).iter().any(|&m| {
+                            m != vd_terrain::macro_lattice::NO_NODE
+                                && !lake(m as usize)
+                                && !sea(m as usize)
+                        })
+                    {
+                        shore = Some(i as u32);
+                    }
                     for m in lattice.neighbours(i as u32) {
                         if m != vd_terrain::macro_lattice::NO_NODE
                             && !seen[m as usize]
@@ -1928,6 +2003,18 @@ fn main() {
                 let size = [2usize, 10].iter().filter(|&&b| nodes >= b).count();
                 let deep = [1i32, 10, 100].iter().filter(|&&b| deepest >= b).count();
                 classes[usize::from(spills)][size][deep] += 1;
+                if let Some(k) = shore {
+                    let (f, ni, nj) = lattice.split(k);
+                    let tn = vd_terrain::fine::l1::TILE_NODES;
+                    shores.push((
+                        spills,
+                        area,
+                        nodes,
+                        deepest,
+                        a.rows[k as usize].water_m,
+                        (f.index(), ni / tn, nj / tn),
+                    ));
+                }
                 if spills {
                     spilling.0 += 1;
                     spilling.1 += area;
@@ -1964,6 +2051,227 @@ fn main() {
                     );
                 }
             }
+            shores.sort_by(|x, y| y.1.total_cmp(&x.1));
+            for kind in [true, false] {
+                for (sp, area, nodes, deepest, level, (f, tx, ty)) in
+                    shores.iter().filter(|s| s.0 == kind).take(4)
+                {
+                    println!(
+                        "  {} lake {:.0} km² ({nodes} nodes, deepest {deepest} m, its level {level} m): a shore in the 128 m tile {f},{tx},{ty}",
+                        if *sp { "spilling" } else { "closed" },
+                        area / 1e6
+                    );
+                }
+            }
+        }
+        Some("water1") => {
+            // ★ B99 STEP 4, SLICE W1 (bench only): the 128 m tile `F,TX,TY` solved under today's outlets and under each
+            // standing water's (B105 Q1 (b)), each filled by the same first water map — every water from its own 8 km
+            // nodes through the raster cells under its level (the sea at its level, each lake at its word) — with the
+            // readings and side views of the shore.
+            use vd_terrain::fine::l1::{
+                BUFFER_NODES, L1_RUNG, OutletRule, TILE_NODES, cells_per_node_shift, solve_l1_with,
+            };
+            let artifact = vd_bins::artifact_file::read(args.get(2).expect("WORLD.art"))
+                .expect("the world reads");
+            let tile: Vec<i32> = args
+                .get(3)
+                .expect("F,TX,TY")
+                .split(',')
+                .map(|x| x.trim().parse().expect("an integer"))
+                .collect();
+            let out = args.get(4).expect("OUT_DIR");
+            std::fs::create_dir_all(out).expect("the output directory");
+            let face = vd_seed::bend::Face::from_index(tile[0] as u8).expect("a face");
+            let key = TileKey {
+                face,
+                tx: tile[1],
+                ty: tile[2],
+            };
+            let started = std::time::Instant::now();
+            let solved: Vec<vd_terrain::fine::l1::L1Tile> = std::thread::scope(|sc| {
+                let hs: Vec<_> = [OutletRule::Today, OutletRule::StandingWater]
+                    .into_iter()
+                    .map(|rule| {
+                        let (body, lattice, artifact) = (&body, &lattice, &artifact);
+                        sc.spawn(move || {
+                            solve_l1_with(body, lattice, artifact, key, rule)
+                                .expect("the tile solves")
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().expect("a solve")).collect()
+            });
+            println!(
+                "the 128 m tile {},{},{} solved under both rules in {:.1} s",
+                tile[0],
+                tile[1],
+                tile[2],
+                started.elapsed().as_secs_f64()
+            );
+            let shift = cells_per_node_shift(&body, &lattice, L1_RUNG).expect("nests");
+            let n_r = body.ladder().cells_per_edge(L1_RUNG) as i32;
+            let half = BUFFER_NODES >> 1;
+            let (i0, j0) = (
+                (key.tx * TILE_NODES - half) << shift,
+                (key.ty * TILE_NODES - half) << shift,
+            );
+            let side = solved[0].side;
+            let sea_m = artifact.sea_m;
+            // Each raster cell's 8 km water: the sea at nought, a lake at its word over the sea, or none.
+            let level_of = |node: usize| -> Option<f32> {
+                let r = &artifact.rows[node];
+                if (r.receiver_facies >> vd_terrain::artifact::FACIES_SHIFT)
+                    & vd_terrain::solve::FACIES_SEA
+                    != 0
+                {
+                    Some(0.0)
+                } else if r.water_m != vd_terrain::artifact::DRY_M && r.water_m > r.z_m {
+                    Some(f32::from(r.water_m) - f32::from(sea_m))
+                } else {
+                    None
+                }
+            };
+            let cell_level: Vec<Option<f32>> = (0..side * side)
+                .map(|k| {
+                    let (a, b) = ((k % side) as i32, (k / side) as i32);
+                    chart_cell(face, i0 + a, j0 + b, n_r).and_then(|c| {
+                        let f = vd_seed::bend::Face::from_index(c.face)?;
+                        level_of(lattice.index(f, c.i >> shift, c.j >> shift) as usize)
+                    })
+                })
+                .collect();
+            let cell = f64::from(1u32 << L1_RUNG);
+            for (name, t) in ["today", "standing_water"].iter().zip(&solved) {
+                let z: Vec<f32> = t
+                    .quarters
+                    .iter()
+                    .map(|&q| {
+                        if q == i32::MIN {
+                            f32::NAN
+                        } else {
+                            q as f32 / 4.0
+                        }
+                    })
+                    .collect();
+                // The first water map: every level spreads from its own cells under it through the cells under it.
+                let mut water = vec![f32::NAN; side * side];
+                let mut levels: Vec<f32> = cell_level.iter().flatten().copied().collect();
+                levels.sort_by(f32::total_cmp);
+                levels.dedup();
+                for &lam in &levels {
+                    let mut stack: Vec<usize> = (0..side * side)
+                        .filter(|&k| cell_level[k] == Some(lam) && z[k] < lam)
+                        .collect();
+                    let mut seen = vec![false; side * side];
+                    for &k in &stack {
+                        seen[k] = true;
+                    }
+                    while let Some(k) = stack.pop() {
+                        if water[k].is_nan() || water[k] < lam {
+                            water[k] = lam;
+                        }
+                        let (x, y) = (k % side, k / side);
+                        for m in [
+                            (x > 0).then(|| k - 1),
+                            (x + 1 < side).then(|| k + 1),
+                            (y > 0).then(|| k - side),
+                            (y + 1 < side).then(|| k + side),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            if !seen[m] && z[m] < lam {
+                                seen[m] = true;
+                                stack.push(m);
+                            }
+                        }
+                    }
+                }
+                // The readings: the lake cells (a lake node's cells) under their level that hold water (a floor) and
+                // that do not (the ground cut under the level, the water drained over the rim), and the deepest water.
+                let lake_cell = |k: usize| cell_level[k].is_some_and(|l| l != 0.0);
+                let (mut held, mut cut, mut over, mut deepest) = (0usize, 0usize, 0usize, 0f32);
+                for k in 0..side * side {
+                    if !lake_cell(k) || !z[k].is_finite() {
+                        continue;
+                    }
+                    let lam = cell_level[k].expect("a lake cell");
+                    if water[k].is_finite() {
+                        held += 1;
+                        deepest = deepest.max(water[k] - z[k]);
+                    } else if z[k] < lam {
+                        cut += 1;
+                    } else {
+                        over += 1;
+                    }
+                }
+                let wet = water.iter().filter(|w| w.is_finite()).count();
+                println!(
+                    "  {name:15}: {} of {} cells wet; the lake nodes' cells: {held} hold their water (deepest {deepest:.1} m), {cut} under the level and dry, {over} over the level; passes {:?}",
+                    wet,
+                    side * side,
+                    t.passes
+                );
+                // The views: from a dry cell beside the water nearest the middle, toward the water's middle.
+                let mid = side as f64 / 2.0;
+                let wet_mid = {
+                    let (mut sx, mut sy, mut nw) = (0f64, 0f64, 0f64);
+                    for (k, w) in water.iter().enumerate() {
+                        if w.is_finite() {
+                            sx += (k % side) as f64;
+                            sy += (k / side) as f64;
+                            nw += 1.0;
+                        }
+                    }
+                    (nw > 0.0).then(|| (sx / nw, sy / nw))
+                };
+                let eye = (0..side * side)
+                    .filter(|&k| z[k].is_finite() && !water[k].is_finite())
+                    .filter(|&k| {
+                        let (x, y) = (k % side, k / side);
+                        [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)]
+                            .iter()
+                            .any(|&(dx, dy)| {
+                                let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                                nx >= 0
+                                    && ny >= 0
+                                    && (nx as usize) < side
+                                    && (ny as usize) < side
+                                    && water[ny as usize * side + nx as usize].is_finite()
+                            })
+                    })
+                    .min_by(|&a, &b| {
+                        let d = |k: usize| {
+                            let (x, y) = ((k % side) as f64 - mid, (k / side) as f64 - mid);
+                            x * x + y * y
+                        };
+                        d(a).total_cmp(&d(b))
+                    });
+                if let (Some(e), Some((wx, wy))) = (eye, wet_mid) {
+                    let (ex, ey) = ((e % side) as f64 + 0.5, (e / side) as f64 + 0.5);
+                    // Heading: 0 up the rows (−y), 90 along them (+x).
+                    let heading = (wx - ex).atan2(-(wy - ey)).to_degrees();
+                    for (view, eye_m, pitch) in [
+                        ("walker", 2.0, 2.0),
+                        ("low", 150.0, 6.0),
+                        ("high", 2_000.0, 20.0),
+                    ] {
+                        render_view_water(
+                            &z,
+                            Some(&water),
+                            side,
+                            cell,
+                            (ex, ey),
+                            eye_m,
+                            heading,
+                            pitch,
+                            &format!("{out}/{name}_{view}.png"),
+                        );
+                    }
+                }
+            }
+            println!("pictures in {out}");
         }
         Some("words") => println!("{:?}", vd_bins::solve_words_of(&charter)),
         Some("store-get") => {

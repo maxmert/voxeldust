@@ -122,6 +122,8 @@ pub(crate) struct GatewayArtifact {
     /// ★ HOW MANY COAST PARTS THE HEAD ANNOUNCED (2026-09-22, ruling W10): the cache is whole only
     /// when every one of them is here, so a session is never served a shoreline with a hole in it.
     pub(crate) coast_parts: u32,
+    /// ★ HOW MANY SEA-WIND PARTS THE HEAD ANNOUNCED (ruling B109): the cache is whole only when every one is here.
+    pub(crate) wind_parts: u32,
     /// The head's bytes: an entry exists only once a head arrived.
     pub(crate) head: Vec<u8>,
     pub(crate) parts: Vec<Vec<u8>>,
@@ -133,6 +135,8 @@ pub(crate) struct GatewayArtifact {
     seen: BTreeSet<(u32, u32)>,
     /// The coast parts held, by index.
     coast_seen: BTreeSet<u32>,
+    /// The sea-wind parts held, by index (ruling B109).
+    wind_seen: BTreeSet<u32>,
     /// ★ THE TILES HELD (the one tile path): the shard's answers to the viewers' wants, by tile,
     /// shared by every session that draws the realm.
     pub(crate) tiles: BTreeMap<(u8, u32, u32), Vec<u8>>,
@@ -170,6 +174,9 @@ impl GatewayArtifact {
             // ★ THE COAST MASK too (2026-09-22, ruling W10): a client that draws a far rung with
             // half a mask draws half a shoreline, so the cache is not whole until every part is in.
             && self.coast_seen.len() as u32 == self.coast_parts
+            // ★ THE SEA'S WIND too (ruling B109): a client states its artifact held only with it, and the gateway stops
+            // serving parts the moment it does.
+            && self.wind_seen.len() as u32 == self.wind_parts
     }
 }
 
@@ -194,6 +201,7 @@ pub(crate) fn cache_artifact_part(
             sea_m,
             low_m,
             high_m,
+            wind_parts,
             ..
         }) if named == realm => {
             match sessions.artifacts.get_mut(&realm) {
@@ -217,12 +225,14 @@ pub(crate) fn cache_artifact_part(
                             digest,
                             levels,
                             coast_parts,
+                            wind_parts,
                             head: bytes,
                             parts: Vec::new(),
                             last_part_at: now,
                             level_parts: BTreeMap::new(),
                             seen: BTreeSet::new(),
                             coast_seen: BTreeSet::new(),
+                            wind_seen: BTreeSet::new(),
                             tiles: BTreeMap::new(),
                             band: (low_m, high_m, sea_m),
                             fine: BTreeMap::new(),
@@ -284,6 +294,31 @@ pub(crate) fn cache_artifact_part(
                 || parts != cache.coast_parts
                 || part >= parts
                 || !cache.coast_seen.insert(part)
+            {
+                stats.artifact_parts_stray += 1;
+                return;
+            }
+            cache.parts.push(bytes);
+            cache.last_part_at = now;
+            stats.artifact_parts_cached += 1;
+        }
+        // ★ A SEA-WIND PART (ruling B109): held with the head and served to every session that draws the realm, like a
+        // coast part. A part for a realm with no head, from another node, or of a shape the head did not announce is a
+        // stray.
+        Ok(BulkMsg::ArtifactWind {
+            realm: named,
+            part,
+            parts,
+            ..
+        }) if named == realm => {
+            let Some(cache) = sessions.artifacts.get_mut(&realm) else {
+                stats.artifact_parts_stray += 1;
+                return;
+            };
+            if cache.shard != from
+                || parts != cache.wind_parts
+                || part >= parts
+                || !cache.wind_seen.insert(part)
             {
                 stats.artifact_parts_stray += 1;
                 return;

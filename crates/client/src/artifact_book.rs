@@ -53,6 +53,9 @@ pub struct ArtifactHead {
     /// field can draw, whole metres over the ladder radius — what the body's band is sized from.
     pub low_m: i32,
     pub high_m: i32,
+    /// ★ HOW MANY SEA-WIND PARTS FOLLOW (ruling B109): the parts of the realm's year surface wind; zero where it ships
+    /// none. The cache is whole only when every one is here.
+    pub wind_parts: u32,
 }
 
 impl ArtifactHead {
@@ -113,6 +116,9 @@ pub struct ArtifactCache {
     /// moment the mask is whole, shared by pointer with every level. They are DERIVED, so no byte
     /// of them crosses the wire: the client folds what the server folds, from one mask.
     counts: Option<Arc<CoastCounts>>,
+    /// ★ THE SEA'S WIND (ruling B109): the year's surface wind of each climate cell, `None` while its parts assemble or
+    /// where the head announces none.
+    wind: Option<Arc<vd_terrain::sea_wind::SeaWind>>,
     /// ★ THE FINE TILES (the fine ground's way in, B2): the finished 128 m tiles the realm's shard shipped, `None` until
     /// the first lands (it states the tile's side). Shared by pointer; each tile's heights by pointer inside it.
     fine: Option<Arc<FineBook>>,
@@ -256,6 +262,7 @@ impl ArtifactCache {
             tiles: Arc::new(TileCache::new(head.edge).with_sea(head.sea_m)),
             coast: None,
             counts: None,
+            wind: None,
             fine: None,
             finer: None,
             rough: false,
@@ -269,7 +276,19 @@ impl ArtifactCache {
     /// which is the crawl the owner saw from 1 400 km, so the mask counts.
     #[must_use]
     pub fn whole(&self) -> bool {
-        self.pyramid.iter().all(Option::is_some) && self.coast_held()
+        self.pyramid.iter().all(Option::is_some) && self.coast_held() && self.wind_held()
+    }
+
+    /// ★ Whether the sea's wind is here (ruling B109); a head that announces no part has none to wait for.
+    #[must_use]
+    pub fn wind_held(&self) -> bool {
+        self.wind.is_some() || self.head.wind_parts == 0
+    }
+
+    /// The sea's wind, to share by pointer; `None` while its parts assemble or where none ships.
+    #[must_use]
+    pub fn wind(&self) -> Option<&Arc<vd_terrain::sea_wind::SeaWind>> {
+        self.wind.as_ref()
     }
 
     /// Whether the coast mask is here. A head that announces NO part has no mask to wait for and
@@ -455,6 +474,10 @@ pub enum ArtifactIngest {
     /// A coast part that made the mask whole: every level held is rebuilt with it. The pyramid is
     /// still owed, so the client states nothing yet.
     CoastWhole,
+    /// ★ A sea-wind part kept; the wind is not whole yet (ruling B109).
+    WindPart,
+    /// A sea-wind part that made the wind whole; the rest of the artifact is still owed, so the client states nothing yet.
+    WindWhole,
     /// ★ A coast part that made the WHOLE ARTIFACT whole — the pyramid was already here (2026-09-22,
     /// ruling W10). The client states `ArtifactHeld { realm, digest }`, exactly as it does when the
     /// last pyramid part lands after the mask. The statement waits for BOTH, because the gateway
@@ -490,6 +513,9 @@ pub struct ArtifactCounters {
     /// Coast parts kept, and the masks made whole.
     pub coast_parts: u64,
     pub coasts_whole: u64,
+    /// Sea-wind parts kept, and the winds made whole (ruling B109).
+    pub wind_parts: u64,
+    pub winds_whole: u64,
     /// Tiles parked before their head, and the parked tiles dropped past the bound.
     pub parked: u64,
     pub parked_dropped: u64,
@@ -523,6 +549,8 @@ pub struct ArtifactReceiver {
     assembling: BTreeMap<(RealmId, u32), LevelParts>,
     /// The coast masks assembling, per realm (2026-09-22, ruling W10).
     coasts: BTreeMap<RealmId, CoastParts>,
+    /// The sea winds assembling, per realm (ruling B109), in the coast's own part form.
+    winds: BTreeMap<RealmId, CoastParts>,
     /// ★ TILES THAT ARRIVED BEFORE THEIR HEAD (the far-view ship): the tiles come from the
     /// realm's shard on their own lane and the head from the gateway's cache on another, so a
     /// tile may land first. It is PARKED, bounded per realm, and applied when the head lands —
@@ -565,6 +593,7 @@ impl ArtifactReceiver {
         }
         self.assembling.retain(|(r, _), _| *r != realm);
         self.coasts.remove(&realm);
+        self.winds.remove(&realm);
         self.parked.remove(&realm);
         self.fine_parts.retain(|(r, _, _), _| *r != realm);
         self.fine_parked.remove(&realm);
@@ -585,6 +614,7 @@ impl ArtifactReceiver {
                 coast_parts,
                 low_m,
                 high_m,
+                wind_parts,
             } => self.accept_head(
                 realm,
                 ArtifactHead {
@@ -598,6 +628,7 @@ impl ArtifactReceiver {
                     coast_parts,
                     low_m,
                     high_m,
+                    wind_parts,
                 },
             ),
             BulkMsg::ArtifactPyramid {
@@ -621,6 +652,12 @@ impl ArtifactReceiver {
                 parts,
                 bits,
             } => self.accept_coast(realm, part, parts, bits),
+            BulkMsg::ArtifactWind {
+                realm,
+                part,
+                parts,
+                bytes,
+            } => self.accept_wind(realm, part, parts, bytes),
             BulkMsg::FineTilePart {
                 realm,
                 level,
@@ -657,6 +694,11 @@ impl ArtifactReceiver {
             ArtifactIngest::CoastWhole | ArtifactIngest::ArtifactWhole { .. } => {
                 c.coast_parts += 1;
                 c.coasts_whole += 1;
+            }
+            ArtifactIngest::WindPart => c.wind_parts += 1,
+            ArtifactIngest::WindWhole => {
+                c.wind_parts += 1;
+                c.winds_whole += 1;
             }
             ArtifactIngest::Parked => c.parked += 1,
             ArtifactIngest::NoHead => c.no_head += 1,
@@ -867,6 +909,67 @@ impl ArtifactReceiver {
             }
         } else {
             ArtifactIngest::CoastWhole
+        }
+    }
+
+    /// ★ ONE SEA-WIND PART IN (ruling B109): the parts assemble in the coast's own way into the generator's record
+    /// (`vd_terrain::sea_wind::SeaWind::from_bytes`); a part for a realm with no head, of a count the head did not
+    /// announce, or a whole record the generator does not read is refused. When the wind lands the cache's epoch bumps,
+    /// so the sea's pieces built before it are built again with it.
+    ///
+    /// **Example.** The home planet's three parts land after its coast mask; the glint off the coast stand reads 1.9 m/s.
+    fn accept_wind(
+        &mut self,
+        realm: RealmId,
+        part: u32,
+        parts: u32,
+        bytes: Vec<u8>,
+    ) -> ArtifactIngest {
+        let Some(cache) = self.book.realms.get(&realm) else {
+            return ArtifactIngest::NoHead;
+        };
+        let head = cache.head;
+        if parts == 0 || parts != head.wind_parts || part >= parts {
+            return ArtifactIngest::Shape;
+        }
+        if cache.wind.is_some() {
+            return ArtifactIngest::Duplicate;
+        }
+        let slot = self.winds.entry(realm).or_default();
+        if slot.parts.is_empty() {
+            slot.parts = vec![None; parts as usize];
+        }
+        if slot.parts[part as usize].is_some() {
+            return ArtifactIngest::Duplicate;
+        }
+        slot.parts[part as usize] = Some(bytes);
+        if !slot.parts.iter().all(Option::is_some) {
+            return ArtifactIngest::WindPart;
+        }
+        let record: Vec<u8> = slot
+            .parts
+            .iter()
+            .flatten()
+            .flat_map(|b| b.iter().copied())
+            .collect();
+        self.winds.remove(&realm);
+        let Some(wind) = vd_terrain::sea_wind::SeaWind::from_bytes(&record) else {
+            return ArtifactIngest::Shape;
+        };
+        let book = Arc::make_mut(&mut self.book);
+        let cache = book
+            .realms
+            .get_mut(&realm)
+            .expect("the head was read above");
+        cache.wind = Some(Arc::new(wind));
+        cache.epoch += 1;
+        if cache.whole() {
+            ArtifactIngest::ArtifactWhole {
+                realm,
+                digest: head.digest,
+            }
+        } else {
+            ArtifactIngest::WindWhole
         }
     }
 
@@ -1088,6 +1191,7 @@ mod tests {
             coast_parts: 0,
             low_m: -100,
             high_m: 100,
+            wind_parts: 0,
         }
     }
 
@@ -1436,6 +1540,7 @@ mod tests {
             coast_parts,
             low_m: drawn_of(artifact).0,
             high_m: drawn_of(artifact).1,
+            wind_parts: 0,
         }
     }
 
@@ -1673,6 +1778,7 @@ mod tests {
             coast_parts: 0,
             low_m: 0,
             high_m: 0,
+            wind_parts: 0,
         });
         let wrong = BulkMsg::ArtifactPyramid {
             realm: realm(),
@@ -1961,6 +2067,9 @@ mod tests {
                 // This statement ships no mask: its head announces none (`head_of`).
                 coast_parts: 0,
                 coasts_whole: 0,
+                // Nor a wind: its head announces none.
+                wind_parts: 0,
+                winds_whole: 0,
                 // No fine part rides this statement.
                 fine_parts: 0,
                 fine_tiles: 0,
@@ -1988,6 +2097,7 @@ mod tests {
                 coast_parts: 0,
                 low_m: 0,
                 high_m: 0,
+                wind_parts: 0,
             };
         let mut other_digest = artifact.digest();
         other_digest[0] ^= 1;

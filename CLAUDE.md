@@ -511,6 +511,21 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     one local commit; THE GAME'S PARALLEL TRACK OPENS (amends B74/B75's "not now"): its own worktree — SPIKE-6a and
     SPIKE-10a, physics on the solid cells, the block record and dig/place; B99 STEPS 5–6 MOVE THERE; this worktree keeps
     step 4 (the volume and the water fill), then the clouds and the weather.
+    ★ B106 (2026-10-17, "Please proceed"): THE WATER'S LOOK FROM PROVEN OPEN SOURCE PORTED INTO OUR OWN DRAWING (bevy-aqua
+    MIT/Apache, GodotOceanWaves MIT: the spectrum, the cascades, foam, the Atlas lighting) — NO PLUGIN; the server's water
+    map says where water stands; the ground's lattice, one shape at every distance, no flicker (W16, W18, B16, B22); the
+    waves fade by one rung-free rule; THE WAVES ARE LOOK ONLY until a law both hosts compute; ORDER: the study → THE SEA
+    FIRST in the window → lakes and rivers with W1–W2.
+    ★ B107 (2026-10-17): THE SEA'S LOOK — the climate's wind ships (SL6 YES); THE WAVES' DOMAIN IS NO CHART ("best quality,
+    no seams, only physics"): plane waves in the planet's 3D space, a 1D profile of x·d each (Jeschke et al. 2018), weighted
+    by the local wind's spectrum and depth, unresolved bands as roughness; near 3D waves later; THIRD_PARTY_NOTICES.md.
+    ★ B108 (2026-10-18, the owner in the window on slice S1: "It looks good."): THE SEA'S FIRST LOOK GIVEN (the sea on the
+    ground's own lattice, one plain colour); S2 next; the login's loading screen found waiting over the sea and high up.
+    ★ B109 (2026-10-18, S2's two answers): THE FLOOR THROUGH THE WATER BY THE DEPTH LAW, OPAQUE (Beer–Lambert and single
+    scatter over each water point's depth; the deep floor cut by the eye's rule; no screen-space transmission); THE WIND
+    COMPUTED BY THE PLANET'S SHARD AT LOAD (the seasons chain once on the stored ground, kept in its store, one bulk part).
+    ★ B110 (2026-10-18, the owner in the window on S2: "Looks amazing … let's commit and move to waves please"): THE SEA'S
+    LIGHT ACCEPTED (the sky's part waits for the clouds); one local commit; S3 THE WAVES NEXT (B107's plane waves).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

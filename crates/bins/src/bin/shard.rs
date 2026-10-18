@@ -533,14 +533,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vd_sim::stub::exterior::RealmStore(Some(Box::new(store)));
     }
     // ★ THE ARTIFACT SHIP'S SOURCE (slice 8c stage C4c): an artifact read from the store at boot
-    // is installed now; one still solving is installed on the tick it lands (below).
+    // is installed now; one still solving is installed on the tick it lands (below). ★ So is one whose sea's wind the
+    // worker still computes (ruling B109): the head announces the wind's parts, so the ship waits for them.
     if let Some((boot, body)) = artifact_boot.as_ref().zip(own_body.as_ref())
+        && !boot.solving()
         && let Some(artifact) = boot.artifact()
         && let Some(source) = vd_bins::artifact_source::artifact_source_of(
             own_realm,
             vd_terrain::artifact_world_tag(universe_seed),
             body,
             artifact,
+            boot.wind().map(AsRef::as_ref),
         )
     {
         *world.resource_mut::<vd_sim::stub::artifact_ship::ArtifactSource>() =
@@ -795,7 +798,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      start solves again"
                 );
             }
-            if let Some(millis) = landed {
+            // ★ THE SEA'S WIND ALONE LANDED (ruling B109) over the world the store already held: the ship is armed now.
+            if let Some(landed) = landed.filter(|l| !l.new_artifact) {
+                tracing::info!(
+                    millis = landed.millis,
+                    held = boot.wind().is_some(),
+                    "the sea's wind landed and was written to this realm's store"
+                );
+                if let Some((artifact, body)) = boot.artifact().zip(own_body.as_ref())
+                    && let Some(source) = vd_bins::artifact_source::artifact_source_of(
+                        own_realm,
+                        vd_terrain::artifact_world_tag(universe_seed),
+                        body,
+                        artifact,
+                        boot.wind().map(AsRef::as_ref),
+                    )
+                {
+                    *node
+                        .world_mut()
+                        .resource_mut::<vd_sim::stub::artifact_ship::ArtifactSource>() =
+                        vd_sim::stub::artifact_ship::ArtifactSource(Some(source));
+                    tracing::info!("the artifact ship is armed with its sea's wind");
+                }
+            }
+            if let Some(millis) = landed.filter(|l| l.new_artifact).map(|l| l.millis) {
                 tracing::info!(
                     millis,
                     digest = ?boot.artifact().map(|a| a.digest()),
@@ -819,6 +845,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         vd_terrain::artifact_world_tag(universe_seed),
                         body,
                         artifact,
+                        boot.wind().map(AsRef::as_ref),
                     )
                 {
                     *node

@@ -1624,6 +1624,7 @@ mod tests {
                 coast_parts: 0,
                 low_m: drawn_of(&artifact).0,
                 high_m: drawn_of(&artifact).1,
+                wind_parts: 0,
             }),
         );
         c.step(0.0);

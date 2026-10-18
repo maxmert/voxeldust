@@ -48,6 +48,7 @@ fn main() {
         coast_parts: 0,
         low_m: drawn.0,
         high_m: drawn.1,
+        wind_parts: 0,
     });
     for (k, level) in artifact.pyramid.iter().enumerate().rev() {
         rx.accept(BulkMsg::ArtifactPyramid {
@@ -136,8 +137,9 @@ fn main() {
         "the live run's waiting chunk {watched:?}: wanted here {in_set}, reads {:?}",
         vd_terrain::artifact::tiles_of_chunk(&lattice, watched)
     );
-    let source = vd_bins::artifact_source::artifact_source_of(realm, 0, &body, &Arc::new(artifact))
-        .expect("a source");
+    let source =
+        vd_bins::artifact_source::artifact_source_of(realm, 0, &body, &Arc::new(artifact), None)
+            .expect("a source");
     let named: BTreeSet<(u8, u32, u32)> = source.tiles_under(dir, len).into_iter().collect();
     println!(
         "the client's chunks read {} tiles; the shard names {}",

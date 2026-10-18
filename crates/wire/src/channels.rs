@@ -449,6 +449,11 @@ pub enum BulkMsg {
         /// to an arm minor 35 shipped, which moved [`crate::version::PROTO_MINOR_FLOOR`] to 36.
         low_m: i32,
         high_m: i32,
+        /// ★ HOW MANY SEA-WIND PARTS FOLLOW (2026-10-18, ruling B109; SL6 owner-approved by B107 Q1): the parts of
+        /// [`BulkMsg::ArtifactWind`] that carry the year's surface wind of each climate cell, after the coast's; zero for a
+        /// body whose seasons do not run or that holds no sea. A client's cache is whole only when every one of them is
+        /// here. A field APPEND to an arm minor 39 shipped, which moved [`crate::version::PROTO_MINOR_FLOOR`] to 40.
+        wind_parts: u32,
     },
     /// ★ ONE PART OF A PYRAMID LEVEL: level `level` (from 1), part `part` of `parts`, the heights in
     /// whole metres in the coarser lattice's node order — the globe from orbit. APPENDED
@@ -505,6 +510,20 @@ pub enum BulkMsg {
         face: u8,
         tx: u32,
         ty: u32,
+        part: u32,
+        parts: u32,
+        bytes: Vec<u8>,
+    },
+    /// ★ ONE PART OF THE SEA'S WIND (2026-10-18, ruling B109; SL6 owner-approved by B107 Q1: "the climate's wind ships"):
+    /// `bytes` holds part `part` of `parts` of the realm's year surface wind per climate cell (the generator's own form,
+    /// `vd_terrain::sea_wind::SeaWind::to_bytes`), computed once by the realm's shard on its stored ground. It rides after
+    /// the coast's parts on the realm audience, once per gateway; parts of at most 32 KiB. APPENDED (discriminant 8,
+    /// minor 40).
+    ///
+    /// **Example.** The home planet's wind is 16 200 cells of six bytes, 97 KB in three parts; the sun's glint on the sea
+    /// off the coast stand reads its 1.9 m/s.
+    ArtifactWind {
+        realm: RealmId,
         part: u32,
         parts: u32,
         bytes: Vec<u8>,
@@ -1459,6 +1478,7 @@ mod tests {
                     coast_parts: 34,
                     low_m: -9_870,
                     high_m: 12_420,
+                    wind_parts: 3,
                 },
                 3,
             ),
@@ -1504,6 +1524,15 @@ mod tests {
                     bytes: vec![1, 2, 3],
                 },
                 7,
+            ),
+            (
+                BulkMsg::ArtifactWind {
+                    realm: RealmId::Planet(7),
+                    part: 1,
+                    parts: 3,
+                    bytes: vec![4, 5],
+                },
+                8,
             ),
         ];
         for (msg, index) in bulk {

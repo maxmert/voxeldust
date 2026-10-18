@@ -375,7 +375,12 @@ pub const PROTO_MAJOR: u16 = 1;
 /// tiles"; ruling B87): a new `ClientControlMsg::FineHeld` (disc 9) states the finest level of each fine tile the client
 /// holds of a realm, as tiles land, so a gateway re-sends after a shed send only what the client lacks. APPENDED, so the
 /// floor does not move: an older client states nothing and is re-sent everything, as before.
-pub const PROTO_MINOR: u16 = 39;
+/// **40** — THE SEA'S WIND (owner-approved 2026-10-17 under SL6, ruling B107 Q1: "the climate's wind ships"; ruling
+/// B109): `BulkMsg::ArtifactHead` carries `wind_parts`, and a new `BulkMsg::ArtifactWind` (disc 8) ships the year's
+/// surface wind of each climate cell in parts of at most 32 KiB, after the coast's — the sun's glint on the sea reads its
+/// speed (Cox & Munk 1954), the waves its direction. A FIELD APPEND to an arm minor 39 shipped, which postcard cannot make
+/// additive, so [`PROTO_MINOR_FLOOR`] moves to 40: a minor-39 client is refused, never served a head it would mis-frame.
+pub const PROTO_MINOR: u16 = 40;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -403,10 +408,12 @@ pub const PROTO_MINOR: u16 = 39;
 /// **34**: the coast mask's `coast_parts` field inside `BulkMsg::ArtifactHead`
 /// — a field append to an arm minor 33 already shipped, which postcard reads positionally, so a
 /// minor-33 peer would decode the head's bytes one field out. The ledger entry above names it.
-/// **36** (the current floor): the drawn ground's `low_m` and `high_m` inside `BulkMsg::ArtifactHead`
+/// **36**: the drawn ground's `low_m` and `high_m` inside `BulkMsg::ArtifactHead`
 /// (ruling B55) — a field append of the same kind as minor 34's, so a minor-35 peer would decode the
 /// head's bytes two fields short. The ledger entry above names it.
-pub const PROTO_MINOR_FLOOR: u16 = 36;
+/// **40** (the current floor): the sea wind's `wind_parts` inside `BulkMsg::ArtifactHead` (ruling B109) — a field append
+/// of the same kind, so a minor-39 peer would decode the head's bytes one field short. The ledger entry above names it.
+pub const PROTO_MINOR_FLOOR: u16 = 40;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {

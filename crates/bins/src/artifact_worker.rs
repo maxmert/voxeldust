@@ -13,9 +13,12 @@
 //! realm's look bag. Twenty-seven seconds later the worker answers; the shard writes the rows,
 //! states its surface, and the tiles begin to flow.
 
+use std::sync::Arc;
+
 use vd_terrain::BodyDefinition;
 use vd_terrain::artifact::Artifact;
 use vd_terrain::par::Cores;
+use vd_terrain::sea_wind::SeaWind;
 use vd_terrain::solve::{Schedule, SolveWords, solve_full_shipped_on};
 
 /// What the worker is asked: a body and its charter's words.
@@ -29,8 +32,19 @@ pub struct SolveJob {
 /// the wake-ahead lead is measured against).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SolveDone {
-    pub artifact: Artifact,
+    /// The solved world; `None` for a wind-only job (the world was already in the store).
+    pub artifact: Option<Artifact>,
+    /// ★ THE SEA'S WIND (ruling B109), computed by the same worker on the solved or stored world; `None` where it has
+    /// none (`vd_terrain::sea_wind::blows`).
+    pub wind: Option<SeaWind>,
     pub millis: u64,
+}
+
+/// ★ THE SEA'S WIND of a world on the job's body (ruling B109): the seasons' chain once on its ground, on `cores`.
+#[must_use]
+pub fn wind_of(job: &SolveJob, artifact: &Artifact, cores: Cores) -> Option<SeaWind> {
+    let lattice = job.body.macro_lattice()?;
+    vd_terrain::sea_wind::sea_wind(&job.body, &lattice, &job.words, artifact, cores.threads())
 }
 
 /// THE SOLVE, as the worker runs it: the full schedule, the climate over the final relief, the
@@ -62,8 +76,10 @@ pub fn run_solve_on(job: &SolveJob, cores: Cores) -> Option<Artifact> {
 
 /// The seam: start a solve, poll for its answer. ONE job at a time per worker.
 pub trait ArtifactWorker: Send {
-    /// Begin solving `job`; a job already running is refused (`false`).
+    /// Begin solving `job`, then its sea's wind; a job already running is refused (`false`).
     fn start(&mut self, job: SolveJob) -> bool;
+    /// ★ Begin computing the sea's wind of `stored`, a world already in the store (ruling B109); refused like `start`.
+    fn start_wind(&mut self, job: SolveJob, stored: Arc<Artifact>) -> bool;
     /// The finished solve, once; `None` while it runs or when nothing was started. A body with no
     /// lattice answers `Some(None)`.
     fn poll(&mut self) -> Option<Option<SolveDone>>;
@@ -85,7 +101,21 @@ impl ArtifactWorker for InlineWorker {
         }
         self.busy = true;
         self.done = Some(run_solve(&job).map(|artifact| SolveDone {
-            artifact,
+            wind: wind_of(&job, &artifact, Cores::default()),
+            artifact: Some(artifact),
+            millis: 0,
+        }));
+        true
+    }
+
+    fn start_wind(&mut self, job: SolveJob, stored: Arc<Artifact>) -> bool {
+        if self.busy {
+            return false;
+        }
+        self.busy = true;
+        self.done = Some(Some(SolveDone {
+            artifact: None,
+            wind: wind_of(&job, &stored, Cores::default()),
             millis: 0,
         }));
         true
@@ -137,13 +167,38 @@ impl ArtifactWorker for ThreadedWorker {
                 vd_terrain::par::adopt_start_step(crate::thread_class::lower_to_solve_class);
                 let started = std::time::Instant::now();
                 let answer = run_solve_on(&job, cores).map(|artifact| SolveDone {
-                    artifact,
+                    wind: wind_of(&job, &artifact, cores),
+                    artifact: Some(artifact),
                     millis: started.elapsed().as_millis() as u64,
                 });
                 // The receiver may be gone (the shard shut down mid-solve): nobody to answer.
                 let _ = sender.send(answer);
             })
             .expect("a solve thread spawns");
+        self.receiver = Some(receiver);
+        true
+    }
+
+    fn start_wind(&mut self, job: SolveJob, stored: Arc<Artifact>) -> bool {
+        if self.receiver.is_some() {
+            return false;
+        }
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let cores = self.cores;
+        std::thread::Builder::new()
+            .name("sea-wind".to_owned())
+            .spawn(move || {
+                // ★ BELOW THE TICK AND THE WINDOW (ruling B91), as the solve's own thread.
+                vd_terrain::par::adopt_start_step(crate::thread_class::lower_to_solve_class);
+                let started = std::time::Instant::now();
+                let answer = SolveDone {
+                    artifact: None,
+                    wind: wind_of(&job, &stored, cores),
+                    millis: started.elapsed().as_millis() as u64,
+                };
+                let _ = sender.send(Some(answer));
+            })
+            .expect("a wind thread spawns");
         self.receiver = Some(receiver);
         true
     }

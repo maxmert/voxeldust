@@ -120,6 +120,7 @@ pub(crate) mod tests {
             coast_parts: 0,
             low_m: -100,
             high_m: 100,
+            wind_parts: 0,
         });
         if let Some((z_m, water_m)) = level {
             rx.accept(BulkMsg::ArtifactPyramid {

@@ -73,6 +73,10 @@ pub struct SeasonState {
     /// Which climate cells are mostly land (the last call's sea share under a half).
     cell_land: Vec<bool>,
     cell_rain: Vec<Gf>,
+    /// ★ THE YEAR'S SURFACE WIND per climate cell, the last call's (ruling B109; the sea's glint and waves): the mean of
+    /// the seasons' winds east and north, m/s, and the mean of their speeds, m/s — a monsoon that turns with the seasons
+    /// keeps its speed while its mean vector shrinks.
+    pub last_wind: Vec<[Gf; 3]>,
 }
 
 impl SeasonState {
@@ -109,6 +113,7 @@ impl SeasonState {
             spin_trace: Vec::new(),
             cell_land: Vec::new(),
             cell_rain: Vec::new(),
+            last_wind: Vec::new(),
         }
     }
 }
@@ -475,6 +480,7 @@ fn climate_once(
     let mut cell_rain_year = vec![Gf::ZERO; n];
     let mut pet_year = vec![Gf::ZERO; n];
     let mut wind_year = (vec![Gf::ZERO; n], vec![Gf::ZERO; n]);
+    let mut surface_wind = vec![[Gf::ZERO; 3]; n];
     let mut worst_rounds = 0;
     let (mut worst_loop, mut worst_left) = (0, 0);
     let (mut worst_drag, mut drag_met) = (0, true);
@@ -497,12 +503,21 @@ fn climate_once(
             pet_year[c] += o.water.pet[c] * season_s;
             wind_year.0[c] += o.east[c] * o.water.column[c];
             wind_year.1[c] += o.north[c] * o.water.column[c];
+            let w = &mut surface_wind[c];
+            w[0] += o.east[c];
+            w[1] += o.north[c];
+            w[2] += (o.east[c] * o.east[c] + o.north[c] * o.north[c]).sqrt();
         }
         next_speed.push(o.speed);
         next_land_evap.push(o.land_evap);
         next_rates.push(o.mr.cell_rate);
         next_phi.push(Some(o.mr.phi));
     }
+    let per = Gf::from_i64(seasons as i64);
+    state.last_wind = surface_wind
+        .into_iter()
+        .map(|w| [w[0] / per, w[1] / per, w[2] / per])
+        .collect();
     state.speed = next_speed;
     state.land_evap = next_land_evap;
     state.cell_rates = next_rates;

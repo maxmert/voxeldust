@@ -168,6 +168,9 @@ pub struct TerrainConfig {
     /// switches for a measurement, never a gate's path.
     pub shadows: bool,
     pub hide_rung: Option<u8>,
+    /// ★ THE SEA (rulings B105 Q10, B106; slice S1): each chunk's sea sheet rides it as a child. `VD_TERRAIN_WATER=0`
+    /// draws none (the dry sea floor shows, as under ruling B22) — a measurement's switch for the sea's cost.
+    pub water: bool,
     /// ★ THE CULLING ABLATION (the coast flight's holes, 2026-09-20): `VD_TERRAIN_NO_CULL=1` spawns
     /// every chunk and its probe twin with the engine's frustum culling OFF, so a hole that
     /// vanishes under it is a culling box, not a missing mesh. A measurement's switch.
@@ -344,6 +347,15 @@ pub(crate) fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
 /// the ones a person writes: `0`, `false`, `off`, `no`, in any case (review item 9). One reading
 /// for every switch, so `VD_TERRAIN_BOUND=false` and `VD_TERRAIN_SHADOWS=off` mean what they say
 /// instead of silently meaning ON.
+/// ★ WATER'S FRESNEL REFLECTANCE in the engine's form (ruling B109): `sqrt(F0 / 0.16)` with `F0 = ((n − 1)/(n + 1))²` and
+/// water's index n = 1.333.
+const WATER_REFLECTANCE: f32 = 0.356_837;
+
+/// How often the loading screen's diagnostic names the pieces it waits for, in frames (about ten seconds at 60 a second):
+/// MEASURED on its first use (2026-10-18), the rung-9 pieces at 30 km over the coast stand that waited on 128 m tiles the
+/// shard named only at a coarser level.
+const SCREEN_WAIT_LOG_FRAMES: u64 = 600;
+
 fn env_on(name: &str) -> bool {
     let off = ["0", "false", "off", "no"];
     !std::env::var(name)
@@ -408,6 +420,7 @@ impl TerrainConfig {
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
             shadows: env_on(SHADOWS_ENV),
+            water: env_on("VD_TERRAIN_WATER"),
             hide_rung: std::env::var(HIDE_RUNG_ENV)
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
@@ -1877,6 +1890,8 @@ pub struct Terrain {
     /// The ground's materials, one per realm and rung, each holding its row of the realm's band
     /// table, built on first use.
     materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
+    /// ★ THE SEA'S MATERIAL of each realm's rung (slice S1): the ground's crossfade, the water's colour.
+    water_materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
     /// The probe materials, one per realm, kind and rung, built on first use.
     probe_materials: BTreeMap<(RealmId, u8, u8), Handle<ProbeMaterial>>,
     /// THE SHADOW LADDER'S state: the light-caster materials per realm and rung; how many
@@ -2066,6 +2081,7 @@ impl Terrain {
             last_placements: BTreeMap::new(),
             frame_ticks: 1,
             materials: BTreeMap::new(),
+            water_materials: BTreeMap::new(),
             probe_materials: BTreeMap::new(),
             morph_totals: [0; 3],
             bytes_drawn: 0,
@@ -2390,6 +2406,49 @@ impl Terrain {
             .clone()
     }
 
+    /// ★ THE SEA'S MATERIAL for a realm's rung (slice S1; the old sheet's, ruling W18): the same crossfade the ground
+    /// rides — so a rung's sea ends where the finer rung's begins and sinks and ramps with its ground — with the water's
+    /// own plain colour (the light, the sky's reflection and the depth's clarity are slice S2's) and no culling. A sheet
+    /// mesh carries no surface attribute, so the ground's paint is off and the material's colour shows.
+    fn water_material(
+        &mut self,
+        assets: &mut Assets<GroundMaterial>,
+        realm: RealmId,
+        rung: u8,
+        body: &vd_terrain::BodyDefinition,
+        gpu: &BandGpu,
+    ) -> Handle<GroundMaterial> {
+        let table = self.band_buffer(realm, body, gpu);
+        self.water_materials
+            .entry((realm, rung))
+            .or_insert_with(|| {
+                assets.add(GroundMaterial {
+                    // ★ THE SEA'S MATERIAL (ruling B109): its colour and its roughness are the shader's own, from the water's
+                    // depth law and the wind's slope variance; the material states only water's Fresnel reflectance at
+                    // normal incidence, F0 = ((n − 1)/(n + 1))² = 0.0204 for n = 1.333, as the engine's `reflectance`
+                    // (F0 = 0.16 · reflectance²).
+                    base: StandardMaterial {
+                        base_color: Color::WHITE,
+                        reflectance: WATER_REFLECTANCE,
+                        metallic: 0.0,
+                        cull_mode: None,
+                        alpha_mode: AlphaMode::Mask(0.5),
+                        ..default()
+                    },
+                    extension: LadderFade::new(
+                        rung,
+                        (
+                            vd_client::chunks::sink_m(body, rung),
+                            vd_client::chunks::stand_in_sink_m(body, rung),
+                        ),
+                        f64::from(vd_seed::ladder::cell_m(rung)),
+                        table,
+                    ),
+                })
+            })
+            .clone()
+    }
+
     /// THE BOUNDED ASK in force for a realm (ruling F9 item 1): the held horizon, which the band
     /// table carries every frame; the tier rule's own radii while the realm has no ladder yet.
     fn bound_of(&self, realm: RealmId) -> AskBound {
@@ -2578,13 +2637,55 @@ fn facing_of(rbox: &RealmBox) -> DQuat {
 
 /// The triangles' indices at 16 bits where the vertices fit (step 5: exact, half the bytes), else
 /// at 32.
-fn packed_indices(geometry: &vd_client::chunks::ChunkGeometry) -> bevy::mesh::Indices {
-    let flat = geometry.triangles.iter().flatten().copied();
+fn packed_indices(
+    geometry: &vd_client::chunks::ChunkGeometry,
+    drawn: usize,
+) -> bevy::mesh::Indices {
+    let flat = geometry.triangles[..drawn].iter().flatten().copied();
     if geometry.vertices.len() <= usize::from(u16::MAX) {
         bevy::mesh::Indices::U16(flat.map(|i| i as u16).collect())
     } else {
         bevy::mesh::Indices::U32(flat.collect())
     }
+}
+
+/// ★ THE SEA SHEET'S MESH (slice S1; the old sheet's, ruling W18): the ground's own vertex form with no surface — a
+/// position, a normal (the radial: still water faces up), its morph metre, its morph normal (the radial again) — so the
+/// ground's fade shader draws it with the ground's bands, sink and ramp, in the material's own colour.
+fn sea_mesh_of(sea: &vd_client::chunks::SeaSheet) -> Mesh {
+    let packed: Vec<[i16; 2]> = sea.radials.iter().map(|r| oct_encode(*r)).collect();
+    let indices: Vec<u32> = sea
+        .triangles
+        .iter()
+        .flat_map(|t| [t[0], t[1], t[2]])
+        .collect();
+    Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, sea.vertices.clone())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, sea.radials.clone())
+    .with_inserted_attribute(super::ATTRIBUTE_MORPH, sea.morph_m.clone())
+    .with_inserted_attribute(
+        super::ATTRIBUTE_MORPH_NORMAL,
+        bevy::mesh::VertexAttributeValues::Snorm16x2(packed),
+    )
+    // ★ THE FLOOR'S PAINT AND THE WATER'S WORDS (ruling B109): the ground's own surface word and height under each
+    // point, its depth at its place and its target, and the surface's slope variance.
+    .with_inserted_attribute(
+        super::ATTRIBUTE_SURFACE,
+        bevy::mesh::VertexAttributeValues::Unorm8x4(sea.floor_surface.clone()),
+    )
+    .with_inserted_attribute(super::ATTRIBUTE_HEIGHT, sea.floor_height_m.clone())
+    .with_inserted_attribute(
+        super::ATTRIBUTE_WATER,
+        sea.depth_m
+            .iter()
+            .zip(&sea.slope_var)
+            .map(|(d, v)| [d[0], d[1], *v, 0.0])
+            .collect::<Vec<[f32; 4]>>(),
+    )
+    .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
 /// ★ ONE PART OF A CHUNK for the draw-count ablations (ruling B22 step 2): the `part`-th of
@@ -2643,6 +2744,9 @@ fn geometry_part(
         rough: geometry.rough,
         coarse: geometry.coarse,
         bounds: geometry.bounds,
+        // A part of a chunk carries no sea: the whole chunk's sheet rides its own child.
+        sea: vd_client::chunks::SeaSheet::default(),
+        dry: geometry.dry,
     }
 }
 
@@ -2654,6 +2758,7 @@ fn mesh_of(
     flat: bool,
     exact_normal_rung: u8,
     splat: bool,
+    drawn: usize,
 ) -> Mesh {
     if splat {
         return splat_mesh_of(geometry, exact_normal_rung);
@@ -2676,7 +2781,7 @@ fn mesh_of(
         bevy::mesh::VertexAttributeValues::Unorm8x4(geometry.surface.clone()),
     )
     .with_inserted_attribute(super::ATTRIBUTE_HEIGHT, geometry.heights.clone())
-    .with_inserted_indices(packed_indices(geometry));
+    .with_inserted_indices(packed_indices(geometry, drawn));
     // THE NORMAL BY RUNG (ruling V18, `TerrainConfig::exact_normal_rung`): the worker's packed
     // four bytes on the near rungs, the engine's twelve on the far ones; nothing is packed here
     // (refutation N-2: the harvest loop is the main thread's).
@@ -3751,6 +3856,81 @@ pub(crate) fn sync_terrain(
                 & !terrain.drawn_stand_ins.iter().any(|(r, _)| *r == eb.realm);
         }
         terrain.ground_progress = (resident, wanted);
+        // ★ WHAT THE SCREEN WAITS FOR (a diagnostic, 2026-10-18): every [`SCREEN_WAIT_LOG_FRAMES`], the pieces still on
+        // the rough ground and the 128 m tiles each lacks, so a screen that never goes names its cause.
+        if !whole && terrain.frames.is_multiple_of(SCREEN_WAIT_LOG_FRAMES) {
+            for eb in &with_bodies {
+                let (Some(body), Some(cache)) =
+                    (terrain.lane.body(eb.realm), terrain.lane.artifact(eb.realm))
+                else {
+                    continue;
+                };
+                let rough: Vec<vd_terrain::chunk::ChunkKey> = terrain
+                    .entities
+                    .iter()
+                    .filter(|((r, _), d)| (*r == eb.realm) & d.rough)
+                    .map(|((_, k), _)| *k)
+                    .take(40)
+                    .collect();
+                let lacks_of = |key: vd_terrain::chunk::ChunkKey| -> Vec<String> {
+                    cache.fine().map_or_else(Vec::new, |book| {
+                        book.tiles_of_chunk(key.face, key.rung, key.x, key.y)
+                            .into_iter()
+                            .filter(|t| !book.holds_all(&[*t], key.rung))
+                            .map(|t| format!("{:?}/{}/{}", t.face, t.tx, t.ty))
+                            .collect()
+                    })
+                };
+                let wanted = terrain.ladders.get(&eb.realm).map(|l| &l.wanted.keys);
+                let landed = terrain.ladders.get(&eb.realm).map(|l| l.landed);
+                let ramp = vd_client::arrival::ramp_ticks();
+                for key in rough {
+                    let tag = terrain.entities.get(&(eb.realm, key)).map_or(0, |d| d.tag);
+                    let missing_over: Vec<String> = terrain
+                        .ladders
+                        .get(&eb.realm)
+                        .map(|l| {
+                            l.wanted
+                                .keys
+                                .iter()
+                                .filter(|k| {
+                                    !terrain.lane.is_resident(eb.realm, **k)
+                                        && vd_client::ladder_view::Column::of(**k).face == key.face
+                                })
+                                .take(4)
+                                .map(|k| format!("{k:?}"))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let parents_lack: Vec<(u8, Vec<String>)> =
+                        vd_client::chunks::parent_keys(body, key)
+                            .into_iter()
+                            .map(|p| (p.rung, lacks_of(p)))
+                            .filter(|(_, l)| !l.is_empty())
+                            .collect();
+                    tracing::info!(
+                        realm = ?eb.realm,
+                        ?key,
+                        wanted = wanted.is_some_and(|w| w.contains(&key)),
+                        stand_in = terrain.drawn_stand_ins.contains(&(eb.realm, key)),
+                        lacks = ?lacks_of(key),
+                        ?parents_lack,
+                        ?landed,
+                        settled = vd_client::arrival::ramp_weight(terrain.frame_ticks, tag, ramp),
+                        covered = vd_client::arrival::tag_covered(tag),
+                        sink = vd_client::arrival::sink_weight(terrain.frame_ticks, tag, ramp),
+                        overlapping_missing = terrain.ladders.get(&eb.realm).is_some_and(|l| {
+                            l.wanted.overlapping_missing(
+                                vd_client::ladder_view::Column::of(key),
+                                &|k| terrain.lane.is_resident(eb.realm, k),
+                            )
+                        }),
+                        ?missing_over,
+                        "THE SCREEN WAITS: a piece on the rough ground"
+                    );
+                }
+            }
+        }
         terrain.ground_ready = whole;
         if whole {
             tracing::info!(
@@ -3820,6 +4000,7 @@ pub(crate) fn sync_terrain(
     let splat_rung = terrain.config.splat_rung;
     let hide_rung = terrain.config.hide_rung;
     let no_cull = terrain.config.no_cull;
+    let water_on = terrain.config.water;
     let shadow_cast = terrain.config.shadow_cast;
     let shadow_cast_rung = terrain.config.shadow_cast_rung;
     let shadow_receive = terrain.config.shadow_receive;
@@ -3864,7 +4045,13 @@ pub(crate) fn sync_terrain(
             let material =
                 terrain.shadow_material(&mut ground_materials, realm, key.rung, &body, &gpu);
             let sink_m = terrain.caster_sink_m(&body, key.rung);
-            let built = mesh_of(&ready.geometry, false, exact_normal_rung, false);
+            let built = mesh_of(
+                &ready.geometry,
+                false,
+                exact_normal_rung,
+                false,
+                ready.geometry.triangles.len(),
+            );
             let bytes = mesh_bytes(&built);
             let mesh = meshes.add(built);
             let bounds = moved_bounds(&ready.geometry, sink_m as f32);
@@ -3920,17 +4107,39 @@ pub(crate) fn sync_terrain(
         let ablate = (split_draws > 1 || thin > 1) && !flat && !splat;
         let part_of = |part: usize| {
             let piece = geometry_part(&ready.geometry, part, split_draws, thin);
-            mesh_of(&piece, false, exact_normal_rung, false)
+            mesh_of(
+                &piece,
+                false,
+                exact_normal_rung,
+                false,
+                piece.triangles.len(),
+            )
         };
+        // ★ THE SEA DRAWN OVER THE CHUNK (slice S1): its deep floor, the last `floor_cut` triangles, is left out of the
+        // drawn ground (a splat draws every vertex, an ablation part every triangle of its range).
+        let sea_drawn = water_on && !ready.geometry.sea.triangles.is_empty();
+        let ground_drawn = ready.geometry.triangles.len()
+            - if sea_drawn & !ablate & !splat {
+                ready.geometry.sea.floor_cut as usize
+            } else {
+                0
+            };
         let built = if ablate {
             part_of(0)
         } else {
-            mesh_of(&ready.geometry, flat, exact_normal_rung, splat)
+            mesh_of(
+                &ready.geometry,
+                flat,
+                exact_normal_rung,
+                splat,
+                ground_drawn,
+            )
         };
         let bytes = mesh_bytes(&built);
-        // ★ A CHUNK WITH NO TRIANGLE IS HELD, NOT DRAWN (ruling B89): no mesh asset and no entity (`Drawn::entity`).
-        let empty = ready.geometry.triangles.is_empty();
-        let mesh = (!empty).then(|| meshes.add(built));
+        // ★ A CHUNK WITH NO TRIANGLE IS HELD, NOT DRAWN (ruling B89): no mesh asset and no entity (`Drawn::entity`). A chunk
+        // whose whole ground lies under deep water draws its sea alone: an entity with no ground mesh, its sheet's parent.
+        let mesh = (ground_drawn > 0).then(|| meshes.add(built));
+        let empty = mesh.is_none() & !sea_drawn;
         let part_material = material.clone();
         if terrain.config.covered {
             let g = &ready.geometry;
@@ -4007,23 +4216,25 @@ pub(crate) fn sync_terrain(
                 .get(&realm)
                 .is_some_and(|l| l.wanted.is_hidden(key))
             & !casts_itself;
-        let (entity, twin) = match mesh {
-            None => (None, None),
-            Some(mesh) => {
-                let entity = commands
-                    .spawn((
-                        Mesh3d(mesh.clone()),
-                        MeshMaterial3d(material.clone()),
-                        Transform::default(),
-                        TerrainChunk {
-                            realm,
-                            rung: key.rung,
-                        },
-                        ChunkOrigin(ready.geometry.origin_m),
-                        bounds,
-                        bevy::mesh::MeshTag(stamp),
-                    ))
-                    .id();
+        let (entity, twin) = match (empty, mesh) {
+            (true, _) => (None, None),
+            (false, mesh) => {
+                let entity = match &mesh {
+                    Some(mesh) => commands
+                        .spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())))
+                        .id(),
+                    None => commands.spawn(Visibility::default()).id(),
+                };
+                commands.entity(entity).insert((
+                    Transform::default(),
+                    TerrainChunk {
+                        realm,
+                        rung: key.rung,
+                    },
+                    ChunkOrigin(ready.geometry.origin_m),
+                    bounds,
+                    bevy::mesh::MeshTag(stamp),
+                ));
                 if born_hidden || hide_rung.is_some_and(|r| key.rung >= r) {
                     commands.entity(entity).insert(Visibility::Hidden);
                 }
@@ -4043,6 +4254,32 @@ pub(crate) fn sync_terrain(
                         .entity(entity)
                         .insert(bevy::light::NotShadowReceiver);
                 }
+                // ★ THE SEA SHEET (slice S1; the old sheet's spawn) rides as the chunk's CHILD: placed with it, hidden
+                // with it, despawned with it; it casts no shadow, and it carries its OWN box (its morph and sinks).
+                if sea_drawn {
+                    let water =
+                        terrain.water_material(&mut ground_materials, realm, key.rung, &body, &gpu);
+                    let (lo, hi) = ready.geometry.sea.bounds;
+                    let sheet = commands
+                        .spawn((
+                            Mesh3d(meshes.add(sea_mesh_of(&ready.geometry.sea))),
+                            MeshMaterial3d(water),
+                            Transform::default(),
+                            bevy::light::NotShadowCaster,
+                            bevy::camera::primitives::Aabb::from_min_max(
+                                Vec3::from_array(lo),
+                                Vec3::from_array(hi),
+                            ),
+                            bevy::mesh::MeshTag(stamp),
+                        ))
+                        .id();
+                    if no_cull {
+                        commands
+                            .entity(sheet)
+                            .insert(bevy::camera::visibility::NoFrustumCulling);
+                    }
+                    commands.entity(entity).add_child(sheet);
+                }
                 // The other parts of a split chunk ride on it as children: placed with it, despawned with it.
                 if ablate {
                     for part in 1..split_draws {
@@ -4056,7 +4293,7 @@ pub(crate) fn sync_terrain(
                         ));
                     }
                 }
-                let twin = probe_materials.as_mut().map(|pm| {
+                let twin = probe_materials.as_mut().zip(mesh).map(|(pm, mesh)| {
                     let probe = terrain.probe_material(
                         pm,
                         realm,
@@ -4892,8 +5129,12 @@ struct BandTableWords {
     rows: Vec<[f32; 4]>,
     clock: u32,
     /// ★ THE REALM'S SNOW LINE (ruling B75 item 4; `ChunkLane::snow_line`): `[base, per sin², per |sin|, 1]`, or all
-    /// nought where the realm draws no snow; the table's last row, written with every fill.
+    /// nought where the realm draws no snow; the row after the rows, written with every fill.
     snow: [f32; 4],
+    /// ★ THE SUN (ruling B109): the direction to the terrain's sun in this frame's render space and one, or all nought
+    /// with no sun; the table's last row, after the snow's — the sea's vertex stage bends its ray into the water (the
+    /// view's lights are the fragment stage's alone).
+    sun: [f32; 4],
 }
 
 impl BandTableWords {
@@ -4906,12 +5147,14 @@ impl BandTableWords {
             &rows,
             &rows,
             [0.0; 4],
+            [0.0; 4],
         );
         BandTableWords {
             bytes,
             rows,
             clock: clock[0],
             snow: [0.0; 4],
+            sun: [0.0; 4],
         }
     }
 
@@ -4927,7 +5170,17 @@ impl BandTableWords {
             &self.rows,
             &last_rows,
             self.snow,
+            self.sun,
         );
+    }
+
+    /// ★ THE SUN'S ROW (ruling B109), written by the placement every frame: the table's last row.
+    fn set_sun(&mut self, to_light: Vec3) {
+        self.sun = [to_light.x, to_light.y, to_light.z, 1.0];
+        let at = self.bytes.len() - 16;
+        for (k, value) in self.sun.iter().enumerate() {
+            self.bytes[at + 4 * k..at + 4 * k + 4].copy_from_slice(&value.to_le_bytes());
+        }
     }
 
     /// ★ THE REALM'S FRAME (ruling B89, the speed step), written by the placement with its step: the body's centre in
@@ -4984,13 +5237,15 @@ pub(crate) struct BandGpu<'w> {
 /// - this frame's rows, one `vec4<f32>` each, then LAST frame's rows (the same count; this frame's
 ///   again when the count changed, so no row is read past the table);
 /// - ★ THE REALM'S SNOW LINE (ruling B75 item 4), one `vec4<f32>` after them: the row at twice the count, which only
-///   the fade shader reads.
+///   the fade shader reads;
+/// - ★ THE SUN (ruling B109), one `vec4<f32>` last: the row at twice the count and one, which only the fade shader reads.
 fn band_table_bytes(
     clock: [u32; 3],
     step: [[f32; 4]; 3],
     rows: &[[f32; 4]],
     last_rows: &[[f32; 4]],
     snow: [f32; 4],
+    sun: [f32; 4],
 ) -> Vec<u8> {
     let last = if last_rows.len() == rows.len() {
         last_rows
@@ -5008,7 +5263,7 @@ fn band_table_bytes(
         .chain(&frame)
         .chain(rows)
         .chain(last)
-        .chain([&snow])
+        .chain([&snow, &sun])
     {
         for value in row {
             out.extend_from_slice(&value.to_le_bytes());
@@ -5059,8 +5314,11 @@ pub(crate) fn place_chunks(
     mut occluded: Local<bool>,
     mut sky_turn: ResMut<crate::reconstruction::SkyTurn>,
     pipelines: Option<Res<crate::pipeline_meter::PipelineMeter>>,
+    sun: Query<&Transform, (With<TerrainSun>, Without<TerrainChunk>)>,
 ) {
     let place_started = std::time::Instant::now();
+    // ★ THE DIRECTION TO THE SUN (ruling B109): the sea's vertex stage reads it off the band table's last row.
+    let to_light = sun.iter().next().map(|t| t.back().as_vec3());
     // THE AIR'S ROTATION STEP (the temporal path's T2, the design §6.3): the identity unless the air's
     // body is drawn in both frames (set with the realms' steps below; every early return keeps it).
     let mut turn = DQuat::IDENTITY;
@@ -5137,6 +5395,9 @@ pub(crate) fn place_chunks(
             let step = RealmStep::between(last, now);
             table.words.set_step(step.rows());
             table.words.set_frame(centre, facing);
+            if let Some(to_light) = to_light {
+                table.words.set_sun(to_light);
+            }
             if *sky_realm == Some(*realm) {
                 turn = step.rotation;
             }

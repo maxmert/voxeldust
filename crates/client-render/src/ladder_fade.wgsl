@@ -149,7 +149,23 @@ struct FadeVertex {
     // ★ THE HEIGHT over the ladder radius, metres; the morph target stands `morph_m` higher on the same radial.
     @location(13) height_m: f32,
 #endif
+#ifdef WATER_SURFACE
+    // ★ THE SEA'S WORDS (ruling B109): the depth at the point (x) and at its morph target (y), metres; the surface's slope
+    // variance (z).
+    @location(14) water: vec4<f32>,
+#endif
 }
+
+// ★ THE WATER'S OWN OPTICS (ruling B109), at the sRGB primaries' dominant wavelengths 612, 549 and 464 nm: pure water's
+// absorption (Pope & Fry 1997), per metre, and its backscattering, half of Morel's (1974) b_w = 0.00288 (λ/500)^-4.32.
+const WATER_ABSORB: vec3<f32> = vec3<f32>(0.2644, 0.0565, 0.0101);
+const WATER_BACKSCATTER: vec3<f32> = vec3<f32>(0.000601, 0.000962, 0.001989);
+// Water's refractive index: the sun's ray bends into the water by Snell's law.
+const WATER_INDEX: f32 = 1.333;
+// Austin (1974): the surface passes (1 - 0.043) / n² of the light that rises to it under the water up into the air.
+const WATER_UP: f32 = 0.5386;
+// Morel & Prieur (1977): deep water's irradiance reflectance under its surface, R∞ = 0.33 · b_b / a.
+const WATER_DEEP_SHARE: f32 = 0.33;
 
 // ★ THE PAINT TABLE (ruling B75 item 4): each cover's albedo, linear — a first table; the art has its own step.
 const ROCK_ALBEDO: vec3<f32> = vec3<f32>(0.30, 0.29, 0.27);
@@ -247,6 +263,21 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let snow = (1.0 - rock) * snow_over(vertex.height_m + vertex.morph_m * (1.0 - w), dot(radial, table.pole.xyz));
     out.color = vec4<f32>(ROCK_ALBEDO * rock + SNOW_ALBEDO * snow + SOIL_ALBEDO * (1.0 - rock - snow), 1.0);
 #endif
+#ifdef WATER_SURFACE
+    // ★ THE WATER'S COLOUR BY THE MEDIUM'S LAW (ruling B109): the floor's paint (above) seen through the water's depth —
+    // the irradiance reflectance under the surface of water `H` deep over a floor of albedo `A` (Maritorena, Morel &
+    // Gentili 1994), `R = R∞ (1 − e^(−2KH)) + A e^(−2KH)`, with the diffuse attenuation `K = (a + b_b) / μ` along the sun's
+    // ray bent into the water, then passed up through the surface (Austin's factor). The depth hands over with the
+    // shape, as the paint does; the alpha carries the slope variance to the fragment stage.
+    let depth = mix(vertex.water.y, vertex.water.x, w);
+    // The sun's row (the band table's last, after the snow's): the direction to it, and one where a sun shines.
+    let sun = table.rows[2u * table.clock.w + 1u];
+    let cos_sun = select(1.0, max(dot(radial, sun.xyz), 0.0), sun.w > 0.5);
+    let mu = sqrt(1.0 - (1.0 - cos_sun * cos_sun) / (WATER_INDEX * WATER_INDEX));
+    let through = exp(-2.0 * (WATER_ABSORB + WATER_BACKSCATTER) / mu * depth);
+    let deep = WATER_DEEP_SHARE * WATER_BACKSCATTER / WATER_ABSORB;
+    out.color = vec4<f32>(WATER_UP * mix(deep, out.color.rgb, through), vertex.water.z);
+#endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;
 #endif
@@ -267,6 +298,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // ★ THE PAINT IS THE COLOUR (ruling B75 item 4): the engine multiplied it by the material's own colour, which stays
     // the look of a mesh with no surface.
     pbr_input.material.base_color = vec4<f32>(in.color.rgb, 1.0);
+#endif
+#ifdef WATER_SURFACE
+    // ★ THE GLINT'S WIDTH (ruling B109): GGX's α is the surface's RMS slope, √σ² (Cox & Munk 1954), and the engine's
+    // perceptual roughness is √α.
+    pbr_input.material.perceptual_roughness = sqrt(sqrt(max(in.color.a, 0.0)));
 #endif
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     var out: FragmentOutput;

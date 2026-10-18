@@ -19,6 +19,7 @@
 //! 181 parts, and states its surface within the boot — no solve.
 
 use std::collections::BTreeSet;
+use vd_terrain::sea_wind::SeaWind;
 
 use vd_sim::io::Store;
 use vd_sim::stub::built_store::{
@@ -33,6 +34,22 @@ use vd_sim::stub::built_store::{
 };
 use vd_terrain::artifact::{Artifact, Row, Tile, TileCache, coast_bytes, tile_width};
 use vd_terrain::macro_lattice::MacroLattice;
+
+/// ★ THE SEA'S WIND BESIDE THE WORLD (ruling B109): written (staged; the caller commits) under the artifact's digest.
+pub fn write_sea_wind(store: &mut dyn Store, digest: [u64; 2], wind: &SeaWind) {
+    store.put(
+        &vd_sim::stub::built_store::sea_wind_key(digest),
+        &wind.to_bytes().into(),
+    );
+}
+
+/// The sea's wind the store holds for the artifact of `digest`; `None` with no row or a row the generator cannot read
+/// (another version: the shard computes it again).
+#[must_use]
+pub fn read_sea_wind(store: &dyn Store, digest: [u64; 2]) -> Option<SeaWind> {
+    let bytes = store.get(&vd_sim::stub::built_store::sea_wind_key(digest))?;
+    SeaWind::from_bytes(&bytes)
+}
 
 /// The head an artifact writes, under `world_tag`.
 #[must_use]
