@@ -41,6 +41,8 @@ use super::{GatewayConfig, GatewaySessions, GatewayStats, Session, SessionPhase}
 
 /// ★ The minor a session must have negotiated to read a fine record (the levels' record, minor 38; ruling B86 item 3).
 pub(crate) const FINE_MINOR: u16 = 38;
+/// ★ The minor a session must have negotiated to read the far lake list (`BulkMsg::ArtifactLakes`, ruling B116 part 2).
+pub(crate) const LAKES_MINOR: u16 = 41;
 /// The levels a finished tile of the fine level `level` (its number) carries — its square and its mean levels: a session
 /// that holds none of a tile holds "from past the coarsest" (ruling B95: each fine level its own count).
 fn fine_levels(level: u8) -> u8 {
@@ -92,6 +94,9 @@ pub(crate) fn forget_for_session(session: &mut Session, realm: RealmId) {
     session.fine_sent.remove(&realm);
     session.fine_acked.remove(&realm);
     session.artifact_redrive.repass.remove(&realm);
+    // The far lake list too (ruling B116 part 2): the client forgets it with the realm, so the realm's return serves it
+    // again.
+    session.lakes_sent.remove(&realm);
 }
 
 /// ★ A SEND TOWARD A NODE WAS SHED (2026-09-27): when the node is a client that holds a session,
@@ -148,6 +153,9 @@ pub(crate) struct GatewayArtifact {
     /// (its level, read off its first part, and its parts so far).
     pub(crate) fine: BTreeMap<(FineTile, u8), Vec<Vec<u8>>>,
     fine_assembling: BTreeMap<FineTile, FineAssembling>,
+    /// ★ THE FAR LAKES (ruling B116 part 2): the realm's far lake list's parts as the wire's own messages, by index — late
+    /// and unannounced by the head, so outside [`GatewayArtifact::whole`]; served once it is whole.
+    pub(crate) lakes: Vec<Option<Vec<u8>>>,
 }
 
 /// A fine tile's name: its fine level's number (ruling B95), its face and its index there.
@@ -161,6 +169,13 @@ struct FineAssembling {
 }
 
 impl GatewayArtifact {
+    /// ★ The far lake list's parts once every one is here (ruling B116 part 2).
+    #[must_use]
+    pub(crate) fn lakes_whole(&self) -> Option<Vec<&Vec<u8>>> {
+        (!self.lakes.is_empty() && self.lakes.iter().all(Option::is_some))
+            .then(|| self.lakes.iter().flatten().collect())
+    }
+
     /// Whether the head, every part of every level AND every coast part are here.
     #[must_use]
     pub(crate) fn whole(&self) -> bool {
@@ -237,9 +252,11 @@ pub(crate) fn cache_artifact_part(
                             band: (low_m, high_m, sea_m),
                             fine: BTreeMap::new(),
                             fine_assembling: BTreeMap::new(),
+                            lakes: Vec::new(),
                         },
                     );
                     for session in sessions.by_session.values_mut() {
+                        session.lakes_sent.remove(&realm);
                         session.artifact_parts_sent.remove(&realm);
                         session.artifact_tiles_sent.remove(&realm);
                         session.fine_sent.remove(&realm);
@@ -326,6 +343,39 @@ pub(crate) fn cache_artifact_part(
             cache.parts.push(bytes);
             cache.last_part_at = now;
             stats.artifact_parts_cached += 1;
+        }
+        // ★ A FAR LAKES PART (ruling B116 part 2): late and unannounced by the head, held beside the realm's cache by its
+        // index; a cut of another count starts the list over. A part for a realm with no head, from another node, or past
+        // its count is a stray.
+        Ok(BulkMsg::ArtifactLakes {
+            realm: named,
+            part,
+            parts,
+            ..
+        }) if named == realm => {
+            let Some(cache) = sessions.artifacts.get_mut(&realm) else {
+                stats.artifact_parts_stray += 1;
+                return;
+            };
+            if cache.shard != from || parts == 0 || part >= parts {
+                stats.artifact_parts_stray += 1;
+                return;
+            }
+            if cache.lakes.len() != parts as usize {
+                cache.lakes = vec![None; parts as usize];
+            }
+            cache.lakes[part as usize] = Some(bytes);
+            cache.last_part_at = now;
+            stats.artifact_parts_cached += 1;
+            if let Some(whole) = cache.lakes_whole() {
+                tracing::info!(
+                    realm = %realm,
+                    from = from.0,
+                    parts,
+                    bytes = whole.iter().map(|b| b.len()).sum::<usize>(),
+                    "the realm's far lake list is cached whole (ruling B116)"
+                );
+            }
         }
         // ★ A TILE (the one tile path): the shard's answer to a viewer's want, held with the
         // realm's cache for every session within reach of it; a tile for a realm with no head,
@@ -866,6 +916,34 @@ pub(crate) fn serve_artifacts(
             let Some(cache) = artifacts.get(&realm).filter(|a| a.whole()) else {
                 continue;
             };
+            // ★ THE FAR LAKES FIRST (ruling B116 part 2, B86's far copies first): once the session holds the realm's
+            // artifact, its far lake list goes out once — before any fine level, to a session that reads it. MEASURED
+            // before (2026-10-19, the rung pictures): served after the fine levels, the list waited while the tiles took
+            // every beat's budget, and until it came rung 13 and up drew no lake at all.
+            if session.negotiated_minor >= LAKES_MINOR
+                && budget > 0
+                && session.artifact_held.get(&realm) == Some(&cache.digest)
+                && session.lakes_sent.get(&realm) != Some(&cache.digest)
+                && let Some(parts) = cache.lakes_whole()
+            {
+                for bytes in parts {
+                    push_control(
+                        outbox,
+                        session.client,
+                        &ServerControlMsg::ArtifactPart {
+                            bytes: bytes.clone(),
+                        },
+                    );
+                    stats.artifact_parts_served += 1;
+                    budget = budget.saturating_sub(bytes.len());
+                }
+                session.lakes_sent.insert(realm, cache.digest);
+                tracing::info!(
+                    realm = %realm,
+                    client = ?session.client,
+                    "the realm's far lake list is served to a session (ruling B116)"
+                );
+            }
             // ★ THE FINE LEVELS BY THIS SESSION'S OWN DISTANCE (ruling B87), whatever realm it stands in: the nearest tile
             // first, each tile's levels the session lacks the coarsest first, from the realm's cache, in the beat's
             // budget; a level not cached yet waits with every finer level of its tile, and the session draws the coarser
@@ -936,6 +1014,10 @@ fn redrive(
     redrive.shed_at = None;
     redrive.repass.extend(owed);
     session.artifact_tiles_sent.clear();
+    // ★ THE FAR LAKE LIST GOES AGAIN (ruling B116 part 2): it leaves in one beat, all its parts at once, and a shed part
+    // leaves the client's list unfinished for good; the client keeps the parts it holds and counts a whole list's parts
+    // as duplicates.
+    session.lakes_sent.clear();
     stats.artifact_redrives += 1;
     tracing::info!(
         client = ?session.client,

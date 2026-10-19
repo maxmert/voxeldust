@@ -499,9 +499,51 @@ impl Quarter<'_> {
         }
     }
 
-    /// The three-tile rule (see [`Meet::Three`]): the tile `me`, its neighbour in its row `me ^ 1` and in its column
-    /// `me ^ 2`.
-    fn three(&self, z: [i32; 4], x: i64, y: i64) -> i32 {
+    /// ★ THE DOMINANT RASTER of the cell's blend (0 ..= 3: the slots NW, NE, SW, SE of the corner): on each cut the side the
+    /// cell stands on (the side whose blend weight reaches half), a missing side giving way; at a cube corner the slot of
+    /// the greatest weight. A plane that must not blend — a water's level, its share — takes this one raster's value where
+    /// the heights blend (the one-volume revision §3.4: the finished cell takes the identity of the raster its height came
+    /// from in the cut).
+    fn pick(&self, x: i64, y: i64) -> usize {
+        let z = self.slots.map(|f| f.at(x, y));
+        let either = |lo: usize, hi: usize, d: i64| -> usize {
+            match (z[lo] == MISSING, z[hi] == MISSING) {
+                (true, false) => hi,
+                (false, true) => lo,
+                _ if d >= 0 => hi,
+                _ => lo,
+            }
+        };
+        let [nc, sc, wr, er] = self.cuts;
+        match self.meet {
+            Meet::Four { rows_first: false } => {
+                let row = if x < self.point.0 { wr.at(x) } else { er.at(x) };
+                let (north, south) = (either(0, 1, x - nc.at(y)), either(2, 3, x - sc.at(y)));
+                either_of(&z, north, south, y - row)
+            }
+            Meet::Four { rows_first: true } => {
+                let col = if y < self.point.1 { nc.at(y) } else { sc.at(y) };
+                let (west, east) = (either(0, 2, y - wr.at(x)), either(1, 3, y - er.at(x)));
+                either_of(&z, west, east, x - col)
+            }
+            Meet::Three => {
+                let w = self.three_weights(x, y);
+                let mut best = self.me;
+                let mut top = -1i64;
+                for (k, wk) in w {
+                    if z[k] != MISSING && wk > top {
+                        best = k;
+                        top = wk;
+                    }
+                }
+                best
+            }
+        }
+    }
+
+    /// The three-tile rule's weights (see [`Meet::Three`]): the tile `me`, its neighbour in its row `me ^ 1` and in its
+    /// column `me ^ 2`, each with its weight.
+    fn three_weights(&self, x: i64, y: i64) -> [(usize, i64); 3] {
         let me = self.me;
         let (east, south) = (me & 1 == 1, me & 2 == 2);
         let [nc, sc, wr, er] = self.cuts;
@@ -523,11 +565,16 @@ impl Quarter<'_> {
         };
         // The column neighbour's against the row neighbour's: the row neighbour's side is the one nearer its edge.
         let row_over_col = blend_weight(u - v);
-        let w = [
+        [
             (me, over_col * over_row),
             (me ^ 1, (ONE - over_col) * (ONE - row_over_col)),
             (me ^ 2, (ONE - over_row) * row_over_col),
-        ];
+        ]
+    }
+
+    /// The three-tile rule (see [`Meet::Three`]): the weighted mean of the three tiles' heights.
+    fn three(&self, z: [i32; 4], x: i64, y: i64) -> i32 {
+        let w = self.three_weights(x, y);
         let (mut sum, mut total) = (0i64, 0i64);
         for (k, wk) in w {
             if z[k] != MISSING && wk > 0 {
@@ -540,6 +587,99 @@ impl Quarter<'_> {
         }
         (sum + (total >> 1)).div_euclid(total) as i32
     }
+}
+
+/// The second choice of [`Quarter::pick`]: of two first choices `a` and `b`, `b` where `d ≥ 0`, a missing side giving way.
+fn either_of(z: &[i32; 4], a: usize, b: usize, d: i64) -> usize {
+    match (z[a] == MISSING, z[b] == MISSING) {
+        (true, false) => b,
+        (false, true) => a,
+        _ if d >= 0 => b,
+        _ => a,
+    }
+}
+
+/// ★ THE DRAWING OF A PLANE THAT MUST NOT BLEND (slice W2; a water's level and its share): the tile's square over
+/// `rect` from the nine `planes` (each beside its height raster in `block`, the same cells), each cell the value of the
+/// raster that dominates its height's blend ([`Quarter::pick`]) under the same cuts and meets as [`draw_over`].
+#[must_use]
+pub fn draw_pick(
+    block: [&Field; 9],
+    planes: [&Field; 9],
+    cuts: &TileCuts,
+    square: [i64; 4],
+    rect: [i64; 4],
+    meets: [Meet; 4],
+) -> Field {
+    let heights = quarters_of(block, cuts, square, meets);
+    let values = quarters_of(planes, cuts, square, meets);
+    let [x0, y0, x1, y1] = square;
+    let (mx, my) = ((x0 + x1) >> 1, (y0 + y1) >> 1);
+    let [rx0, ry0, rx1, ry1] = rect;
+    let (w, h) = ((rx1 - rx0).max(0) as usize, (ry1 - ry0).max(0) as usize);
+    let mut v = Vec::with_capacity(w * h);
+    for y in ry0..ry1 {
+        for x in rx0..rx1 {
+            let q = usize::from(y >= my) * 2 + usize::from(x >= mx);
+            v.push(values[q].slots[heights[q].pick(x, y)].at(x, y));
+        }
+    }
+    Field {
+        gx0: rx0,
+        gy0: ry0,
+        w,
+        h,
+        v,
+    }
+}
+
+/// The four quarters of a tile's square (NW, NE, SW, SE) over the nine rasters `block`.
+fn quarters_of<'a>(
+    block: [&'a Field; 9],
+    cuts: &'a TileCuts,
+    square: [i64; 4],
+    meets: [Meet; 4],
+) -> [Quarter<'a>; 4] {
+    let [x0, y0, x1, y1] = square;
+    let [nw, n, ne, w, t, e, sw, s, se] = block;
+    let [[v_nwn, v_nne], [v_wt, v_te], [v_sws, v_sse]] = &cuts.cols;
+    let [[h_nww, h_nt, h_nee], [h_wsw, h_ts, h_ese]] = &cuts.rows;
+    let [c_nw, c_ne, c_sw, c_se] = cuts.corners;
+    let [m_nw, m_ne, m_sw, m_se] = meets;
+    [
+        Quarter {
+            slots: [nw, n, w, t],
+            point: c_nw,
+            cuts: [v_nwn, v_wt, h_nww, h_nt],
+            corner: (x0, y0),
+            meet: m_nw,
+            me: 3,
+        },
+        Quarter {
+            slots: [n, ne, t, e],
+            point: c_ne,
+            cuts: [v_nne, v_te, h_nt, h_nee],
+            corner: (x1, y0),
+            meet: m_ne,
+            me: 2,
+        },
+        Quarter {
+            slots: [w, t, sw, s],
+            point: c_sw,
+            cuts: [v_wt, v_sws, h_wsw, h_ts],
+            corner: (x0, y1),
+            meet: m_sw,
+            me: 1,
+        },
+        Quarter {
+            slots: [t, e, s, se],
+            point: c_se,
+            cuts: [v_te, v_sse, h_ts, h_ese],
+            corner: (x1, y1),
+            meet: m_se,
+            me: 0,
+        },
+    ]
 }
 
 /// ★ THE DRAWING of a tile's square from its nine rasters and its cuts, all in one chart (B85; B2's face-edge cut): the
@@ -576,45 +716,7 @@ pub fn draw_over(
 ) -> Field {
     let [x0, y0, x1, y1] = square;
     let (mx, my) = ((x0 + x1) >> 1, (y0 + y1) >> 1);
-    let [nw, n, ne, w, t, e, sw, s, se] = block;
-    let [[v_nwn, v_nne], [v_wt, v_te], [v_sws, v_sse]] = &cuts.cols;
-    let [[h_nww, h_nt, h_nee], [h_wsw, h_ts, h_ese]] = &cuts.rows;
-    let [c_nw, c_ne, c_sw, c_se] = cuts.corners;
-    let [m_nw, m_ne, m_sw, m_se] = meets;
-    let quarters = [
-        Quarter {
-            slots: [nw, n, w, t],
-            point: c_nw,
-            cuts: [v_nwn, v_wt, h_nww, h_nt],
-            corner: (x0, y0),
-            meet: m_nw,
-            me: 3,
-        },
-        Quarter {
-            slots: [n, ne, t, e],
-            point: c_ne,
-            cuts: [v_nne, v_te, h_nt, h_nee],
-            corner: (x1, y0),
-            meet: m_ne,
-            me: 2,
-        },
-        Quarter {
-            slots: [w, t, sw, s],
-            point: c_sw,
-            cuts: [v_wt, v_sws, h_wsw, h_ts],
-            corner: (x0, y1),
-            meet: m_sw,
-            me: 1,
-        },
-        Quarter {
-            slots: [t, e, s, se],
-            point: c_se,
-            cuts: [v_te, v_sse, h_ts, h_ese],
-            corner: (x1, y1),
-            meet: m_se,
-            me: 0,
-        },
-    ];
+    let quarters = quarters_of(block, cuts, square, meets);
     let [rx0, ry0, rx1, ry1] = rect;
     let (w, h) = ((rx1 - rx0).max(0) as usize, (ry1 - ry0).max(0) as usize);
     let mut v = Vec::with_capacity(w * h);

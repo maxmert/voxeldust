@@ -77,6 +77,30 @@ pub struct FineBook {
 pub struct HeldLevels {
     pub lo: u32,
     pub levels: Vec<Vec<i32>>,
+    /// ★ THE TILE'S WATER (slice W2), at the same levels as `levels`: each cell's water level (quarter metres over the
+    /// sea, [`super::stitch::MISSING`] where no water holds it whole) and wet share (0 ..= [`super::tile::WET_FULL`]);
+    /// `None` for a tile held without its water (a record of the older form).
+    pub water: Option<HeldWater>,
+}
+
+/// A held tile's water planes ([`HeldLevels::water`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldWater {
+    pub level: Vec<Vec<i32>>,
+    pub wet: Vec<Vec<i32>>,
+}
+
+/// ★ THE WATER AT A PLACE ([`FineBook::water`]): the level and share of the level's cell that holds the place's centre
+/// (the nearest sample — a water's level never blends, the one-volume revision §3.4's column rule), or why there is none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FineWater {
+    /// The cell's water level (quarter metres over the sea, [`super::stitch::MISSING`] where no water holds the cell whole)
+    /// and its wet share.
+    Held { level: i32, wet: i32 },
+    /// The level serves the place, but the tile that holds it is not held (or holds no water).
+    Missing(TileKey),
+    /// The level does not serve the place.
+    Outside,
 }
 
 /// ★ WHERE THE 128 m LEVEL APPLIES (the way-in design §3.6, a law and never a flag on a body): where the macro solve's
@@ -165,6 +189,46 @@ impl FineBook {
     /// (and nothing changed) where a level has another size, the levels stop short of the coarsest the book needs, or a
     /// gap would stand between them and the levels held.
     pub fn insert_from(&mut self, key: TileKey, lo: u32, levels: Vec<Vec<i32>>) -> bool {
+        self.insert_planes(key, lo, levels, None)
+    }
+
+    /// ★ HOLDS THE LEVELS `lo ..` OF THE TILE `key` WITH THEIR WATER (slice W2): as [`FineBook::insert_from`], the water's
+    /// planes joining the heights level by level. `false` (and nothing changed) as there, or where a water plane has
+    /// another size than its level.
+    pub fn insert_water_from(
+        &mut self,
+        key: TileKey,
+        lo: u32,
+        levels: super::tile::WaterLevels,
+    ) -> bool {
+        let n = levels.heights.len();
+        let sized = (levels.level.len() == n)
+            && (levels.wet.len() == n)
+            && (0..n).all(|k| {
+                (levels.level[k].len() == levels.heights[k].len())
+                    && (levels.wet[k].len() == levels.heights[k].len())
+            });
+        sized
+            && self.insert_planes(
+                key,
+                lo,
+                levels.heights,
+                Some(HeldWater {
+                    level: levels.level,
+                    wet: levels.wet,
+                }),
+            )
+    }
+
+    /// The one insert under [`FineBook::insert_from`] and [`FineBook::insert_water_from`]: a tile's levels from `lo`, with
+    /// their water or without; a merge keeps the water only where both parts carry it.
+    fn insert_planes(
+        &mut self,
+        key: TileKey,
+        lo: u32,
+        levels: Vec<Vec<i32>>,
+        water: Option<HeldWater>,
+    ) -> bool {
         let top = self.geom.level.mean_levels() + 1;
         let hi = lo + levels.len() as u32;
         let sized = (lo < top)
@@ -179,19 +243,117 @@ impl FineBook {
         if !sized || !joins {
             return false;
         }
-        let merged = match held {
+        let (merged, water) = match held {
             Some(h) if h.lo <= lo => return true,
             Some(h) => {
+                let cut = (h.lo - lo) as usize;
                 let mut all = levels;
-                all.truncate((h.lo - lo) as usize);
+                all.truncate(cut);
                 all.extend(h.levels.iter().cloned());
-                all
+                let water = match (water, &h.water) {
+                    (Some(mut w), Some(hw)) => {
+                        w.level.truncate(cut);
+                        w.wet.truncate(cut);
+                        w.level.extend(hw.level.iter().cloned());
+                        w.wet.extend(hw.wet.iter().cloned());
+                        Some(w)
+                    }
+                    _ => None,
+                };
+                (all, water)
             }
-            None => levels,
+            None => (levels, water),
         };
-        self.tiles
-            .insert(key, Arc::new(HeldLevels { lo, levels: merged }));
+        self.tiles.insert(
+            key,
+            Arc::new(HeldLevels {
+                lo,
+                levels: merged,
+                water,
+            }),
+        );
         true
+    }
+
+    /// ★ THE WATER AT THE SAMPLE NEAREST the centre of the cell `(i, j)` of `cell_rung` on `face`, for a read at
+    /// `draw_rung`: that sample's level and share, never a blend — the IDENTITY a finer level's solve takes (the one-volume
+    /// revision §3.4 item 5: a 16 m cell takes the 128 m water at its place).
+    #[must_use]
+    pub fn water(&self, face: Face, draw_rung: u8, cell_rung: u8, i: i32, j: i32) -> FineWater {
+        self.water_read(face, draw_rung, cell_rung, (i, j), false)
+    }
+
+    /// ★ THE WATER A DRAWN PLACE READS — THE COLUMN RULE (the one-volume revision §3.4): the place takes the level of the
+    /// water that holds the level's samples around it whole (the highest of the four samples bracketing its centre), and
+    /// its share from the sample nearest it. The drawing then wets the place where its OWN smooth ground stands under that
+    /// level, so the shore follows the ground's crossing of the level and never a sample's square. MEASURED before
+    /// (2026-10-18, the owner's window at the basin lake: *"The shores squared"*): the nearest sample alone held a level
+    /// only where its cell lay wholly under water, so every shore stepped along the cells — 128 m squares from afar, 16 m
+    /// ones near. A solve never reads this (it takes [`Self::water`]), so no stored tile changes.
+    #[must_use]
+    pub fn shore_water(
+        &self,
+        face: Face,
+        draw_rung: u8,
+        cell_rung: u8,
+        i: i32,
+        j: i32,
+    ) -> FineWater {
+        self.water_read(face, draw_rung, cell_rung, (i, j), true)
+    }
+
+    /// [`Self::water`] (`around` false) and [`Self::shore_water`] (`around` true).
+    fn water_read(
+        &self,
+        face: Face,
+        draw_rung: u8,
+        cell_rung: u8,
+        (i, j): (i32, i32),
+        around: bool,
+    ) -> FineWater {
+        let level = self.geom.level;
+        if draw_rung > level.top_rung() {
+            return FineWater::Outside;
+        }
+        let k = u32::from(draw_rung.saturating_sub(level.rung()));
+        let half = Gi::new(1i64 << (NOISE_BITS - 1));
+        let (x, tx) = sample_and_fraction(level.rung(), k, cell_rung, i);
+        let (y, ty) = sample_and_fraction(level.rung(), k, cell_rung, j);
+        // One sample's water: its level and share, or the key of the tile that holds it when that tile (or its water) is
+        // not held.
+        let at = |sx: i64, sy: i64| -> Result<(i32, i32), TileKey> {
+            let (key, index) = self.locate(face, k, sx, sy);
+            self.tiles
+                .get(&key)
+                .and_then(|h| {
+                    let at = k.checked_sub(h.lo)? as usize;
+                    let w = h.water.as_ref()?;
+                    Some((w.level[at][index], w.wet[at][index]))
+                })
+                .ok_or(key)
+        };
+        let nearest = match at(x + i64::from(tx >= half), y + i64::from(ty >= half)) {
+            Ok(w) => w,
+            Err(key) => return FineWater::Missing(key),
+        };
+        if !around {
+            return FineWater::Held {
+                level: nearest.0,
+                wet: nearest.1,
+            };
+        }
+        let mut top = super::stitch::MISSING;
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            match at(x + dx, y + dy) {
+                Ok((l, w)) if w == super::tile::WET_FULL => top = top.max(l),
+                Ok(_) => {}
+                Err(key) => return FineWater::Missing(key),
+            }
+        }
+        FineWater::Held {
+            level: top,
+            wet: nearest.1,
+        }
     }
 
     /// The finest level the book holds of the tile `key`, if any.
@@ -366,6 +528,19 @@ impl ZField for FineField {
             return held;
         }
         self.book.z(face, draw_rung, cell_rung, i, j)
+    }
+    /// ★ THE FINEST LEVEL'S WATER (slice W2): the 16 m book's where it serves the rung and holds the place, else the 128 m
+    /// book's — the same level the ground's read takes, so the water and the ground it lies on come from one tile.
+    fn fine_water(&self, face: Face, draw_rung: u8, cell_rung: u8, i: i32, j: i32) -> FineWater {
+        if let Some(f) = self
+            .finer
+            .as_ref()
+            .filter(|f| draw_rung <= f.level().top_rung())
+            && let held @ FineWater::Held { .. } = f.shore_water(face, draw_rung, cell_rung, i, j)
+        {
+            return held;
+        }
+        self.book.shore_water(face, draw_rung, cell_rung, i, j)
     }
 }
 

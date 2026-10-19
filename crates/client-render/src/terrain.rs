@@ -171,6 +171,8 @@ pub struct TerrainConfig {
     /// ★ THE SEA (rulings B105 Q10, B106; slice S1): each chunk's sea sheet rides it as a child. `VD_TERRAIN_WATER=0`
     /// draws none (the dry sea floor shows, as under ruling B22) — a measurement's switch for the sea's cost.
     pub water: bool,
+    /// ★ THE WAVES (slice S3): the sea's waves as surface detail; `VD_TERRAIN_WAVES=0` takes them out for a measurement.
+    pub waves: bool,
     /// ★ THE CULLING ABLATION (the coast flight's holes, 2026-09-20): `VD_TERRAIN_NO_CULL=1` spawns
     /// every chunk and its probe twin with the engine's frustum culling OFF, so a hole that
     /// vanishes under it is a culling box, not a missing mesh. A measurement's switch.
@@ -421,6 +423,7 @@ impl TerrainConfig {
                 .and_then(|v| v.parse::<u8>().ok()),
             shadows: env_on(SHADOWS_ENV),
             water: env_on("VD_TERRAIN_WATER"),
+            waves: env_on("VD_TERRAIN_WAVES"),
             hide_rung: std::env::var(HIDE_RUNG_ENV)
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
@@ -1892,6 +1895,8 @@ pub struct Terrain {
     materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
     /// ★ THE SEA'S MATERIAL of each realm's rung (slice S1): the ground's crossfade, the water's colour.
     water_materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
+    /// ★ THE WAVE BANDS of each realm with a sea (slice S3), built once from its body's seed and gravity.
+    wave_bands: BTreeMap<RealmId, vd_client::waves::WaveBands>,
     /// The probe materials, one per realm, kind and rung, built on first use.
     probe_materials: BTreeMap<(RealmId, u8, u8), Handle<ProbeMaterial>>,
     /// THE SHADOW LADDER'S state: the light-caster materials per realm and rung; how many
@@ -2082,6 +2087,7 @@ impl Terrain {
             frame_ticks: 1,
             materials: BTreeMap::new(),
             water_materials: BTreeMap::new(),
+            wave_bands: BTreeMap::new(),
             probe_materials: BTreeMap::new(),
             morph_totals: [0; 3],
             bytes_drawn: 0,
@@ -2685,6 +2691,7 @@ fn sea_mesh_of(sea: &vd_client::chunks::SeaSheet) -> Mesh {
             .map(|(d, v)| [d[0], d[1], *v, 0.0])
             .collect::<Vec<[f32; 4]>>(),
     )
+    .with_inserted_attribute(super::ATTRIBUTE_WIND, sea.wind.clone())
     .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
@@ -2747,6 +2754,7 @@ fn geometry_part(
         // A part of a chunk carries no sea: the whole chunk's sheet rides its own child.
         sea: vd_client::chunks::SeaSheet::default(),
         dry: geometry.dry,
+        far: geometry.far,
     }
 }
 
@@ -5132,9 +5140,12 @@ struct BandTableWords {
     /// nought where the realm draws no snow; the row after the rows, written with every fill.
     snow: [f32; 4],
     /// ★ THE SUN (ruling B109): the direction to the terrain's sun in this frame's render space and one, or all nought
-    /// with no sun; the table's last row, after the snow's — the sea's vertex stage bends its ray into the water (the
-    /// view's lights are the fragment stage's alone).
+    /// with no sun; the row after the snow's — the sea's vertex stage bends its ray into the water (the view's lights
+    /// are the fragment stage's alone).
     sun: [f32; 4],
+    /// ★ THE WAVES (slice S3; `vd_client::waves`): the realm's wave block, [`vd_client::waves::BLOCK_ROWS`] rows after the
+    /// sun's — all nought (its header's first word nought) where the realm draws no waves.
+    waves: Vec<[f32; 4]>,
 }
 
 impl BandTableWords {
@@ -5148,6 +5159,7 @@ impl BandTableWords {
             &rows,
             [0.0; 4],
             [0.0; 4],
+            &[],
         );
         BandTableWords {
             bytes,
@@ -5155,6 +5167,7 @@ impl BandTableWords {
             clock: clock[0],
             snow: [0.0; 4],
             sun: [0.0; 4],
+            waves: Vec::new(),
         }
     }
 
@@ -5171,13 +5184,26 @@ impl BandTableWords {
             &last_rows,
             self.snow,
             self.sun,
+            &self.waves,
         );
     }
 
-    /// ★ THE SUN'S ROW (ruling B109), written by the placement every frame: the table's last row.
+    /// ★ THE WAVE BLOCK (slice S3), written by the placement every frame: the table's last rows.
+    fn set_waves(&mut self, rows: Vec<[f32; 4]>) {
+        let at = self.bytes.len() - 16 * vd_client::waves::BLOCK_ROWS;
+        for (k, row) in rows.iter().take(vd_client::waves::BLOCK_ROWS).enumerate() {
+            for (c, value) in row.iter().enumerate() {
+                let o = at + 16 * k + 4 * c;
+                self.bytes[o..o + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        self.waves = rows;
+    }
+
+    /// ★ THE SUN'S ROW (ruling B109), written by the placement every frame: the row before the wave block.
     fn set_sun(&mut self, to_light: Vec3) {
         self.sun = [to_light.x, to_light.y, to_light.z, 1.0];
-        let at = self.bytes.len() - 16;
+        let at = self.bytes.len() - 16 * (1 + vd_client::waves::BLOCK_ROWS);
         for (k, value) in self.sun.iter().enumerate() {
             self.bytes[at + 4 * k..at + 4 * k + 4].copy_from_slice(&value.to_le_bytes());
         }
@@ -5238,7 +5264,9 @@ pub(crate) struct BandGpu<'w> {
 ///   again when the count changed, so no row is read past the table);
 /// - ★ THE REALM'S SNOW LINE (ruling B75 item 4), one `vec4<f32>` after them: the row at twice the count, which only
 ///   the fade shader reads;
-/// - ★ THE SUN (ruling B109), one `vec4<f32>` last: the row at twice the count and one, which only the fade shader reads.
+/// - ★ THE SUN (ruling B109), one `vec4<f32>`: the row at twice the count and one, which only the fade shader reads;
+/// - ★ THE WAVE BLOCK (slice S3), [`vd_client::waves::BLOCK_ROWS`] rows last (nought where the realm draws no waves),
+///   which only the fade shader reads.
 fn band_table_bytes(
     clock: [u32; 3],
     step: [[f32; 4]; 3],
@@ -5246,6 +5274,7 @@ fn band_table_bytes(
     last_rows: &[[f32; 4]],
     snow: [f32; 4],
     sun: [f32; 4],
+    waves: &[[f32; 4]],
 ) -> Vec<u8> {
     let last = if last_rows.len() == rows.len() {
         last_rows
@@ -5266,6 +5295,11 @@ fn band_table_bytes(
         .chain([&snow, &sun])
     {
         for value in row {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    for k in 0..vd_client::waves::BLOCK_ROWS {
+        for value in waves.get(k).copied().unwrap_or([0.0; 4]) {
             out.extend_from_slice(&value.to_le_bytes());
         }
     }
@@ -5376,11 +5410,16 @@ pub(crate) fn place_chunks(
     // its realm's band table (the fill wrote the identity earlier this frame, which stands for a
     // realm the window did not draw last frame). Only the realms with a table: no other realm draws
     // a ground, and the walk stays within the bodies drawn (SL9).
+    // ★ THE UNIVERSE'S SECOND (slice S3; ruling T3): the waves move on the clock every client shares.
+    let wave_s = snap.universe_seconds(now_s);
     {
         let Terrain {
             band_tables,
             last_placements,
             sky_realm,
+            lane,
+            config,
+            wave_bands,
             ..
         } = &mut *terrain;
         let mut drawn = BTreeMap::new();
@@ -5388,6 +5427,30 @@ pub(crate) fn place_chunks(
             let Some(&(centre, facing)) = rows.get(realm) else {
                 continue;
             };
+            // ★ THE WAVES (slice S3): a realm with a sea writes its wave block for this frame — its bands built once from
+            // its body's seed and gravity, the eye's place in its frame, the universe's second.
+            if let (Some(t_s), Some(body)) = (wave_s, lane.body(*realm))
+                && config.water
+                && config.waves
+                && body.sea_m().is_some()
+            {
+                let bands = wave_bands.entry(*realm).or_insert_with(|| {
+                    vd_client::waves::WaveBands::new(
+                        body.seed(),
+                        f64::from(body.facts().gravity_mm_s2) / 1_000.0,
+                    )
+                });
+                let eye_planet = facing.inverse() * (-centre);
+                // The wind over the eye: the spread of the waves a pixel can show is read there.
+                let wind = lane
+                    .artifact(*realm)
+                    .and_then(|a| a.wind().map(AsRef::as_ref));
+                let (_, wind_planet) =
+                    vd_client::chunks::sea_wind_at(wind, eye_planet.normalize_or_zero());
+                table
+                    .words
+                    .set_waves(bands.block_rows(facing, eye_planet, t_s, wind_planet));
+            }
             let now = DrawnPlacement { centre, facing };
             let last = last_placements
                 .get(realm)

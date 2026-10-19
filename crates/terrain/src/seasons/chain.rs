@@ -77,6 +77,8 @@ pub struct SeasonState {
     /// the seasons' winds east and north, m/s, and the mean of their speeds, m/s — a monsoon that turns with the seasons
     /// keeps its speed while its mean vector shrinks.
     pub last_wind: Vec<[Gf; 3]>,
+    /// Each season's surface wind in its two parts, the last call's, in the seasons' order (a bench reading).
+    pub last_season_winds: Vec<SeasonWinds>,
 }
 
 impl SeasonState {
@@ -114,6 +116,7 @@ impl SeasonState {
             cell_land: Vec::new(),
             cell_rain: Vec::new(),
             last_wind: Vec::new(),
+            last_season_winds: Vec::new(),
         }
     }
 }
@@ -160,6 +163,27 @@ struct SeasonOut {
     mr: super::orography::MountainRain,
     speed: Vec<Gf>,
     land_evap: Vec<Gf>,
+    parts: SeasonWinds,
+}
+
+/// ★ ONE SEASON'S SURFACE WIND per climate cell, in its two parts (a reading for the bench, the last call's): the cells'
+/// law (the season's steps' mean, [`super::wind::winds`]) and the heated winds' land–sea departures (Gill,
+/// [`super::gill::heated_winds`]), east and north, m/s; the season's wind is their sum.
+#[derive(Clone, Debug, Default)]
+pub struct SeasonWinds {
+    pub cell_east: Vec<Gf>,
+    pub cell_north: Vec<Gf>,
+    pub dep_east: Vec<Gf>,
+    pub dep_north: Vec<Gf>,
+    /// The cells' closure by row, the season's steps' mean ([`super::wind::Winds`]'s readings): the transport (W), the
+    /// gross moist stability (J/kg), the moist energy (J/kg), the mass flux (kg/s), the cells' share; and the rising
+    /// branch's sine of latitude.
+    pub row_transport: Vec<Gf>,
+    pub row_gms: Vec<Gf>,
+    pub row_h: Vec<Gf>,
+    pub row_psi: Vec<Gf>,
+    pub row_share: Vec<Gf>,
+    pub rising_sin_lat: Gf,
 }
 
 /// ★ THE SPIN-UP'S STOP (2026-10-16): the climate's slow words (the land's wetness and own evaporation) start cold, and MEASURED the land's rain needs about ten calls to settle (its median 468 → ~530 mm, the
@@ -406,12 +430,14 @@ fn climate_once(
         let speed = (0..n)
             .map(|i| (dep.east[i] * dep.east[i] + dep.north[i] * dep.north[i]).sqrt())
             .collect();
-        let east: Vec<Gf> = mean(&|st, i| step_w[st].east[i])
+        let cell_east = mean(&|st, i| step_w[st].east[i]);
+        let cell_north = mean(&|st, i| step_w[st].north[i]);
+        let east: Vec<Gf> = cell_east
             .iter()
             .zip(&dep.east)
             .map(|(a, b)| *a + *b)
             .collect();
-        let north: Vec<Gf> = mean(&|st, i| step_w[st].north[i])
+        let north: Vec<Gf> = cell_north
             .iter()
             .zip(&dep.north)
             .map(|(a, b)| *a + *b)
@@ -474,6 +500,35 @@ fn climate_once(
             mr,
             speed,
             land_evap,
+            parts: {
+                let rows_mean = |f: &dyn Fn(&Winds) -> &Vec<Gf>| -> Vec<Gf> {
+                    (0..grid.rows)
+                        .map(|r| {
+                            range
+                                .clone()
+                                .map(|st| f(&step_w[st])[r])
+                                .fold(Gf::ZERO, |a, b| a + b)
+                                / k
+                        })
+                        .collect()
+                };
+                SeasonWinds {
+                    cell_east,
+                    cell_north,
+                    dep_east: dep.east,
+                    dep_north: dep.north,
+                    row_transport: rows_mean(&|w| &w.row_transport),
+                    row_gms: rows_mean(&|w| &w.row_gms),
+                    row_h: rows_mean(&|w| &w.row_h),
+                    row_psi: rows_mean(&|w| &w.row_psi),
+                    row_share: rows_mean(&|w| &w.cell_share),
+                    rising_sin_lat: range
+                        .clone()
+                        .map(|st| step_w[st].rising_sin_lat)
+                        .fold(Gf::ZERO, |a, b| a + b)
+                        / k,
+                }
+            },
         }
     };
     let mut node_rain = vec![Gf::ZERO; n_nodes];
@@ -486,6 +541,7 @@ fn climate_once(
     let (mut worst_drag, mut drag_met) = (0, true);
     let (mut next_speed, mut next_land_evap) = (Vec::new(), Vec::new());
     let (mut next_rates, mut next_phi) = (Vec::new(), Vec::new());
+    let mut season_winds = Vec::with_capacity(seasons);
     // Each thread takes the next season when it finishes one (a slow season holds only its own thread); the answers join
     // in the seasons' order, so the bytes are the same on any number of cores.
     let inner = (threads / seasons).max(1);
@@ -512,7 +568,9 @@ fn climate_once(
         next_land_evap.push(o.land_evap);
         next_rates.push(o.mr.cell_rate);
         next_phi.push(Some(o.mr.phi));
+        season_winds.push(o.parts);
     }
+    state.last_season_winds = season_winds;
     let per = Gf::from_i64(seasons as i64);
     state.last_wind = surface_wind
         .into_iter()

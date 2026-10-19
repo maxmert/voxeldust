@@ -153,6 +153,8 @@ struct FadeVertex {
     // ★ THE SEA'S WORDS (ruling B109): the depth at the point (x) and at its morph target (y), metres; the surface's slope
     // variance (z).
     @location(14) water: vec4<f32>,
+    // ★ THE WIND OVER THE POINT (slice S3): a vector in the planet's frame along the sea's plane, m/s.
+    @location(15) wind: vec3<f32>,
 #endif
 }
 
@@ -202,6 +204,86 @@ fn oct_decode(e: vec2<f32>) -> vec3<f32> {
     n.x = n.x + select(t, -t, n.x >= 0.0);
     n.y = n.y + select(t, -t, n.y >= 0.0);
     return normalize(n);
+}
+
+// ★ THE SEA'S WAVES (slice S3; rulings B107, B110; `docs/investigation/2026-10-18/sea_waves_design.md`). The laws:
+// Pierson & Moskowitz (1964), the fully developed wind sea, S(k) = (α/2) k⁻³ exp(−β (k_p/k)²) with ω_p = 0.855 g/U and
+// β = 5/4 — the law's own form at its peak (their β = 0.74 goes with ω₀ = g/U₁₉.₅ and U₁₉.₅ ≈ 1.026 U₁₀: the same law);
+// the TMA factor of the shallow water (Bouws et al. 1985, Kitaigorodskii's form); the spread of Hasselmann et al. (1980),
+// cos^{2s}(θ/2), its exponents at the fully developed sea (U/c_p = 0.855); Cox & Munk (1954) the whole slope variance.
+const WAVE_ALPHA: f32 = 0.0081;
+const WAVE_BETA: f32 = 1.25;
+const WAVE_PEAK: f32 = 0.855;
+const COX_MUNK_FLOOR: f32 = 0.003;
+const COX_MUNK_RATE: f32 = 0.00512;
+const WAVE_DIRECTIONS: u32 = 48u;
+
+// One sample of a band's profile's slope (four samples a row).
+fn wave_profile_slope(row0: u32, i: u32) -> f32 {
+    return table.rows[row0 + (i >> 2u)][i & 3u];
+}
+
+// A band's profile's slope at `s` along its direction, read between its samples, its period wrapped.
+fn wave_slope_at(row0: u32, s: f32, period: f32, samples: u32) -> f32 {
+    let x = fract(s / period) * f32(samples);
+    let i0 = u32(floor(x)) % samples;
+    return mix(wave_profile_slope(row0, i0), wave_profile_slope(row0, (i0 + 1u) % samples), fract(x));
+}
+
+// ★ THE SEA'S NORMAL AND ITS GLINT'S SLOPE VARIANCE at a point `p` (render space) under the wind `wind` (render space,
+// m/s) over `depth` metres of water, for a pixel `foot` metres wide: each band adds its waves along its directions in the
+// sea's plane, weighed by the spread at their angle to the wind and by THE PIXEL'S OWN FILTER — the footprint's box by its
+// second moment, a wave of wavenumber k keeping H² = exp(−(k·foot)²/12) of its slope variance in the drawn normal — and
+// the rest stays in Cox & Munk's variance, which the glint keeps less what the drawn waves show: one continuous rule with
+// no step at any distance (W16, B16).
+fn sea_waves(p: vec3<f32>, wind: vec3<f32>, depth: f32, foot: f32) -> vec4<f32> {
+    let n = normalize(p - table.centre.xyz);
+    let base = 2u * table.clock.w + 2u;
+    let head = table.rows[base];
+    let speed = length(wind);
+    let cox_munk = COX_MUNK_FLOOR + COX_MUNK_RATE * speed;
+    if head.x < 0.5 || speed < 0.1 {
+        return vec4<f32>(n, cox_munk);
+    }
+    let g = head.y;
+    let bands = u32(head.z);
+    let samples = u32(head.w);
+    let omega_p = WAVE_PEAK * g / speed;
+    let kp2 = (omega_p * omega_p / g) * (omega_p * omega_p / g);
+    var grad = vec3<f32>(0.0);
+    var resolved = 0.0;
+    let lists = base + 1u + 2u * bands;
+    let row0 = lists + 2u * bands * WAVE_DIRECTIONS;
+    for (var b = 0u; b < bands; b++) {
+        let band = table.rows[base + 1u + 2u * b];
+        let count = u32(table.rows[base + 2u + 2u * b].x);
+        let k1 = band.y;
+        let k2 = band.z;
+        // The band's variance (the spectrum's closed integral over [k1, k2]) and the shallow water's factor.
+        let km = sqrt(k1 * k2);
+        let wh = sqrt(km * max(depth, 0.0));
+        let tma = select(select(1.0, 1.0 - 0.5 * (2.0 - wh) * (2.0 - wh), wh <= 2.0), 0.5 * wh * wh, wh <= 1.0);
+        let e = WAVE_ALPHA / (4.0 * WAVE_BETA * kp2) * (exp(-WAVE_BETA * kp2 / (k2 * k2)) - exp(-WAVE_BETA * kp2 / (k1 * k1))) * tma;
+        // The share the pixel shows; a band under a ten-thousandth of it (its slopes a hundredth of their size, far under
+        // one level of the picture) costs no reads.
+        let h2 = exp(-(km * foot) * (km * foot) / 12.0);
+        if e < 1e-8 || h2 < 1e-4 {
+            continue;
+        }
+        resolved += h2 * e * k1 * k2;
+        // The band's list: the directions its spread keeps under the eye's wind, each with the root of its share.
+        var band_grad = vec3<f32>(0.0);
+        let entry0 = lists + 2u * b * WAVE_DIRECTIONS;
+        let profile = row0 + b * samples / 4u;
+        for (var i = 0u; i < count; i++) {
+            let dr = table.rows[entry0 + 2u * i];
+            let share = table.rows[entry0 + 2u * i + 1u].x;
+            let dt = dr.xyz - dot(dr.xyz, n) * n;
+            band_grad += share * wave_slope_at(profile, dot(p, dr.xyz) + dr.w, band.x, samples) * dt;
+        }
+        grad += sqrt(h2 * e) * band_grad;
+    }
+    return vec4<f32>(normalize(n - grad), max(cox_munk - resolved, COX_MUNK_FLOOR));
 }
 
 @vertex
@@ -261,7 +343,12 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let w = whole(d) * ramp;
     let rock = mix(vertex.surface.y, vertex.surface.x, w);
     let snow = (1.0 - rock) * snow_over(vertex.height_m + vertex.morph_m * (1.0 - w), dot(radial, table.pole.xyz));
-    out.color = vec4<f32>(ROCK_ALBEDO * rock + SNOW_ALBEDO * snow + SOIL_ALBEDO * (1.0 - rock - snow), 1.0);
+    let ground = ROCK_ALBEDO * rock + SNOW_ALBEDO * snow + SOIL_ALBEDO * (1.0 - rock - snow);
+    // ★ A NARROWER RIVER'S SHARE (slice W2): the part of the cell its water covers, by the same blend as the rock, seen as
+    // deep water's own colour (the medium's law with no floor showing, as the sheet draws it far from a shore).
+    let river = mix(vertex.surface.w, vertex.surface.z, w);
+    let water_body = WATER_UP * WATER_DEEP_SHARE * WATER_BACKSCATTER / WATER_ABSORB;
+    out.color = vec4<f32>(mix(ground, water_body, river), 1.0);
 #endif
 #ifdef WATER_SURFACE
     // ★ THE WATER'S COLOUR BY THE MEDIUM'S LAW (ruling B109): the floor's paint (above) seen through the water's depth —
@@ -276,7 +363,10 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let mu = sqrt(1.0 - (1.0 - cos_sun * cos_sun) / (WATER_INDEX * WATER_INDEX));
     let through = exp(-2.0 * (WATER_ABSORB + WATER_BACKSCATTER) / mu * depth);
     let deep = WATER_DEEP_SHARE * WATER_BACKSCATTER / WATER_ABSORB;
-    out.color = vec4<f32>(WATER_UP * mix(deep, out.color.rgb, through), vertex.water.z);
+    // The alpha carries the depth (the waves' shallow-water law reads it); the tangent's slot carries the wind, turned
+    // into render space by the piece's own placement (a turn and a shift: its length is kept).
+    out.color = vec4<f32>(WATER_UP * mix(deep, out.color.rgb, through), depth);
+    out.world_tangent = vec4<f32>((world_from_local * vec4<f32>(vertex.wind, 0.0)).xyz, 0.0);
 #endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;
@@ -290,6 +380,10 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
 // coarser rung is never discarded on its near side and stands there.
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+#ifdef WATER_SURFACE
+    // The pixel's footprint on the sea, metres (before any discard: a derivative wants every pixel of its quad).
+    let water_foot = max(length(dpdx(in.world_position.xyz)), length(dpdy(in.world_position.xyz)));
+#endif
     if length(in.world_position.xyz) >= bands().w {
         discard;
     }
@@ -300,9 +394,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.material.base_color = vec4<f32>(in.color.rgb, 1.0);
 #endif
 #ifdef WATER_SURFACE
-    // ★ THE GLINT'S WIDTH (ruling B109): GGX's α is the surface's RMS slope, √σ² (Cox & Munk 1954), and the engine's
-    // perceptual roughness is √α.
-    pbr_input.material.perceptual_roughness = sqrt(sqrt(max(in.color.a, 0.0)));
+    // ★ THE WAVES AND THE GLINT (slice S3; ruling B109): the normal from the waves a pixel can show, and GGX's α the RMS
+    // slope of the rest (√σ²), the engine's perceptual roughness √α.
+    let sea = sea_waves(in.world_position.xyz, in.world_tangent.xyz, in.color.a, water_foot);
+    pbr_input.N = sea.xyz;
+    pbr_input.material.perceptual_roughness = sqrt(sqrt(sea.w));
 #endif
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     var out: FragmentOutput;

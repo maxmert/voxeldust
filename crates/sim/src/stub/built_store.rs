@@ -148,9 +148,11 @@ const ARTIFACT_COAST_PART: u8 = 8;
 /// ★ THE FINE TILES' families (B2): the raw solves and the finished tiles, each a tile's parts. Append-only numbering.
 const FINE_RAW: u8 = 9;
 const FINE_FINISHED: u8 = 10;
-/// ★ THE SEA'S WIND (ruling B109): one row per artifact digest, the generator's own record. Append-only numbering: 12 is
-/// the next free tag.
+/// ★ THE SEA'S WIND (ruling B109): one row per artifact digest, the generator's own record.
 const SEA_WIND: u8 = 11;
+/// ★ THE FAR LAKES (ruling B116 part 2): one row per fine input word, the generator's own record. Append-only numbering:
+/// 13 is the next free tag.
+const FAR_LAKES: u8 = 12;
 
 /// The artifact rows' tags — their own numbering, one schema each, append-only.
 mod art {
@@ -478,6 +480,16 @@ pub fn sea_wind_key(digest: [u64; 2]) -> Vec<u8> {
     k
 }
 
+/// ★ THE FAR LAKES' ROW (ruling B116 part 2): the far lake list the realm's shard folded once from its finished 128 m
+/// tiles under the fine input word `input` (the artifact's digest and the fine version folded), kept so a later boot ships
+/// it with no second solve of the lakes' tiles. The sim never names the generator: the row is bytes it stores and ships.
+#[must_use]
+pub fn far_lakes_key(input: u64) -> Vec<u8> {
+    let mut k = vec![FAR_LAKES];
+    k.extend_from_slice(&input.to_be_bytes());
+    k
+}
+
 /// The key of the artifact's head: the family tag alone.
 #[must_use]
 pub fn artifact_head_key() -> Vec<u8> {
@@ -800,7 +812,7 @@ mod tests {
         decode_artifact_coast_part, decode_artifact_head, decode_artifact_pyramid_index,
         decode_artifact_pyramid_part, decode_artifact_tile, encode_artifact_coast_part,
         encode_artifact_head, encode_artifact_pyramid_index, encode_artifact_pyramid_part,
-        encode_artifact_tile, sea_wind_key,
+        encode_artifact_tile, far_lakes_key, sea_wind_key,
     };
     use super::{
         BERTH_SCHEMA, BODY_SCHEMA, BlockStoreTuning, CHUNK_DELTA_SCHEMA, CHUNK_PYRAMID_SCHEMA,
@@ -869,6 +881,8 @@ mod tests {
             sea_wind_key([1, 2]),
             vec![11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]
         );
+        // ★ The far lakes' row (ruling B116): its own family, then the fine input word.
+        assert_eq!(far_lakes_key(3), vec![12, 0, 0, 0, 0, 0, 0, 0, 3]);
         assert_eq!(artifact_pyramid_key(), vec![6]);
         assert_eq!(artifact_tile_prefix(), vec![5]);
         assert_eq!(artifact_pyramid_part_prefix(), vec![7]);

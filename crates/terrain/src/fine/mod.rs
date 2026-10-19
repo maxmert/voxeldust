@@ -10,8 +10,10 @@
 //! **Example.** A hull lands on the home planet's belt; the planet's shard solves the 128 m tiles under its path on its
 //! share of the cores, stores them, and ships them; every client reads the same integer heights from the same bytes.
 
+pub mod carve;
 pub mod coder;
 pub mod delaunay;
+pub mod far;
 pub mod finish;
 pub mod geometry;
 pub mod l1;
@@ -21,6 +23,8 @@ pub mod level;
 pub mod points;
 pub mod read;
 pub mod refine;
+pub mod spill;
 pub mod stitch;
 pub mod tile;
 pub mod tree;
+pub mod water;

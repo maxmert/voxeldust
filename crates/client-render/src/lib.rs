@@ -570,6 +570,12 @@ pub(crate) const ATTRIBUTE_WATER: MeshVertexAttribute =
     MeshVertexAttribute::new("LadderWater", 0x5741_001B, VertexFormat::Float32x4);
 const WATER_SHADER_LOCATION: u32 = 14;
 const WATER_SHADER_DEF: &str = "WATER_SURFACE";
+/// ★ THE WIND OVER EACH SEA POINT (slice S3): a vector in the planet's frame, m/s — shader location 15. The vertex stage
+/// turns it into render space and hands it to the fragment stage in the tangent's slot (`VERTEX_TANGENTS`), which the
+/// engine reads only for a normal or depth map, which the sea has none of.
+pub(crate) const ATTRIBUTE_WIND: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderWind", 0x5741_001C, VertexFormat::Float32x3);
+const WIND_SHADER_LOCATION: u32 = 15;
 const LIGHT_CASTER_SHADER_DEF: &str = "LIGHT_CASTER";
 const LIGHT_CASTER_ENV: &str = "VD_TERRAIN_LIGHT_CASTER";
 /// ★ THE MOTION'S CONTROL (the temporal path's T1, the design's control 1): `VD_MOTION_CONTROL=engine`
@@ -824,9 +830,12 @@ fn ground_vertex_layout(
         // ★ THE SEA (ruling B109): a sheet carries its water's words beside its floor's paint.
         if layout.0.contains(ATTRIBUTE_WATER) {
             attributes.push(ATTRIBUTE_WATER.at_shader_location(WATER_SHADER_LOCATION));
+            attributes.push(ATTRIBUTE_WIND.at_shader_location(WIND_SHADER_LOCATION));
             descriptor.vertex.shader_defs.push(WATER_SHADER_DEF.into());
+            descriptor.vertex.shader_defs.push("VERTEX_TANGENTS".into());
             if let Some(fragment) = descriptor.fragment.as_mut() {
                 fragment.shader_defs.push(WATER_SHADER_DEF.into());
+                fragment.shader_defs.push("VERTEX_TANGENTS".into());
             }
         }
     }

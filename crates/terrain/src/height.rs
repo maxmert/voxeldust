@@ -99,6 +99,23 @@ pub fn height_field_m(
     field_column(body, field, dir, rung).map(metres_of_q28)
 }
 
+/// ★ THE FINE WATER ALONG A DIRECTION at a rung (slice W2): the field's [`crate::artifact::ZField::fine_water`] at the
+/// rung-0 cell the direction falls in — the same cell the ground's read takes ([`height_field_m`]).
+#[must_use]
+pub fn fine_water_at(
+    body: &BodyDefinition,
+    field: &dyn crate::artifact::ZField,
+    dir: [f64; 3],
+    rung: u8,
+) -> crate::fine::read::FineWater {
+    let face = vd_seed::bend::face_of(dir);
+    let (t, s) = vd_seed::bend::face_coords(face, dir);
+    let n0 = body.ladder().cells_per_edge(0);
+    let i = vd_seed::ladder::index_of(vd_seed::bend::unbend(t), n0);
+    let j = vd_seed::ladder::index_of(vd_seed::bend::unbend(s), n0);
+    field.fine_water(face, rung, 0, i, j)
+}
+
 /// The ground the field states along a direction at a rung, as the recipe's fixed-point radius.
 /// `None` where the field holds no row for the stencil.
 fn field_column(

@@ -39,6 +39,7 @@ pub mod surface;
 mod test_solves;
 pub mod tuning;
 pub mod view;
+pub mod waves;
 
 /// Universe ticks as f64 for the continuous render cursor. Exact for any realistic
 /// runtime (a 20 Hz universe reaches 2^53 ticks only after ~14 million years), and

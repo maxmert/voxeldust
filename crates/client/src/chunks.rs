@@ -184,6 +184,9 @@ pub struct ChunkGeometry {
     /// ★ BUILT BEFORE THE COAST MASK LANDED (slice S1): a chunk of a body with a sea built while its realm's coast mask
     /// was still on its way holds no sea; the lane builds it again once the mask is here ([`ChunkLane::upgradable`]).
     pub dry: bool,
+    /// ★ BUILT ON A FAR LEVEL BEFORE THE FAR LAKES LANDED (ruling B116 part 2): its lakes stand by the 8 km world; the lane
+    /// builds it again once the realm's far lake list is folded in ([`ChunkLane::upgradable`]).
+    pub far: bool,
 }
 
 /// ★ THE SEA'S SHEET OF A CHUNK (rulings B105 Q10, B106; slice S1 of `docs/investigation/2026-10-17/sea_look_design.md`):
@@ -210,6 +213,10 @@ pub struct SeaSheet {
     /// ★ THE SURFACE'S SLOPE VARIANCE at each point (Cox & Munk 1954, `0.003 + 0.00512·U`, U the year's wind speed of
     /// the climate cells around it, m/s; ruling B109): the sun's glint reads its width from it.
     pub slope_var: Vec<f32>,
+    /// ★ THE WIND OVER EACH POINT (slice S3): the year's mean wind of the climate cells around it as a vector in the
+    /// planet's frame, m/s, along the sea's plane (east and north), at the length of the year's mean speed — the waves
+    /// read its direction and its speed.
+    pub wind: Vec<[f32; 3]>,
     /// The box of every point, its morph target and its sunk places (the ground's own rule).
     pub bounds: ([f32; 3], [f32; 3]),
     /// ★ THE FLOOR UNDER DEEP WATER (ruling W18): how many of the chunk's ground triangles, at the END of its list,
@@ -1306,6 +1313,28 @@ pub fn field_of(
     }
 }
 
+/// ★ A NARROWER RIVER'S SHARE AT A DIRECTION (slice W2; the one-volume revision §3.5 item 3): the fine water map's wet
+/// share at the rung where no water holds the cell whole — a river narrower than the level's cell, a TINT on the ground,
+/// never geometry (a whole water is the sheet's); nought beyond the fine levels or with no artifact.
+fn river_share(
+    body: &BodyDefinition,
+    field: Option<&(dyn vd_terrain::artifact::ZField + Send + Sync)>,
+    dir: [f64; 3],
+    rung: u8,
+) -> u8 {
+    let Some(field) = field else {
+        return 0;
+    };
+    match vd_terrain::height::fine_water_at(body, field, dir, rung) {
+        vd_terrain::fine::read::FineWater::Held { level, wet }
+            if level == vd_terrain::fine::stitch::MISSING =>
+        {
+            wet.clamp(0, 255) as u8
+        }
+        _ => 0,
+    }
+}
+
 /// The coarser surface along a direction, for a vertex with no parent triangle on its radial: the
 /// artifact's field at that rung (`None` where the field holds no row there), or the recipe's own
 /// relief without an artifact.
@@ -1427,6 +1456,10 @@ pub fn geometry_with(
     let samples = sample_box(body, field.as_deref().map(|f| f as &dyn ZField), key)?;
     let mut geometry = geometry_from(body, artifact, realm, key, &samples, parents)?;
     geometry.field_level = field.as_deref().map_or(NO_FIELD, |f| f.level());
+    // ★ A FAR PIECE WAITS FOR THE FAR LAKES (ruling B116 part 2): built on a pyramid level before the list is folded in.
+    geometry.far = geometry.field_level != NO_FIELD
+        && geometry.field_level >= 1
+        && artifact.is_some_and(|a| !a.far_applied());
     geometry.built_on = artifact.map(|a| a.head.digest);
     geometry.rough |= artifact
         .zip(body.macro_lattice())
@@ -1570,6 +1603,14 @@ pub fn geometry_from(
     let normals = smooth_normals(&vertices, &mesh.triangles);
     // ★ THE ROCK AT EACH VERTEX AND AT ITS TARGET (ruling B75 item 4): the own slope, and the slope of the parent's shade
     // where the vertex morphs onto a parent triangle — the top rung's vertex is its own target.
+    // The fields the narrower rivers' shares read: this rung's and the coarser one's, once a chunk.
+    let lattice = body.macro_lattice();
+    let share_field = |rung: u8| {
+        artifact
+            .zip(lattice.as_ref())
+            .and_then(|(a, l)| a.field_at_rung(l, rung))
+    };
+    let (own_field, coarser_field) = (share_field(key.rung), share_field(coarser));
     let surface: Vec<[u8; 4]> = normals
         .iter()
         .zip(&radials)
@@ -1579,7 +1620,14 @@ pub fn geometry_from(
             let target = shades.get(i).copied().flatten().map_or(own, |s| {
                 crate::surface::vertex_rock([s.x as f32, s.y as f32, s.z as f32], *radial)
             });
-            [own, target, 0, 0]
+            let d = ground_dirs[i];
+            let dir = [d.x, d.y, d.z];
+            [
+                own,
+                target,
+                river_share(body, own_field.as_deref(), dir, key.rung),
+                river_share(body, coarser_field.as_deref(), dir, coarser),
+            ]
         })
         .collect();
     let packed_normals: Vec<[i16; 2]> = normals.iter().map(|n| oct_encode(*n)).collect();
@@ -1630,6 +1678,7 @@ pub fn geometry_from(
         coarse,
         sea,
         dry,
+        far: false,
     };
     geometry.sea.bounds = sea_bounds(&geometry.sea, geometry.sink_m, geometry.stand_in_sink_m);
     let drop_m = skirt_drop_m(body, key.rung);
@@ -1667,11 +1716,14 @@ pub fn water_radius_m(under: bool, sea_r: f64, ground_r: f64, q: f64) -> f64 {
     }
 }
 
-/// ★ THE SEA'S SHEET AND THE GROUND THAT STILL SHOWS (rulings B105 Q10, B106; slice S1; ruling W18's lattice). For each
-/// ground vertex: its 8 km node's coast word (the shipped mask) says whether the sea may stand over it — the SEA's and
-/// LAND's nodes may, so the coast follows the fine ground and never a node square; a dry POCKET under the sea's level
-/// (ruling B7) and a LAKE's node (its own level comes with the water map, slice W2) hold no sea — and its TRUE ground (the
-/// chunk's own field at its direction) says whether it stands under the sea's level. A ground triangle gets a water
+/// ★ THE WATER'S SHEET AND THE GROUND THAT STILL SHOWS (rulings B105 Q10, B106, B114; slices S1 and W2; ruling W18's
+/// lattice). For each ground vertex its WATER: where the fine level serves the rung and its tile is held, the tile's water
+/// map at its place (the sea at its level, a lake at its own, a carved river at its bank — the connection searched by the
+/// shard, so a hollow no path joins holds none); elsewhere the 8 km node's coast word (the shipped mask) says whether the
+/// sea may stand over it — the SEA's and LAND's nodes may, so the coast follows the fine ground and never a node square; a
+/// dry POCKET under the sea's level (ruling B7) and a LAKE's node hold no sea there — and its TRUE ground (the chunk's own
+/// field at its direction) says whether it stands under that water's level. A dry vertex beside the water takes the
+/// highest level of the wet triangles it belongs to. A ground triangle gets a water
 /// triangle where one of its vertices holds the sea and one of them can stand within a step of the sea at either end of
 /// its morph; a ground triangle whose three vertices stand under the sea by more than the step at both ends of their
 /// morph goes to the END of the ground's list, counted in [`SeaSheet::floor_cut`]: the renderer leaves it out where it
@@ -1716,35 +1768,149 @@ pub fn sea_sheet(
     let sea_r = body.sea_radius_m();
     let q =
         f64::from(vd_seed::ladder::cell_m(key.rung)) / vd_terrain::chunk::GAP_STEPS_PER_CELL as f64;
-    // Each vertex: whether the sea may stand over it, and whether its true ground stands under the sea's level. A drawn
-    // vertex farther than two steps from the level is on the side it is drawn on; nearer, the field decides.
+    // ★ EACH VERTEX'S WATER (slice W2; rulings B105 Q2, B114): the fine water map's level at its place where the fine
+    // level serves the rung and its tile is held (the sea at its level, a lake at its own, a carved river at its bank — the
+    // connection already searched by the shard); else the 8 km rule — the sea where the vertex's node's coast word lets it
+    // stand. Then whether its TRUE ground stands under that level: a drawn vertex farther than two steps from the level is
+    // on the side it is drawn on; nearer, the field decides.
+    let field = artifact.field_at_rung(&lattice, key.rung);
+    // ★ THE FAR LAKE (slice W2 item 8; the one-volume revision §3.6's interim far map): where the fine water map does not
+    // serve, a lake node's vertex takes its lake's level from the rung's own field — the row's water word on the 8 km
+    // tiles, the highest lake of the block on a pyramid level (the words the client already holds) — and is wet where its
+    // ground stands under it, as the sea is. MEASURED before (2026-10-18): from rung 13 up no lake was drawn at all, so a
+    // lake vanished beyond about 7 500 km.
+    let field_lattice = field.as_deref().and_then(|f| match f.level() {
+        0 => Some(lattice),
+        k => lattice.coarser(k),
+    });
+    // ★ THE FAR LAKES FOLDED IN (ruling B116 part 2): where the rung's level holds a block the far lake list folded, that
+    // block's water is the list's — the lake's 128 m level where most of the block's ground is wet — whatever side the fine
+    // node under a vertex states (a block's water reaches past its lake's 8 km nodes); the sea's own nodes keep the sea.
+    let field_level = field.as_deref().map_or(0, |f| f.level());
+    let far_block = |dir: [f64; 3]| -> bool {
+        field_level >= 1
+            && field_lattice.is_some_and(|fl| artifact.far_block(field_level, node_under(&fl, dir)))
+    };
+    let lake_r = |dir: [f64; 3]| -> Option<f64> {
+        let (f, fl) = (field.as_deref()?, field_lattice?);
+        let (water_m, _) = f.water_facies(node_under(&fl, dir))?;
+        (water_m != vd_terrain::artifact::DRY_M)
+            .then(|| sea_r + f64::from(i32::from(water_m) - i32::from(artifact.head.sea_m)))
+    };
+    // ★ A LAND NODE HOLDS THE SEA ONLY ON THE COAST (2026-10-19, the 3 200 / 4 500 km pair over the basin): a land node
+    // lets the sea stand where its drawn ground dips under the sea's level, so the coast follows the ground inside the
+    // node — but only a node that touches a sea node is a coast; inland, the 8 km rule cannot know whether a hollow joins
+    // the ocean (the fine water map can, and holds no sea there). MEASURED before: beside the lakes under the sea's level
+    // (−200 to −1 800 m), whose folded blocks stand at their true deep floor, the smooth rung-13 ground of the land nodes
+    // around them dipped under 0 m and drew the sea there — hundreds of dots and strips over land rung 12 draws dry.
+    let coastal = |node: u32| -> bool {
+        lattice.neighbours(node).into_iter().any(|m| {
+            m != vd_terrain::macro_lattice::NO_NODE
+                && vd_terrain::artifact::coast_side(mask, m)
+                    == Some(vd_terrain::artifact::Side::Sea)
+        })
+    };
+    let level_r: Vec<Option<f64>> = dirs
+        .iter()
+        .map(|d| {
+            let dir = [d.x, d.y, d.z];
+            let fine = field
+                .as_deref()
+                .map(|f| vd_terrain::height::fine_water_at(body, f, dir, key.rung));
+            match fine {
+                Some(vd_terrain::fine::read::FineWater::Held { level, .. }) => (level
+                    != vd_terrain::fine::stitch::MISSING)
+                    .then(|| sea_r + f64::from(level) / 4.0),
+                _ => {
+                    use vd_terrain::artifact::Side;
+                    let node = node_under(&lattice, dir);
+                    match vd_terrain::artifact::coast_side(mask, node) {
+                        Some(Side::Sea) => Some(sea_r),
+                        Some(_) if far_block(dir) => lake_r(dir),
+                        // ★ A PIECE ON THE 8 km ROWS TAKES ITS LAKES FROM THE 128 m DATA (ruling B116; the owner's flight,
+                        // 2026-10-19: *"They should be 100% seamless"*): the far lake list's level where it holds the node.
+                        Some(side) if field_level == 0 && artifact.far_applied() => {
+                            // The majority class, as a coarse copy and the fold read it: a node at least half wet.
+                            match artifact.far_node(node) {
+                                Some(r)
+                                    if r.level_m != vd_terrain::artifact::DRY_M
+                                        && 2 * u32::from(r.share) >= 255 =>
+                                {
+                                    Some(
+                                        sea_r
+                                            + f64::from(
+                                                i32::from(r.level_m)
+                                                    - i32::from(artifact.head.sea_m),
+                                            ),
+                                    )
+                                }
+                                Some(_) => None,
+                                None => (side == Side::Land && coastal(node)).then_some(sea_r),
+                            }
+                        }
+                        Some(Side::Land) => coastal(node).then_some(sea_r),
+                        // ★ A WAITING PIECE DRAWS NO LAKE BEFORE THE LIST (the same flight): on a rung the fine level
+                        // serves, a vertex the fine water map does not hold yet stands on the 8 km ground, whose lake
+                        // word can stand hundreds of metres over the lake's 128 m level (ruling B115) — MEASURED: the
+                        // owner's flight saw such pieces flood their whole squares (the shard 110 tiles behind).
+                        Some(Side::Lake)
+                            if key.rung <= vd_terrain::fine::level::FineLevel::L1.top_rung() =>
+                        {
+                            None
+                        }
+                        Some(Side::Lake) => lake_r(dir),
+                        _ => None,
+                    }
+                }
+            }
+        })
+        .collect();
     let under: Vec<bool> = dirs
         .iter()
         .zip(ground_r)
-        .map(|(d, &r)| {
-            let dir = [d.x, d.y, d.z];
-            let may = matches!(
-                vd_terrain::artifact::coast_side(mask, node_under(&lattice, dir)),
-                Some(vd_terrain::artifact::Side::Sea | vd_terrain::artifact::Side::Land)
-            );
-            if !may {
+        .zip(&level_r)
+        .map(|((d, &r), level)| {
+            let Some(lr) = *level else {
                 return false;
+            };
+            if (r - lr).abs() > 2.0 * q {
+                return r < lr;
             }
-            if (r - sea_r).abs() > 2.0 * q {
-                return r < sea_r;
-            }
-            coarser_field_m(body, Some(artifact), dir, key.rung).unwrap_or(r) < sea_r
+            coarser_field_m(body, Some(artifact), [d.x, d.y, d.z], key.rung).unwrap_or(r) < lr
         })
         .collect();
+    // A wet triangle's level: the highest of its wet vertices'; a vertex with no water of its own beside the water takes
+    // the highest level of the wet triangles it belongs to, so the sheet closes on the shore at one level.
+    let tri_level = |t: &[u32; 3]| -> Option<f64> {
+        t.iter()
+            .filter(|&&i| under[i as usize])
+            .filter_map(|&i| level_r[i as usize])
+            .reduce(f64::max)
+    };
+    let mut sheet_level: Vec<Option<f64>> = (0..dirs.len())
+        .map(|g| level_r[g].filter(|_| under[g]))
+        .collect();
+    for t in triangles {
+        if let Some(l) = tri_level(t) {
+            for &i in t {
+                let g = i as usize;
+                if !under[g] {
+                    sheet_level[g] = Some(sheet_level[g].map_or(l, |o| o.max(l)));
+                }
+            }
+        }
+    }
     let mut sheet = SeaSheet::default();
     let mut index: Vec<u32> = vec![u32::MAX; dirs.len()];
     for t in triangles {
-        let wet = t.iter().any(|&i| under[i as usize]);
+        let Some(level) = tri_level(t) else {
+            continue;
+        };
         let reach = t.iter().any(|&i| {
             let (r, m) = (ground_r[i as usize], f64::from(morph[i as usize]));
-            r.min(r + m) <= sea_r + q
+            r.min(r + m) <= level + q
         });
-        if !(wet & reach) {
+        if !reach {
             continue;
         }
         let mut ids = [0u32; 3];
@@ -1753,8 +1919,9 @@ pub fn sea_sheet(
             if index[g] == u32::MAX {
                 index[g] = sheet.vertices.len() as u32;
                 let (d, r) = (dirs[g], ground_r[g]);
-                let own = water_radius_m(under[g], sea_r, r, q);
-                let target = water_radius_m(under[g], sea_r, r + f64::from(morph[g]), q);
+                let lr = sheet_level[g].unwrap_or(level);
+                let own = water_radius_m(under[g], lr, r, q);
+                let target = water_radius_m(under[g], lr, r + f64::from(morph[g]), q);
                 sheet.vertices.push([
                     (d.x * own - origin_m[0]) as f32,
                     (d.y * own - origin_m[1]) as f32,
@@ -1768,7 +1935,9 @@ pub fn sea_sheet(
                     .push([depth(own, r), depth(target, r + f64::from(morph[g]))]);
                 sheet.floor_surface.push(surface[g]);
                 sheet.floor_height_m.push(heights[g]);
-                sheet.slope_var.push(cox_munk_slope_var(wind(d)));
+                let (speed, vector) = wind(d);
+                sheet.slope_var.push(cox_munk_slope_var(speed));
+                sheet.wind.push(vector.as_vec3().to_array());
             }
             ids[k] = index[g];
         }
@@ -1780,7 +1949,7 @@ pub fn sea_sheet(
         t.iter().all(|&i| {
             let g = i as usize;
             let (r, m) = (ground_r[g], f64::from(morph[g]));
-            under[g] & (r.max(r + m) < sea_r - q)
+            under[g] & level_r[g].is_some_and(|lr| r.max(r + m) < lr - q)
         })
     };
     let (cut, mut ground): (Vec<[u32; 3]>, Vec<[u32; 3]>) = triangles.iter().partition(|t| deep(t));
@@ -1796,24 +1965,45 @@ pub fn cox_munk_slope_var(speed_mps: f64) -> f32 {
     (0.003 + 0.00512 * speed_mps.max(0.0)) as f32
 }
 
-/// ★ THE WIND'S SPEED AT A DIRECTION, m/s: the bilinear reading of the year's wind over the climate cells around it
-/// (`vd_terrain::seasons::grid::ClimateGrid::reading`, the longitude wrapped, no cell edge drawn); nought with no wind.
+/// ★ THE WIND AT ONE DIRECTION (slice S3: the waves' spread reads it under the eye): [`sea_wind_reader`] once.
+#[must_use]
+pub fn sea_wind_at(
+    wind: Option<&vd_terrain::sea_wind::SeaWind>,
+    d: vd_core::glam::DVec3,
+) -> (f64, vd_core::glam::DVec3) {
+    sea_wind_reader(wind)(d)
+}
+
+/// ★ THE WIND AT A DIRECTION: its speed, m/s, and its vector in the planet's frame along the sea's plane — the bilinear
+/// reading of the year's wind over the climate cells around it (`vd_terrain::seasons::grid::ClimateGrid::reading`, the
+/// longitude wrapped, no cell edge drawn), the vector's direction from the mean wind east and north and its length the
+/// mean speed (a monsoon that turns keeps its speed). Nought, and no direction, with no wind.
 fn sea_wind_reader(
     wind: Option<&vd_terrain::sea_wind::SeaWind>,
-) -> impl Fn(vd_core::glam::DVec3) -> f64 + '_ {
+) -> impl Fn(vd_core::glam::DVec3) -> (f64, vd_core::glam::DVec3) + '_ {
+    use vd_core::glam::DVec3;
     use vd_terrain::gf::Gf;
     // The reading reads latitude and longitude alone, so the grid's radius is any one.
     let grid = wind.map(|w| vd_terrain::seasons::grid::ClimateGrid::new(Gf::ONE, w.rows as usize));
-    move |d: vd_core::glam::DVec3| -> f64 {
+    move |d: DVec3| -> (f64, DVec3) {
         let (Some(w), Some(grid)) = (wind, grid.as_ref()) else {
-            return 0.0;
+            return (0.0, DVec3::ZERO);
         };
-        grid.reading([Gf::from_f64(d.x), Gf::from_f64(d.y), Gf::from_f64(d.z)])
-            .iter()
-            .map(|(cell, weight)| {
-                weight.to_f64() * f64::from(w.speed_cms.get(*cell).copied().unwrap_or(0)) / 100.0
-            })
-            .sum()
+        let word = |column: &[i16], cell: usize| f64::from(column.get(cell).copied().unwrap_or(0));
+        let (mut speed, mut east, mut north) = (0.0, 0.0, 0.0);
+        for (cell, weight) in
+            grid.reading([Gf::from_f64(d.x), Gf::from_f64(d.y), Gf::from_f64(d.z)])
+        {
+            let weight = weight.to_f64() / 100.0;
+            speed += weight * f64::from(w.speed_cms.get(cell).copied().unwrap_or(0));
+            east += weight * word(&w.east_cms, cell);
+            north += weight * word(&w.north_cms, cell);
+        }
+        // The sea's plane at the point: east round the spin axis, north toward it.
+        let east_axis = DVec3::Z.cross(d).normalize_or_zero();
+        let north_axis = d.cross(east_axis);
+        let vector = (east_axis * east + north_axis * north).normalize_or_zero() * speed;
+        (speed, vector)
     }
 }
 
@@ -2193,6 +2383,8 @@ pub struct ChunkLane {
     coarse: BTreeSet<(RealmId, ChunkKey)>,
     /// ★ THE CHUNKS BUILT BEFORE THEIR REALM'S COAST MASK LANDED (slice S1): no sea yet; built again once it is here.
     dry: BTreeSet<(RealmId, ChunkKey)>,
+    /// ★ The far pieces built before their realm's far lakes landed (ruling B116 part 2).
+    far: BTreeSet<(RealmId, ChunkKey)>,
     upgrading: BTreeSet<(RealmId, ChunkKey)>,
     /// ★ THE ARTIFACT'S EPOCH AT WHICH A ROUGH OR COARSE CHUNK WAS LAST FOUND WAITING (ruling B95): whether it may be built
     /// again depends on its realm's artifact alone, so the check is made again only when that changed — never on every
@@ -2226,6 +2418,7 @@ impl ChunkLane {
             rough: BTreeSet::new(),
             coarse: BTreeSet::new(),
             dry: BTreeSet::new(),
+            far: BTreeSet::new(),
             upgrading: BTreeSet::new(),
             waiting_at: BTreeMap::new(),
             empty_resident: BTreeMap::new(),
@@ -2646,7 +2839,8 @@ impl ChunkLane {
         let rough = self.rough.contains(&(realm, key));
         let coarse = self.coarse.contains(&(realm, key));
         let dry = self.dry.contains(&(realm, key));
-        if !(rough | coarse | dry) | self.upgrading.contains(&(realm, key)) {
+        let far = self.far.contains(&(realm, key));
+        if !(rough | coarse | dry | far) | self.upgrading.contains(&(realm, key)) {
             return false;
         }
         let (Some(body), Some(artifact)) = (self.bodies.get(&realm), self.artifacts.get(&realm))
@@ -2656,6 +2850,10 @@ impl ChunkLane {
         // ★ A DRY CHUNK (slice S1) waits for its realm's coast mask; a dry chunk on the finished ground needs nothing more.
         if dry & !(artifact.coast_held() & artifact.wind_held()) {
             return false;
+        }
+        // ★ A FAR PIECE (ruling B116 part 2) waits for its realm's far lakes; once they are folded in it needs nothing more.
+        if far & !(rough | coarse | dry) {
+            return artifact.far_applied();
         }
         if !(rough | coarse) {
             return true;
@@ -2673,7 +2871,8 @@ impl ChunkLane {
     pub fn upgrade(&mut self, realm: RealmId, key: ChunkKey, priority: u32) {
         if !(self.rough.contains(&(realm, key))
             | self.coarse.contains(&(realm, key))
-            | self.dry.contains(&(realm, key)))
+            | self.dry.contains(&(realm, key))
+            | self.far.contains(&(realm, key)))
         {
             return;
         }
@@ -2779,6 +2978,11 @@ impl ChunkLane {
             } else {
                 self.dry.remove(&(ready.realm, ready.geometry.key));
             }
+            if ready.geometry.far {
+                self.far.insert((ready.realm, ready.geometry.key));
+            } else {
+                self.far.remove(&(ready.realm, ready.geometry.key));
+            }
             self.waiting_at.remove(&(ready.realm, ready.geometry.key));
             if ready.geometry.triangles.is_empty() {
                 self.counters.empty_chunks += 1;
@@ -2807,6 +3011,7 @@ impl ChunkLane {
         self.rough.remove(&(realm, key));
         self.coarse.remove(&(realm, key));
         self.dry.remove(&(realm, key));
+        self.far.remove(&(realm, key));
         self.upgrading.remove(&(realm, key));
         self.waiting_at.remove(&(realm, key));
         let was_pending = self.pending.remove(&(realm, key)).is_some();
@@ -3447,6 +3652,7 @@ mod tests {
             floor_surface: vec![],
             floor_height_m: vec![],
             slope_var: vec![],
+            wind: vec![],
             bounds: ([0.0; 3], [0.0; 3]),
             floor_cut: 0,
         };
@@ -5431,6 +5637,7 @@ mod tests {
             coarse: false,
             sea: SeaSheet::default(),
             dry: false,
+            far: false,
         };
         assert_eq!(wide.upload_bytes(), 70_000 * UPLOAD_VERTEX_BYTES + 12);
         wide.vertices.truncate(3);
@@ -5652,6 +5859,7 @@ mod tests {
             coarse: false,
             sea: SeaSheet::default(),
             dry: false,
+            far: false,
         };
         assert_eq!(empty.measure_bounds(), ([0.0; 3], [0.0; 3]));
         assert!(empty.morph_targets().is_empty());
@@ -5841,6 +6049,7 @@ mod tests {
                 coarse: false,
                 sea: SeaSheet::default(),
                 dry: false,
+                far: false,
             };
             add_skirts(&mut g, 5.0, 2.0);
             g

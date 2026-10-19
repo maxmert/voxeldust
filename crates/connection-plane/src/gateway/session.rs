@@ -366,6 +366,9 @@ pub(crate) struct Session {
     /// come (the shard paces them once per session), and the window-holder path that would pace
     /// against this mark is owed with the far view.
     pub(crate) artifact_held: std::collections::BTreeMap<vd_core::pose::RealmId, [u64; 2]>,
+    /// ★ THE FAR LAKES SENT (ruling B116 part 2): per realm, the digest of the artifact whose far lake list this session
+    /// was served — once a session holds the artifact, the list goes out once.
+    pub(crate) lakes_sent: std::collections::BTreeMap<vd_core::pose::RealmId, [u64; 2]>,
     /// ★ HOW FAR THROUGH EACH REALM'S ARTIFACT THIS SESSION HAS BEEN SERVED (the far-view ship):
     /// zero is nothing, one is the head, one plus `k` is `k` pyramid parts — the sky's
     /// `sky_parts_sent` per realm. Reset when the realm's artifact changes.

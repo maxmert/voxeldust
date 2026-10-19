@@ -36,7 +36,7 @@ use super::delaunay::NONE;
 use super::l1::{Domain, L1_RUNG, U0_LAND, cells_per_node_shift, domain_nodes};
 use super::points::CellId;
 use super::read::FineBook;
-use super::refine::{Coarse, Setup, drawn, median, metres, raster, setup, steady};
+use super::refine::{Coarse, Setup, drawn, median, metres, raster_carved, setup, steady};
 use super::tree::{accumulate, tree};
 use crate::artifact::Artifact;
 use crate::body::{BodyDefinition, TAN_REPOSE};
@@ -73,6 +73,11 @@ pub struct L2Tile {
     pub passes: usize,
     /// The law's detail added to today's ground: the median and the largest size, in centimetres.
     pub detail_cm: [i64; 2],
+    /// ★ THE WATER MAP under [`super::l1::OutletRule::StandingWater`] (slice W2): each raster cell's water level in quarter
+    /// metres over the sea, [`super::water::DRY`] where none (every cell under today's rule).
+    pub water: Vec<i32>,
+    /// Each raster cell's share of the narrower rivers through it, in 255ths ([`super::carve::Carve::share`]).
+    pub river_share: Vec<u8>,
 }
 
 /// ★ THE 128 m FLOW around the node `(ni, nj)` of `face`: the domain over the node and [`FLOW_NODES`] each side, its
@@ -252,6 +257,29 @@ pub fn solve_l2(
     book: &FineBook,
     key: super::l1::TileKey,
 ) -> Option<L2Tile> {
+    solve_l2_with(
+        body,
+        lattice,
+        artifact,
+        book,
+        key,
+        super::l1::OutletRule::Today,
+    )
+}
+
+/// [`solve_l2`] under the outlet `rule` (slice W2): under [`super::l1::OutletRule::StandingWater`] (the bench until the
+/// world move) the settled drainage's channels are carved in the law's raster ([`super::carve`]) and the raster's water
+/// map made ([`super::water::raster_water`]) — each 16 m cell's water identity the 128 m water at its place (the book's
+/// held water, [`FineBook::water`]), the connection searched again on the 16 m ground, the 16 m channels' banks beside it.
+#[must_use]
+pub fn solve_l2_with(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    book: &FineBook,
+    key: super::l1::TileKey,
+    rule: super::l1::OutletRule,
+) -> Option<L2Tile> {
     let d = l2_domain(body, lattice, artifact, book, key)?;
     let (h, passes, _) = steady(
         &d.s,
@@ -267,30 +295,81 @@ pub fn solve_l2(
     let rside = node4 + 2 * half;
     let sea = d.sea;
     let drawn_at = |c: &CellId| drawn(book, c, L2_RUNG, sea);
-    let (out, detail) = raster(
+    let wet_rule = rule != super::l1::OutletRule::Today;
+    // THE CARVE (the standing-water rule only): the channels of the settled drainage, read in the law's raster.
+    let t = tree(&h, &d.s.outlet, &d.s.graph, &d.s.geom.len);
+    let q = accumulate(&t, &d.s.water);
+    let cell_m = Gf::from_i64(1i64 << L2_RUNG);
+    let ch = super::carve::channels(&t, &d.s.graph, &q, body.facts().gravity_mm_s2, cell_m);
+    let r_m = Gf::from_f64(body.radius_m());
+    let carve_at = |tri: [u32; 3], dir: &super::delaunay::Dir, z: Gf| {
+        super::carve::carve_cell(&ch, &d.s.dirs, &d.s.graph, &t, &h, r_m, tri, dir, z, cell_m)
+    };
+    let (ri0, rj0) = ((key.tx << d.shift4) - half, (key.ty << d.shift4) - half);
+    let (out, detail, banks, shares) = raster_carved(
         &d.s,
         &h,
         key.face,
         d.n4,
         d.down,
-        (
-            (key.tx << d.shift4) - half,
-            (key.ty << d.shift4) - half,
-            rside,
-        ),
+        (ri0, rj0, rside),
         &drawn_at,
+        wet_rule.then_some(&carve_at as super::refine::CarveAt<'_>),
     )?;
-    let quarters = out
-        .iter()
-        .map(|z| {
-            z.map_or(i32::MIN, |z| {
-                (z * Gf::from_i64(4) + Gf::HALF).floor().to_i64_floor() as i32
+    let quart = |z: Gf| (z * Gf::from_i64(4) + Gf::HALF).floor().to_i64_floor() as i32;
+    let quarters: Vec<i32> = out.iter().map(|z| z.map_or(i32::MIN, quart)).collect();
+    let rs = rside as usize;
+    let (water, river_share) = if wet_rule {
+        // Each cell's identity: the 128 m water whole at its place.
+        let node_level: Vec<Option<i32>> = (0..rs)
+            .flat_map(|b| (0..rs).map(move |a| (a, b)))
+            .map(|(a, b)| {
+                let c = super::points::chart_cell(key.face, ri0 + a as i32, rj0 + b as i32, d.n4)?;
+                let f = Face::from_index(c.face)?;
+                match book.water(f, L1_RUNG, L2_RUNG, c.i, c.j) {
+                    super::read::FineWater::Held { level, wet } if wet == super::tile::WET_FULL => {
+                        Some(level)
+                    }
+                    _ => None,
+                }
             })
-        })
-        .collect();
+            .collect();
+        // Each cell's REACH (W16, ruling B115): the 128 m water at its place by the column rule — a 16 m spread enters
+        // only where the 128 m level holds the same water, so the finer shore refines the coarser one and never runs past it.
+        let reach: Vec<i32> = (0..rs)
+            .flat_map(|b| (0..rs).map(move |a| (a, b)))
+            .map(|(a, b)| {
+                super::points::chart_cell(key.face, ri0 + a as i32, rj0 + b as i32, d.n4)
+                    .and_then(|c| {
+                        let f = Face::from_index(c.face)?;
+                        match book.shore_water(f, L1_RUNG, L2_RUNG, c.i, c.j) {
+                            super::read::FineWater::Held { level, .. } => Some(level),
+                            _ => None,
+                        }
+                    })
+                    .unwrap_or(super::water::DRY)
+            })
+            .collect();
+        let river: Vec<i32> = banks
+            .iter()
+            .map(|b| b.map_or(super::water::DRY, quart))
+            .collect();
+        let share: Vec<u8> = shares
+            .iter()
+            .map(|&g| (g.lesser(Gf::ONE) * Gf::from_i64(255) + Gf::HALF).to_i64_floor() as u8)
+            .collect();
+        (
+            super::water::raster_water_within(&quarters, rs, &node_level, &river, Some(&reach)),
+            share,
+        )
+    } else {
+        (vec![super::water::DRY; rs * rs], vec![0u8; rs * rs])
+    };
     let cm = |g: Gf| (g * Gf::from_i64(100)).floor().to_i64_floor();
     Some(L2Tile {
         side: rside as usize,
+        water,
+        river_share,
         quarters,
         points: d.s.dirs.len(),
         passes,

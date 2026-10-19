@@ -23,7 +23,7 @@ use super::l1::TileKey;
 use super::level::LevelGeom;
 use super::points::{chart_cell, chart_of};
 use super::stitch::{
-    CutLine, Field, MISSING, Meet, TileCuts, col_cut_half, corner_point, draw, joined,
+    CutLine, Field, MISSING, Meet, TileCuts, col_cut_half, corner_point, draw, draw_pick, joined,
     mid_across_columns, mid_across_rows, row_cut_half,
 };
 use std::borrow::Cow;
@@ -385,27 +385,14 @@ impl Prepared<'_> {
     }
 }
 
-/// Everything the tile in slot 4 of `block` draws from (see [`finished_square`]).
-fn prepare<'a>(block: [Option<(TileKey, &'a Field)>; 9], geom: LevelGeom) -> Option<Prepared<'a>> {
-    if geom.band() <= 0 {
-        return None;
-    }
-    let lv = Level {
-        side: geom.side(),
-        band: geom.band(),
-        n: geom.n,
-    };
-    let (key, _) = block[4]?;
-    let square = own_square(lv, key);
-    let [x0, y0, x1, y1] = square;
-    let work = Work {
-        lv,
-        face: key.face,
-        slots: block,
-        corners: [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
-    };
-    // The rasters in the tile's chart, each over its own square and its margin beyond.
-    let node = geom.margin;
+/// The nine rasters of `block` in the tile `key`'s chart, each over its own square and its `node` margin beyond (an
+/// empty field past a cube corner).
+fn in_chart<'a>(
+    lv: Level,
+    key: TileKey,
+    node: i64,
+    block: [Option<(TileKey, &'a Field)>; 9],
+) -> Option<Vec<Cow<'a, Field>>> {
     let mut here: Vec<Cow<'a, Field>> = Vec::with_capacity(9);
     for slot in block {
         here.push(match slot {
@@ -429,6 +416,29 @@ fn prepare<'a>(block: [Option<(TileKey, &'a Field)>; 9], geom: LevelGeom) -> Opt
             }),
         });
     }
+    Some(here)
+}
+
+/// Everything the tile in slot 4 of `block` draws from (see [`finished_square`]).
+fn prepare<'a>(block: [Option<(TileKey, &'a Field)>; 9], geom: LevelGeom) -> Option<Prepared<'a>> {
+    if geom.band() <= 0 {
+        return None;
+    }
+    let lv = Level {
+        side: geom.side(),
+        band: geom.band(),
+        n: geom.n,
+    };
+    let (key, _) = block[4]?;
+    let square = own_square(lv, key);
+    let [x0, y0, x1, y1] = square;
+    let work = Work {
+        lv,
+        face: key.face,
+        slots: block,
+        corners: [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
+    };
+    let here = in_chart(lv, key, geom.margin, block)?;
     let points: Vec<(i64, i64)> = (0..4)
         .map(|ci| work.corner_point(ci))
         .collect::<Option<_>>()?;
@@ -486,6 +496,47 @@ fn prepare<'a>(block: [Option<(TileKey, &'a Field)>; 9], geom: LevelGeom) -> Opt
 pub fn finished_square(block: [Option<(TileKey, &Field)>; 9], geom: LevelGeom) -> Option<Field> {
     let p = prepare(block, geom)?;
     Some(draw(p.refs(), &p.cuts, p.square, p.side, p.meets))
+}
+
+/// ★ THE FINISHED SQUARE WITH ITS PLANES THAT MUST NOT BLEND (slice W2: a water's level and its share): the heights as
+/// [`finished_square`], and each of `planes` (nine fields beside the nine rasters of `block`, on the same cells and keys)
+/// drawn by the raster that dominates each cell's height ([`super::stitch::draw_pick`]) under the same cuts. `None` as
+/// [`finished_square`], or where a plane's slot is missing beside a present raster.
+#[must_use]
+pub fn finished_square_planes(
+    block: [Option<(TileKey, &Field)>; 9],
+    planes: &[[Option<&Field>; 9]],
+    geom: LevelGeom,
+) -> Option<(Field, Vec<Field>)> {
+    let p = prepare(block, geom)?;
+    let (key, _) = block[4]?;
+    let lv = Level {
+        side: geom.side(),
+        band: geom.band(),
+        n: geom.n,
+    };
+    let rect = [
+        p.square[0],
+        p.square[1],
+        p.square[0] + p.side,
+        p.square[1] + p.side,
+    ];
+    let heights = draw(p.refs(), &p.cuts, p.square, p.side, p.meets);
+    let mut drawn = Vec::with_capacity(planes.len());
+    for plane in planes {
+        let mut slots: [Option<(TileKey, &Field)>; 9] = [None; 9];
+        for k in 0..9 {
+            slots[k] = match (block[k], plane[k]) {
+                (Some((key, _)), Some(f)) => Some((key, f)),
+                (None, _) => None,
+                (Some(_), None) => return None,
+            };
+        }
+        let here = in_chart(lv, key, geom.margin, slots)?;
+        let refs: [&Field; 9] = std::array::from_fn(|k| here[k].as_ref());
+        drawn.push(draw_pick(p.refs(), refs, &p.cuts, p.square, rect, p.meets));
+    }
+    Some((heights, drawn))
 }
 
 #[cfg(test)]

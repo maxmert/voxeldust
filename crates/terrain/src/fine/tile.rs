@@ -33,14 +33,27 @@ pub const RAW_FORM: u8 = 1;
 /// same artifact — the points, the graph, the law, the rounds, the raster, the cut, the means, a record's form — is a
 /// new number, so a store never serves a tile an older generator made. 2 (ruling B92, 2026-10-13): the 128 m level's
 /// rounds on a drainage network built once. 3 (B92 amended, the same day): the drainage built again after every second
-/// round (`l1::fine_rounds`; built once, it made walls and spires).
-pub const FINE_VERSION: u32 = 3;
+/// round (`l1::fine_rounds`; built once, it made walls and spires). 4 (slice W2, rulings B105, B114): every standing
+/// water's points under its level are outlets, each node's base level its own water, the rivers carved, the water map in
+/// the records ([`WATER_TILE_FORM`]). 5 (slice W1 item 4, ruling B94 item 1): an 8 km river leaves a tile at its bed,
+/// under the lower row by the channel law's depth (`l1::exits_at_bed`). 6 (ruling B115, form (a′)): a lake stands at its
+/// 128 m spill — each tile solved with the fine level of every lake in its domain (`l1::solve_l1_levels`), every river exit
+/// an outlet at any height, a dry end's lowest point, the rise's floor. 7 (the same ruling): a lowered lake's dry floor
+/// drains into its lake (its base level the lake's fine level), never a dry end's playa. 8 (ruling B116 part 1): the
+/// coarse copies' heights by the majority class (`class_mean_levels`). 9 (the lake floor design's bench, not yet ruled
+/// into the game): only a dry hollow's pit keeps a dry end's playa; its other nodes drain to it (`l1::Waters::dry_pit`).
+/// 10 (ruling B115, the lakes together; the owner's window, a 595 m wall of water): a lake's rounds name the other lakes of
+/// each tile's domain at their settled levels, and a final solve whose raster shows a lake passing under its level reopens
+/// it (the planet's shard, `vd_bins::fine_source`), so no final raster holds a lake over its pass.
+pub const FINE_VERSION: u32 = 10;
 
 /// ★ THE 16 m LEVEL'S OWN VERSION (ruling B95): every change to what a 16 m tile holds for the same 128 m ground is a
 /// new number; it folds into the 16 m level's input word only ([`input_word_of`]), so a 128 m tile stays valid across it.
 /// 2 (ruling B97, 2026-10-14): the 16 m law is the 128 m level's own law under tan 35° (the creep, the shared water and
-/// the pinned channels made walls and needles on steep ground).
-pub const L2_VERSION: u32 = 2;
+/// the pinned channels made walls and needles on steep ground). 3 (slice W2): the 16 m channels carved in the law's raster
+/// and the 16 m water map from the 128 m water. 4 (ruling B115): the 16 m water spreads only inside the 128 m water's
+/// reach (`water::raster_water_within`).
+pub const L2_VERSION: u32 = 4;
 
 /// ★ THE INPUT WORD of a stored tile of `level`: the 128 m level's is [`input_word`]; the 16 m level folds its own
 /// version and number in after it (a 16 m tile reads the finished 128 m ground, so it changes with it).
@@ -244,7 +257,9 @@ pub fn range_record(record: &[u8], lo: u32, hi: u32) -> Option<Vec<u8>> {
 #[must_use]
 pub fn range_label(bytes: &[u8]) -> Option<(u8, u8)> {
     match bytes {
-        [form, lo, count, ..] if *form == RANGE_FORM => Some((*lo, *count)),
+        [form, lo, count, ..] if (*form == RANGE_FORM) | (*form == WATER_RANGE_FORM) => {
+            Some((*lo, *count))
+        }
         _ => None,
     }
 }
@@ -271,6 +286,383 @@ pub fn decode_range(bytes: &[u8], level: FineLevel) -> Option<(u32, u32, Vec<Vec
     ))
 }
 
+/// ★ THE WATER RECORDS' FORMS (slice W2; the one-volume revision §3.4 and §3.6; ruling B105 Q2): a finished record of
+/// [`WATER_TILE_FORM`] carries each level as THREE planes — the heights, the water's level (quarter metres over the sea)
+/// and the wet share (0 ..= [`WET_FULL`]) — a levels' record of [`WATER_RANGE_FORM`] some of them, and a raw record of
+/// [`WATER_RAW_FORM`] its raster's three. A level holds meaning only where the share is full; the coder carries no
+/// missing word, so a dry cell's level is coded as the level before it.
+pub const WATER_TILE_FORM: u8 = 3;
+pub const WATER_RANGE_FORM: u8 = 4;
+pub const WATER_RAW_FORM: u8 = 2;
+/// A cell wholly under water (a standing water or a carved river); a smaller share is a narrower river's tint.
+pub const WET_FULL: i32 = 255;
+
+/// The water's planes of a raster from its water map and its narrower rivers' shares: the level where a water holds the
+/// cell ([`MISSING`] elsewhere) and the share — full there, the narrower rivers' share elsewhere.
+#[must_use]
+pub fn water_planes(water: &[i32], river_share: &[u8]) -> (Vec<i32>, Vec<i32>) {
+    let wet = water
+        .iter()
+        .zip(river_share)
+        .map(|(&w, &s)| if w == MISSING { i32::from(s) } else { WET_FULL })
+        .collect();
+    (water.to_vec(), wet)
+}
+
+/// A plane with each missing value taken from the one before it (the coder's form; the share says what is dry).
+fn filled(v: &[i32]) -> Vec<i32> {
+    let mut last = 0i32;
+    v.iter()
+        .map(|&q| {
+            if q != MISSING {
+                last = q;
+            }
+            last
+        })
+        .collect()
+}
+
+/// Codes after each other, each with its length (four bytes, little end first).
+fn push_code(out: &mut Vec<u8>, plane: &[i32], w: usize, h: usize) -> Option<()> {
+    let code = coder::encode(plane, w, h)?;
+    out.extend_from_slice(&(code.len() as u32).to_le_bytes());
+    out.extend_from_slice(&code);
+    Some(())
+}
+
+/// One length-prefixed code of a `w × h` plane off the front of `rest`.
+fn pop_code(rest: &mut &[u8], w: usize, h: usize) -> Option<Vec<i32>> {
+    let (len, tail) = rest.split_first_chunk::<4>()?;
+    let len = u32::from_le_bytes(*len) as usize;
+    let code = tail.get(..len)?;
+    *rest = &tail[len..];
+    coder::decode(code, w, h)
+}
+
+/// The level plane where the share is full, [`MISSING`] elsewhere.
+fn level_where_full(level: &mut [i32], wet: &[i32]) {
+    for (l, &s) in level.iter_mut().zip(wet) {
+        if s != WET_FULL {
+            *l = MISSING;
+        }
+    }
+}
+
+/// ★ THE RAW RECORD WITH ITS WATER: [`encode_raw`]'s heights and the raster's water level and share, each a
+/// length-prefixed code. `None` where a plane cannot be coded.
+#[must_use]
+pub fn encode_raw_water(field: &Field, level: &[i32], wet: &[i32], shift: u32) -> Option<Vec<u8>> {
+    let mut out = vec![WATER_RAW_FORM, shift as u8];
+    push_code(&mut out, &filled(&field.v), field.w, field.h)?;
+    push_code(&mut out, &filled(level), field.w, field.h)?;
+    push_code(&mut out, wet, field.w, field.h)?;
+    Some(out)
+}
+
+/// A raw record with its water back: the heights (a cell no face holds missing), the level (missing where the share is
+/// not full) and the share, each a field on the level's global cells. `None` as [`decode_raw`].
+#[must_use]
+pub fn decode_raw_water(bytes: &[u8], key: TileKey, geom: LevelGeom) -> Option<[Field; 3]> {
+    let [form, shift, rest @ ..] = bytes else {
+        return None;
+    };
+    let mut rest = rest;
+    if (*form != WATER_RAW_FORM) | (u32::from(*shift) != geom.shift) {
+        return None;
+    }
+    let side = (geom.side() + 2 * geom.margin) as usize;
+    let mut heights = pop_code(&mut rest, side, side)?;
+    let mut level = pop_code(&mut rest, side, side)?;
+    let wet = pop_code(&mut rest, side, side)?;
+    let (i0, j0) = (
+        (i64::from(key.tx) * geom.side() - geom.margin) as i32,
+        (i64::from(key.ty) * geom.side() - geom.margin) as i32,
+    );
+    for (b, row) in heights.chunks_mut(side).enumerate() {
+        for (a, q) in row.iter_mut().enumerate() {
+            if chart_cell(key.face, i0 + a as i32, j0 + b as i32, geom.n).is_none() {
+                *q = MISSING;
+            }
+        }
+    }
+    level_where_full(&mut level, &wet);
+    let field = |v: Vec<i32>| Field {
+        gx0: i64::from(i0),
+        gy0: i64::from(j0),
+        w: side,
+        h: side,
+        v,
+    };
+    Some([field(heights), field(level), field(wet)])
+}
+
+/// A finished tile's levels with their water: level `k` at index `k` of each plane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaterLevels {
+    pub heights: Vec<Vec<i32>>,
+    pub level: Vec<Vec<i32>>,
+    pub wet: Vec<Vec<i32>>,
+}
+
+/// ★ THE WATER'S MEAN LEVELS of a finished square `side` cells wide: level `k` the box of `2^k × 2^k` cells — its share
+/// the cells' mean share (rounded half up), its level the highest level among its full cells ([`MISSING`] where none):
+/// the far map counts the water the near view shows (§3.6), and a far pixel takes the water that holds its cells.
+#[must_use]
+pub fn water_mean_levels(
+    level: &[i32],
+    wet: &[i32],
+    side: usize,
+    levels: u32,
+) -> (Vec<Vec<i32>>, Vec<Vec<i32>>) {
+    let (mut lv, mut wt) = (Vec::new(), Vec::new());
+    for k in 1..=levels {
+        let n = side >> k;
+        let (mut l, mut w) = (Vec::with_capacity(n * n), Vec::with_capacity(n * n));
+        for by in 0..n {
+            for bx in 0..n {
+                let (mut sum, mut top) = (0i64, MISSING);
+                for y in 0..1usize << k {
+                    for x in 0..1usize << k {
+                        let c = ((by << k) + y) * side + (bx << k) + x;
+                        sum += i64::from(wet[c]);
+                        if wet[c] == WET_FULL {
+                            top = top.max(level[c]);
+                        }
+                    }
+                }
+                w.push(((sum + (1i64 << (2 * k - 1))) >> (2 * k)) as i32);
+                l.push(top);
+            }
+        }
+        lv.push(l);
+        wt.push(w);
+    }
+    (lv, wt)
+}
+
+/// ★ THE COARSE COPIES' HEIGHTS BY THE MAJORITY CLASS (ruling B116 part 1; the one-volume revision §3.6): level `k` the
+/// box of `2^k × 2^k` cells of the finished square `side` cells wide — where at least half its cells stand under water
+/// (`wet` full, a `level` named), the mean ground of those wet cells (the floor under the water); elsewhere the mean ground
+/// of its other cells (the land). So a coarse copy's shore falls where half the finest cells are wet, and the water's depth
+/// over the floor stays true for its colour (ruling B109). Rounded half up. `None` where a cell is missing or the side does
+/// not halve so often. MEASURED before (2026-10-19, the owner: *"The rung change should be seamless also for the water"*):
+/// the plain mean mixed a shore cell's floor and land, so a cell half under water stood over the water and drew dry, and
+/// the shore jumped at each rung change.
+///
+/// **Example.** A 1 km cell on the basin lake's shore holds 40 cells of floor at −2 800 m and 24 of land at −2 300 m: it
+/// stands at −2 800 m, under the water at −2 721 m, and draws wet; with 24 of floor and 40 of land it stands at −2 300 m and
+/// draws dry.
+#[must_use]
+#[allow(
+    clippy::integer_division,
+    reason = "the finish runs on the planet's shard's CPU alone (the client reads the record): an exact integer quotient, \
+              one answer on every host"
+)]
+pub fn class_mean_levels(
+    ground: &[i32],
+    level: &[i32],
+    wet: &[i32],
+    side: usize,
+    levels: u32,
+) -> Option<Vec<Vec<i32>>> {
+    if (side >> levels) << levels != side {
+        return None;
+    }
+    let mut out = Vec::with_capacity(levels as usize);
+    for k in 1..=levels {
+        let n = side >> k;
+        let mut plane = Vec::with_capacity(n * n);
+        for by in 0..n {
+            for bx in 0..n {
+                let (mut wet_sum, mut wet_n, mut dry_sum, mut dry_n) = (0i64, 0i64, 0i64, 0i64);
+                for y in 0..1usize << k {
+                    for x in 0..1usize << k {
+                        let c = ((by << k) + y) * side + (bx << k) + x;
+                        if ground[c] == MISSING {
+                            return None;
+                        }
+                        if wet[c] == WET_FULL && level[c] != MISSING {
+                            wet_sum += i64::from(ground[c]);
+                            wet_n += 1;
+                        } else {
+                            dry_sum += i64::from(ground[c]);
+                            dry_n += 1;
+                        }
+                    }
+                }
+                let (sum, count) = if 2 * wet_n >= wet_n + dry_n {
+                    (wet_sum, wet_n)
+                } else {
+                    (dry_sum, dry_n)
+                };
+                plane.push((2 * sum + count).div_euclid(2 * count) as i32);
+            }
+        }
+        out.push(plane);
+    }
+    Some(out)
+}
+
+/// ★ THE FINISHED TILE WITH ITS WATER (slice W2): [`finish`]'s levels, and the water's — each finished cell takes the
+/// level and share of the raster its height came from in the cut ([`super::finish::finished_square_planes`]) and stays
+/// wet only where the finished ground stands under that level (a blend that lifted the ground over the water dries it);
+/// then the water's mean levels ([`water_mean_levels`]). `levels` and `wets` are the nine rasters' water planes beside
+/// `block`'s heights. `None` as [`finish`].
+#[must_use]
+pub fn finish_water(
+    block: [Option<(TileKey, &Field)>; 9],
+    levels: [Option<&Field>; 9],
+    wets: [Option<&Field>; 9],
+    geom: LevelGeom,
+) -> Option<WaterLevels> {
+    let (square, planes) = super::finish::finished_square_planes(block, &[levels, wets], geom)?;
+    let [mut level, mut wet]: [Vec<i32>; 2] = planes
+        .into_iter()
+        .map(|f| f.v)
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()?;
+    for c in 0..square.v.len() {
+        if wet[c] == WET_FULL && !(level[c] != MISSING && square.v[c] < level[c]) {
+            wet[c] = 0;
+        }
+    }
+    level_where_full(&mut level, &wet);
+    let n_means = geom.level.mean_levels();
+    // ★ The coarse copies stand by the majority class (ruling B116 part 1).
+    let means = class_mean_levels(&square.v, &level, &wet, square.w, n_means)?;
+    let (lv, wt) = water_mean_levels(&level, &wet, square.w, n_means);
+    let mut out = WaterLevels {
+        heights: vec![square.v],
+        level: vec![level],
+        wet: vec![wet],
+    };
+    out.heights.extend(means);
+    out.level.extend(lv);
+    out.wet.extend(wt);
+    Some(out)
+}
+
+/// ★ THE FINISHED RECORD WITH ITS WATER, a tile `2^ts` cells wide: the form, the count, the side's shift, then each
+/// level's three planes (heights, level, share), each a length and a code. `None` as [`encode_levels`].
+#[must_use]
+pub fn encode_water_levels(levels: &WaterLevels, ts: u32) -> Option<Vec<u8>> {
+    let side = 1usize << ts;
+    let count = levels.heights.len();
+    if (levels.level.len() != count) | (levels.wet.len() != count) {
+        return None;
+    }
+    let mut out = vec![WATER_TILE_FORM, count as u8, ts as u8];
+    for k in 0..count {
+        let s = side >> k;
+        if (levels.heights[k].len() != s * s)
+            | (levels.level[k].len() != s * s)
+            | (levels.wet[k].len() != s * s)
+        {
+            return None;
+        }
+        push_code(&mut out, &levels.heights[k], s, s)?;
+        push_code(&mut out, &filled(&levels.level[k]), s, s)?;
+        push_code(&mut out, &levels.wet[k], s, s)?;
+    }
+    Some(out)
+}
+
+/// The levels `lo .. lo + count` of a water record's planes from `rest` (a tile `side` cells wide).
+fn decode_water_codes(
+    mut rest: &[u8],
+    side: usize,
+    lo: usize,
+    count: usize,
+) -> Option<WaterLevels> {
+    let mut out = WaterLevels {
+        heights: Vec::with_capacity(count),
+        level: Vec::with_capacity(count),
+        wet: Vec::with_capacity(count),
+    };
+    for k in lo..lo + count {
+        let s = side >> k;
+        out.heights.push(pop_code(&mut rest, s, s)?);
+        let mut level = pop_code(&mut rest, s, s)?;
+        let wet = pop_code(&mut rest, s, s)?;
+        level_where_full(&mut level, &wet);
+        out.level.push(level);
+        out.wet.push(wet);
+    }
+    Some(out)
+}
+
+/// A finished record with its water back: the side's shift and the levels. `None` as [`decode_levels`].
+#[must_use]
+pub fn decode_water_levels(bytes: &[u8], level: FineLevel) -> Option<(u32, WaterLevels)> {
+    let [form, count, ts, rest @ ..] = bytes else {
+        return None;
+    };
+    let means = level.mean_levels();
+    if (*form != WATER_TILE_FORM)
+        | (u32::from(*count) != means + 1)
+        | (u32::from(*ts) < means)
+        | (*ts > 16)
+    {
+        return None;
+    }
+    Some((
+        u32::from(*ts),
+        decode_water_codes(rest, 1usize << ts, 0, usize::from(*count))?,
+    ))
+}
+
+/// ★ THE LEVELS `lo .. hi` OF A FINISHED WATER RECORD as one record of [`WATER_RANGE_FORM`] (ruling B86 item 3, far
+/// copies first): the form, the first level, the count, the side's shift, then each level's three length-prefixed codes
+/// cut from the record as they stand. `None` as [`range_record`].
+#[must_use]
+pub fn water_range_record(record: &[u8], lo: u32, hi: u32) -> Option<Vec<u8>> {
+    let [form, count, ts, rest @ ..] = record else {
+        return None;
+    };
+    let mut rest = rest;
+    if (*form != WATER_TILE_FORM) | (lo >= hi) | (hi > u32::from(*count)) {
+        return None;
+    }
+    let mut out = vec![WATER_RANGE_FORM, lo as u8, (hi - lo) as u8, *ts];
+    for k in 0..hi {
+        for _ in 0..3 {
+            let (len, tail) = rest.split_first_chunk::<4>()?;
+            let n = u32::from_le_bytes(*len) as usize;
+            let code = tail.get(..n)?;
+            if k >= lo {
+                out.extend_from_slice(len);
+                out.extend_from_slice(code);
+            }
+            rest = &tail[n..];
+        }
+    }
+    Some(out)
+}
+
+/// A levels' water record of `level` back: the side's shift, the first level, and the levels from it. `None` as
+/// [`decode_range`].
+#[must_use]
+pub fn decode_water_range(bytes: &[u8], level: FineLevel) -> Option<(u32, u32, WaterLevels)> {
+    let [form, lo, count, ts, rest @ ..] = bytes else {
+        return None;
+    };
+    let (lo, count, ts) = (u32::from(*lo), u32::from(*count), u32::from(*ts));
+    if (*form != WATER_RANGE_FORM)
+        | (count == 0)
+        | (lo + count > level.mean_levels() + 1)
+        | (ts < level.mean_levels())
+        | (ts > 16)
+    {
+        return None;
+    }
+    Some((
+        ts,
+        lo,
+        decode_water_codes(rest, 1usize << ts, lo as usize, count as usize)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     //! A test may divide (ruling F7's rule is about the shipped path): a fixture places its cells with a quotient and a
@@ -284,6 +676,111 @@ mod tests {
     use vd_seed::bend::Face;
 
     const L1: FineLevel = FineLevel::L1;
+
+    /// ★ THE MAJORITY CLASS (ruling B116 part 1): a 2 × 2 box three-quarters wet stands at its wet cells' mean floor, one
+    /// a quarter wet at its dry cells' mean ground, one half wet at its wet cells' (a tie goes to the water); negative
+    /// heights round half up.
+    #[test]
+    fn a_coarse_copy_stands_by_its_majority_class() {
+        let ground = [10, 20, 30, 40];
+        let lake = 50;
+        let full = |n: usize| -> (Vec<i32>, Vec<i32>) {
+            (
+                (0..4).map(|c| if c < n { lake } else { MISSING }).collect(),
+                (0..4).map(|c| if c < n { WET_FULL } else { 0 }).collect(),
+            )
+        };
+        let (l3, w3) = full(3);
+        assert_eq!(
+            class_mean_levels(&ground, &l3, &w3, 2, 1),
+            Some(vec![vec![20]])
+        );
+        let (l1, w1) = full(1);
+        assert_eq!(
+            class_mean_levels(&ground, &l1, &w1, 2, 1),
+            Some(vec![vec![30]])
+        );
+        let (l2, w2) = full(2);
+        assert_eq!(
+            class_mean_levels(&ground, &l2, &w2, 2, 1),
+            Some(vec![vec![15]])
+        );
+        let low = [-11, -12, -13, -14];
+        assert_eq!(
+            class_mean_levels(&low, &l3, &w3, 2, 1),
+            Some(vec![vec![-12]])
+        );
+        assert_eq!(class_mean_levels(&ground, &l3, &w3, 3, 1), None);
+    }
+
+    /// ★ THE WATER RECORD (slice W2): a 32-cell tile with a lake (level 100 over a floor at 40) and a narrower river's
+    /// tint comes back exactly — its heights, its level only where the share is full, its share — the coarser levels
+    /// take the mean share and the highest full level, a range record carries the levels it names, and the old forms
+    /// are refused.
+    #[test]
+    fn a_water_record_carries_its_planes_back_and_its_means_count_the_water() {
+        let side = 32usize;
+        let heights: Vec<i32> = (0..side * side)
+            .map(|c| {
+                if c % side < 8 {
+                    40
+                } else {
+                    200 + (c / side) as i32
+                }
+            })
+            .collect();
+        let water: Vec<i32> = (0..side * side)
+            .map(|c| if c % side < 8 { 100 } else { MISSING })
+            .collect();
+        let river: Vec<u8> = (0..side * side)
+            .map(|c| if c % side == 20 { 64 } else { 0 })
+            .collect();
+        let (level, wet) = water_planes(&water, &river);
+        assert_eq!((level[0], wet[0], wet[20], wet[21]), (100, WET_FULL, 64, 0));
+        let f = Field {
+            gx0: 0,
+            gy0: 0,
+            w: side,
+            h: side,
+            v: heights.clone(),
+        };
+        let n = L1.mean_levels();
+        let mut levels = WaterLevels {
+            heights: vec![heights],
+            level: vec![level],
+            wet: vec![wet],
+        };
+        levels
+            .heights
+            .extend(mean_levels(&f, 0, 0, side, n).expect("the means"));
+        let (lv, wt) = water_mean_levels(&levels.level[0], &levels.wet[0], side, n);
+        // The first mean level: a box of four, all lake (share full, level 100) or all dry land.
+        assert_eq!(
+            (lv[0][0], wt[0][0], lv[0][8], wt[0][8]),
+            (100, WET_FULL, MISSING, 0)
+        );
+        // The coarsest: one cell, a quarter lake and a river column (64 over 32 cells).
+        assert_eq!(lv[n as usize - 1][0], 100);
+        // (8 columns full and one at 64, 32 rows each, over 1 024 cells, rounded half up) = 65.75 → 66.
+        assert_eq!(wt[n as usize - 1][0], ((255 * 8 + 64) * 32 + 512) >> 10);
+        levels.level.extend(lv);
+        levels.wet.extend(wt);
+        let bytes = encode_water_levels(&levels, 5).expect("codes");
+        assert_eq!(decode_water_levels(&bytes, L1), Some((5, levels.clone())));
+        assert_eq!(
+            decode_levels(&bytes, L1),
+            None,
+            "the old form's reader refuses it"
+        );
+        let range = water_range_record(&bytes, 3, n + 1).expect("a range");
+        let (ts, lo, part) = decode_water_range(&range, L1).expect("decodes");
+        assert_eq!((ts, lo), (5, 3));
+        assert_eq!(part.heights[..], levels.heights[3..]);
+        assert_eq!(part.level[..], levels.level[3..]);
+        assert_eq!(part.wet[..], levels.wet[3..]);
+        assert_eq!(water_range_record(&bytes, 4, 4), None);
+        assert_eq!(decode_water_range(&bytes, L1), None);
+    }
 
     /// A small body's 128 m level: a node of `1 << shift` cells, an eight-node tile, the raw raster a node past it.
     fn l1_geom(shift: u32, n: i32) -> LevelGeom {

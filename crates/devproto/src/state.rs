@@ -184,6 +184,11 @@ pub struct DevArtifacts {
     pub fine_tiles: u64,
     #[serde(default)]
     pub fine_held: Vec<(String, u64)>,
+    /// ★ THE FAR LAKE LISTS FOLDED (ruling B116 part 2): the realms whose far lake list the book folded into its far
+    /// levels, as `{:?}` with the list's row count — a far view whose lakes vanish at rung 13 says at once whether the
+    /// list was there.
+    #[serde(default)]
+    pub far_held: Vec<(String, u64)>,
 }
 
 /// The decoded, delivered client state — wire truth, the agent's diagnosis surface.

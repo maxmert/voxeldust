@@ -2156,4 +2156,315 @@ own; the deep floor's cut stays the extractor's step (under an opaque sheet the 
 the sheet's own law). Tests written in part, NOT RUN (B74; registered).
 - 2026-10-18 — RULING B110: THE OWNER'S LOOK AT S2 GIVEN in the window at 3 km over the coast stand ("Looks amazing"; the
 sky's part waits for the clouds); one local commit of S1, the loading screen's cure and S2; S3 (the waves) next.
+- 2026-10-18 — SLICE S3 BUILT: THE WAVES AS SURFACE DETAIL (rulings B107, B110; the build note
+`docs/investigation/2026-10-18/sea_waves_design.md`). Ten octave bands from 0.5 m to 512 m, each ONE 1D profile (Jeschke et
+al. 2018) of 32 wavenumbers with seeded phases, moved by the deep-water dispersion on the universe's own clock (the
+snapshot's `universe_seconds`, ruling T3), built each frame by a small inverse FFT (`vd_client::waves`, 0.47 ms a frame a
+sea realm); 48 fixed 3D directions a band (a Fibonacci set turned per band by the seed), read along `x · d` with the eye's
+place taken modulo each period in f64 — no chart and no seam. The band table carries the block (the profiles' slopes, each
+band's list of the directions its spread keeps under the eye's wind with their shares). Each water point carries the
+wind as a vector (the planet's frame, m/s); the fragment stage sums the bands a pixel can show (Pierson–Moskowitz energy
+by each place's wind, the TMA factor by its depth), and the glint keeps Cox & Munk's variance less what the drawn waves
+show. MEASURED on the way: 16 directions drew a net of straight crossing crests in the sun's path (cured with 48); the
+spread at every pixel cost +57 ms a frame (cured: the spread read once under the eye). PICTURES headless: from 30 m
+facing the sun the glint breaks into short crests; from 100 m fine ripples; from 3 km the same sheen as S2. Interims and
+owed tests registered; no test RUN (B74).
 
+- 2026-10-18 — THE OWNER'S LOOK AT S3 in the window, 30 m over the sea off the coast stand: *"waves definitely not like on
+the sea (waves are not big enough), more like on windless lake"* → RULING B111 (the wind first, by law; the waves' method
+re-used from open source inside B106/B107). THE WIND'S CAUSE, MEASURED (`climate_bench chain-winds`: the game's chain from
+cold on a stored world, each season's wind in its two parts — the cells' law and Gill's departures; the outside readings by
+`/tmp/vd-waves-check/compare_winds.py`, ExoPlaSim's months put on the chain's seasons by the year's angle): ON EARTH'S
+CHARTER the chain's sea wind matches NCEP R1's 10 m monthly winds (the year's mean of the seasons' speeds over the sea,
+median 4.1 against 4.1 m/s; the trades −3.6 against −4.8 m/s at 0–20° S in the lagged northern summer); ON THE HOME
+PLANET it is a third of ExoPlaSim's (median 2.0 against 6.0 m/s; 1.2–1.6 against 6.4–6.5 m/s at 20° S–20° N), and the mean
+cell's lower branch about TEN TIMES too weak (v 0.3–0.5 against 3.4–6.8 m/s in the cross-equatorial season; the summer
+cell's westerlies 2.7 against 8.0 m/s at 20–40° N); Gill's departures about half of ExoPlaSim's stationary eddies (rms
+0.5–1.6 against 2.3–3.5 m/s). So the cells' closure holds at Earth's tilt and spin and fails at the home planet's 55° tilt
+and a third of Earth's spin. NEXT: the closure's terms by row (transport, gross moist stability, mass flux, share) on the
+bench, the right published law with a read-only research beside it, then the owner's word before the world moves.
+- 2026-10-18 — THE WIND'S STEP 1 ON THE BENCH (B111; the study `docs/investigation/2026-10-18/sea_wind_and_waves_study.md`;
+NOT in the game's solve — the chain's change moves the world, so it waits for the owner's word). The research found three
+factors in the cells' mass flux `ψ = w·F/g_ms` on the home planet: the balance's diffusive transport across the equator
+(≤ 2.0 PW against ExoPlaSim's 7.8–8.6), the gross moist stability (40–61 kJ/kg against 13–16; `h_T` read at the summer
+pole) and Siler's share (0.4); with ExoPlaSim's own ψ the chain's wind law gives ExoPlaSim's sea winds (5.70 against 5.68
+m/s). BUILT IN `seasons::wind` (Step 1): `h_T` over the convecting tropics' band, the equatorial deformation radius
+`√(c/(2Ω·a))` with `c = N·D/π` (Gill 1980) from the body's lapse rate and the 0.1 bar tropopause (Robinson & Catling
+2014) — Earth ~14°, the home planet ~24°; a column whose own air outdoes it convects through it (`g_ms ≥ 0.06·h`, the
+same quasi-equilibrium read locally; without it ψ ran to 30 × 10¹¹ kg/s at 59° S); the storm belts' westerlies only under
+an easterly cells' torque (as `seasons::gill`). MEASURED: Earth unchanged (the sea's median 4.1 m/s); the home planet's
+g_ms at the equator 20–30 kJ/kg, the polar band 5.4 → 2.7 m/s (ExoPlaSim 3.1), the −12 m/s polar easterlies gone, but the
+sea's median only 2.0 → 2.2 m/s — THE BALANCE'S TRANSPORT (Step 2) IS THE MAIN LEVER. Also cured in S3's shader the same
+day (the open-source study): the energy 1.69× too large (β 5/4 at the peak) and a band's step at one footprint (the
+pixel's own filter).
+- 2026-10-18 — THE WIND'S STEP 2 RESEARCHED (B112), NOT BUILT: no published conceptual closure is proven for a seasonal
+cross-equatorial cell at a high tilt and slow spin; the nearest family (the weak temperature gradient, two layers over the
+equatorial band, Bretherton & Sobel 2002) MEASURED in a NumPy replica of the balance gives the home planet ExoPlaSim's
+~9 PW but Earth 1.9× the atmosphere's transport and a 50 m aquaplanet 6.6× GFDL's — it fails two of three references in
+every variant; the lever is the sea's surface exchange by the cells' own wind (MEASURED in ExoPlaSim: the calm summer sea
+stores, the windy winter trades evaporate), with the land's exchange and the free troposphere's outgoing heat — a
+two-layer intermediate climate (the study §5 items 5–6). Step 1 stays benched, uncommitted. The owner's word asked.
+- 2026-10-18 — SLICE W1: THE BASE LEVEL BUILT ON THE BENCH (B113 item 3; B94 item 1; the one-volume revision §3.2; bench
+only — `OutletRule::StandingWater`, the game's tiles unchanged): each macro node's BASE LEVEL is the first standing water
+its 8 km receiver chain reaches (the sea at nought, a lake at its word) or a dry chain's end floor (Powell 1875: the sea the
+grand base level, a lake a local one) — `fine::l1::base_level`, `base_levels`; the rounds hold a node whose row stands over
+its base level, the half step reads `(row − b)/(mean − b)`, and a read node's first rise is the land's over its own base
+(today all three read the sea, so a basin under the sea's level was the sea's floor). MEASURED on tile 3,97,21 (the basin
+whose slopes fell flat on its lake, 17 October): today's rule ran 1 pass a round (nothing held), the base level 13–176
+(the slopes held); 97 465 of 409 600 cells wet against 98 086. THE SIDE VIEWS (`/tmp/vd-w1-base/`, outside the repo):
+today a smooth uneroded bowl round the lake; with the base level eroded ridges and valleys down to the lake. The bench's
+water is still drawn by whole 128 m cells (the staircase shore, 17 October's item 2) — next.
+- 2026-10-18 — THE WIND'S RESEARCH BESIDE (B113) HIT A BLOCKER (the study §5 item 7): today's cells' wind law gives the
+tropical band's wind BACKWARDS on the home planet (strong over the summer half, calm over the winter half — ExoPlaSim and
+NCEP the reverse), so the surface exchange by the cells' own wind cannot be lawful and the balance ↔ wind loop does not
+settle; next piece the heating-driven wind law with a vapour model in the replica. THE PLANET'S WATER MAP drawn from above
+(`climate_bench art-maps … <tag>_water.png`, the 8 km world: the sea, every lake, the rivers by discharge; outside the repo
+`~/Downloads/voxeldust_lakes_2026-10-18/`): 1 164 lakes at the 8 km scale (155 closed, 1 009 spilling; 0.9 % of the land);
+rivers to the sea with ≥ 100 / 1 000 / 10 000 m³/s: 360 / 24 / 0. Two possible defects seen, unmeasured: BRANCHING
+LAKES filling whole valley systems in the basin under the sea's level (east of the belt), and straight lines inside the
+large closed lake.
+- 2026-10-18 — SLICE W1: THE RIVER CARVE ON THE BENCH (B114; the one-volume revision §3.5; bench only —
+`OutletRule::StandingWater`): `fine::carve` — each link of the level's own settled drainage takes Leopold & Maddock's
+width and mean depth from its discharge (the row's class rule, the body's gravity factor, `river::channel_width_mm`); a
+channel WIDER THAN THE CELL is carved across its width in a parabolic section of the law's area (the greatest depth 1.5 ×
+the mean) and its water stands at its bank (the steady state's height along the link; `L1Tile::river`); a narrower river
+is the cell's SHARE (its width over the cell's; `L1Tile::river_share`), a tint. `planet_stand rivers` lists the largest
+mouths (5 066, 4 053, 2 533 … m³/s by the rows' classes) and their tiles; `water1` draws each tile from above. MEASURED on
+tile 5,74,80 (the largest mouth): 811 cells of carved river (the trunk ~280 m wide, two to three cells), the narrower
+rivers a faint tint at their share. Picture `~/Downloads/voxeldust_lakes_2026-10-18/river_tile_5-74-80_from_above.png`.
+OPEN: the 16 m level's carve (from ~17 m³/s), the water map (W2), the unit question of the width table's year (the
+table's test reads the Julian year; the chain sums the rain over the body's own year — about 5 % in a width).
+- 2026-10-18 — SLICE W2, STEP T1: THE RASTER'S WATER MAP IN THE TERRAIN CRATE (B114; the one-volume revision §3.4;
+bench rule only): `fine::water::raster_water` — the identity from each raster cell's 8 km node (the sea at nought, a
+lake at its word), the wet test from the raster's own ground, CONNECTION by a four-neighbour spread of each water from its
+own nodes' cells under its level (no hanging pond), the higher level at a contact, a carved river's bank in its channel;
+integers in quarter metres, one answer on every host. `L1Tile::water` under `OutletRule::StandingWater`. MEASURED: equal
+to the bench's own flood cell for cell on tiles 5,74,80 and 3,97,21 (0 cells differ). NEXT (T2–T4): the raw record's water
+plane, the finish's water (each finished cell takes the level of the raster its height came from, wet where the finished
+ground stands under it), the mean levels' wet share and mean top, the tile record's form.
+- 2026-10-18 — SLICE W2, STEPS T2–T4 IN THE TERRAIN CRATE (B114; bench rule only, nothing in the game's path yet):
+THE FINISH CARRIES THE WATER — `stitch::draw_pick` (each finished cell the plane value of the raster that DOMINATES its
+height's blend, `Quarter::pick`: the side of each cut it stands on, a missing side giving way, at a cube corner the
+greatest weight) and `finish::finished_square_planes`; `tile::finish_water` (the level and share picked, wet only where
+the FINISHED ground stands under the level) and `water_mean_levels` (a coarser cell's share the mean, its level the
+highest full child). THE RECORDS: `WATER_TILE_FORM` 3 / `WATER_RANGE_FORM` 4 / `WATER_RAW_FORM` 2 (each level three
+length-prefixed codes: heights, level, share; a dry cell's level coded as the one before it). THE BOOK HOLDS THE WATER
+(`HeldLevels::water`, `insert_water_from`, `FineBook::water` — the nearest sample, never a blend). THE 16 m LEVEL
+(`l2::solve_l2_with`): its settled drainage's channels carved in the law's raster BEFORE B96's detail (`refine::
+raster_carved`: a channel narrower than 128 m arrives as detail, its bank moved by the cell's own offset), its identity the
+128 m water whole at each 16 m cell, the connection searched again on the 16 m ground. THE BENCH `planet_stand water2`
+(25 tiles at 128 m in 13 s, four at 16 m in 10 s, on tile 5,74,80): the finished 128 m tile — the sea's arms, the carved
+trunk, the narrower rivers as tints along the valleys; the four 16 m tiles — the small rivers as thin tints, none over the
+16 m carve's 17 m³/s in that square. Pictures `~/Downloads/voxeldust_lakes_2026-10-18/finished_128m_tile_…`,
+`four_16m_tiles_…`. Tests written for the water map and the water record (not run, B74). NEXT: the game's path — the
+shard's fine source (solve, keep, finish, store, ship the water records), the gateway's relay, the client's book and its
+water sheet for lakes and rivers on the ground's lattice, the world move (FINE_VERSION 4, L2_VERSION 3, with the climate's
+Step 1 as the next generator) on the owner's word.
+- 2026-10-18 — SLICE W2 BUILT INTO THE GAME'S PATH (B114; lint-clean, NOTHING RUN — no test, no cluster, no window):
+THE SHARD (`vd_bins::fine_source`, `GAME_RULE` = `OutletRule::StandingWater`): each raw tile solved with its water (the base
+level, the outlets, the carve, the water map) and kept as three fields (`RawTile`: heights, level, share; `WATER_RAW_FORM`),
+each finished tile by `finish_water` (`WATER_TILE_FORM`), the book holding the water (the 16 m level's identity reads it),
+the levels shipped as `WATER_RANGE_FORM` (the gateway's relay reads its label: `range_label` takes both forms). THE CLIENT
+(`artifact_book`): the water range decoded, held with its water. THE SHEET (`chunks::sea_sheet`): each vertex's water from
+the fine water map at its place where the fine level serves the rung and its tile is held (the sea, a lake at its own
+level, a carved river at its bank; a hollow no path joins stays dry — the S1 interim cured there), else the 8 km coast
+mask's sea as before; a dry vertex beside the water takes its wet triangles' highest level; the floor cut by each vertex's
+own level. THE NARROWER RIVERS: their share in the surface word's two spare bytes (own and morph target), the ground's
+colour mixed toward deep water's own colour by it (`ladder_fade.wgsl`). THE WORLD MOVE: FINE_VERSION 4, L2_VERSION 3
+(every fine tile solved again on its next visit). Interims and owed gates registered (DEFERRED, slice W2's own entry).
+- 2026-10-18 (later) — THE OWNER'S LOOK AT W2 in the window over the basin lake (tile 3,97,21, 400 m up): *"The rest looks
+good"* and *"The shores squared"*. THE CAUSE (read): the game's water read took the NEAREST sample's level, held only where
+that sample's cell lay wholly under water, so every shore stepped along the raster's cells (128 m squares from afar, 16 m
+near) — the design's column rule (§3.4) was in the bench's renderer and missed in the game's reader. CURED: the drawing reads
+`FineBook::shore_water` (the highest full level of the four samples around the place, the share from the nearest; the sheet
+wets each vertex where its own ground stands under it); the 16 m solve keeps `FineBook::water` (the nearest sample, its
+identity), so no stored tile changes and no version moves. In the window again (the owner asked to proceed with the plan);
+the owner's look owed.
+- 2026-10-18 (later) — SLICE W1 ITEM 4: THE RIVERS LEAVE AT THEIR BED (ruling B94 item 1; bench A's law of 13 October):
+`fine::l1::exits_at_bed` and `bed_depth_m` — each 8 km river that leaves a tile leaves under the lower row by
+`D = HI·Rf` (Whipple & Tucker 1999 eq. 22 with Hack's law, `HI = (1−p)/(2−p)` = 0.194; the channel head at 10⁵ m², 316 m),
+never under the node's base level (Powell 1875; where the lower row stands under the water the river runs into, it leaves at
+that water's level). Example (the unit test, written, not run): 300 km² over an 8 km link, a 40 m drop: 57.1 m; a 1 m drop:
+1.4 m. FINE_VERSION 5. Bench A's readings stand for its effect (plains +0–1 m; hills D median 33 m, the 1 / 5 km relief
++9 / +12 %); the side views beside Earth's (B94 item 1) owed with the owner's look.
+- 2026-10-18 (later) — SLICE W1 ITEM 5: THE WATER MAP'S READINGS (`planet_stand water-gates F,TX,TY`: the 5 × 5 tiles solved
+under the game's rule, the ring's nine finished with their water and stitched; the one-volume revision §3.10). ★ A DEFECT
+FOUND IN FINE_VERSION 4 AND CURED: in the closed basin east of the belt (tiles 3,96 … 98,20 … 22) 433 252 finished cells stood
+at exactly 0 m — a 2 km cliff at the lake. The probe (`planet_stand l1-probe`) found the chain: `standing_water_outlets`
+kept a river exit only over the sea's level, as if the sea took every exit under it; no sea stands in a closed basin, so a
+node whose 8 km river left the domain at −3 026 m lost its only outlet, its points filled to their spill at −2 314 m, the
+rounds cut its rise by 0.0016 a round to nought, its logarithm ran to minus infinity and every height downstream became a
+NaN, stored as 0 m. CURED: every river exit stays an outlet at any height; a dry end with no point under its row keeps its
+lowest point; a domain no outlet reaches drains at its lowest point; the half step keeps a rise at the smallest positive
+normal number (the floor the steady pass already gives the flow). After: 58 cells at 0 m (plausible ground). A SECOND DEFECT
+OF THE FIRST CURE, CURED: an exit into the sea kept at the sea floor's row (−94 m) cut dry ground under the sea's level
+(23 464 dry cells under it on the river mouth's square against 494); every exit now stands at least at its base level
+(500 after). THE READINGS (river mouth 5,74,80 | basin lake 3,97,21): G-DIVIDE on the ring's raw rasters 0 | 0 (its control,
+today's outlets' ground, 0 | 0 — not a failing control here); ON ALL 25 TILES 0 | 53 136 cells — a perched lake at −341 m
+spreads into the −2 002 m lake (its 128 m rim cut under its level; the design's §3.4 item 6, DEFERRED slice W2 item 8);
+G-FACE in the raw rasters 0 | 0 (the control, the connection switched off: 1 925 | 4 308), on the finished squares 27 |
+1 058, every one within 64 cells of a cut (the finish's pick between rasters that disagree on the water; the basin's are the
+perched lake's), steps over 1 m 0 | 456 (−2 002 against −341 m); G-SEAM-WATER across the cuts 0 | 1; dry cells under the
+sea's level 500 (8.2 km²) | 1.82 million (the closed basin's dry floor). THE SIDE VIEWS (`/tmp/vd-w1-gates/`, outside the
+repo; 1.5 km from the water, 150 m up): the coast and the river mouth meet the sea with no step (the flat delta's shore
+jagged at the 128 m cell where the ground stands within a quarter metre of the sea); the plain's lake; the basin lake with a
+smooth shore under eroded slopes; a dry pocket's floor. Not yet in the cluster (FINE_VERSION 5 re-solves every fine tile).
+- 2026-10-18 (later) — FINE_VERSION 5 IN THE CLUSTER (the owner: "Deploy now"): the shard and the window client rebuilt
+(the basin's cure, the rivers' exits at their bed, the shore's column rule), the tiles around the basin lake solved again
+by a headless warm-up (about 4 minutes), the owner's window opened at the lake; the owner's look owed. THE SPILL LAW'S SHORT
+DESIGN (the owner: "Short design next"; `docs/investigation/2026-10-18/lake_spill_design.md`): `planet_stand spill-count`
+on 40 of the 1 009 spilling lakes (the 128 m tile of each lake's brim; the lowest 128 m path from the lake's cells to ground
+of a lower node) — 10 of 40 spill under their 8 km level, the drop 4.0 / 28.8 / 502 / 773 m (p10 / p50 / p90 / most), none
+drains whole in the tile (a lower bound: the brim's tile only; the closed lakes not counted). The design recommends ONE FINE
+LEVEL PER LAKE in the shard (W11's own law on the 128 m ground; no new data crosses), the far step registered, and three
+questions to the owner. SLICE W2 ITEM 8 WRITTEN (lint-clean, not yet in the window): beyond the fine levels a lake node's
+vertex takes its lake's level from the rung's own field (the row's water word on the 8 km tiles, the pyramid level's highest
+lake far), wet where its ground stands under it — before, no lake was drawn from rung 13 up.
+- 2026-10-18 (later) — RULING B115 AND THE FULL SPILL COUNT (`planet_stand spill-full`, every lake over all its tiles' own
+squares joined; 1 854 tiles in 857 s on 12 threads): 261 of 1 000 spilling lakes and 5 of 151 closed lakes spill under their
+8 km level on the 128 m ground; the spilling lakes' drop 0.5 / 14.2 / 502 / 1 214 m (p10 / p50 / p90 / most), 6 drain whole;
+74 lakes drop over 100 m, 29 over 500 m — mostly high mountain lakes of the belts whose 128 m spill lies near their 8 km floor.
+The basin lake the owner looked at (−2 002 m) spills at −2 721 m into a dry pocket through a rim node's 128 m valley, the
+same by its own raster (`fine::spill::raster_passes`, the shard's rule, written) and on the joined map (`spill-lake`). The
+consequence for form (a): the smooth former floor between the two levels stands dry up to 1.7 km high on those lakes; the
+side views decide (a′) (B115 item 1). `fine::spill` written (lake ids, the raster's passes, the fine level; a unit test,
+not run).
+- 2026-10-18 (later) — B115's CONDITION FOR (a′) MET, AND (a′) BENCHED (`planet_stand spill-lake`): the basin lake's pair from
+one eye 4 km off, 300 m up — at −2 002 m a broad lake among eroded mountains; at its fine level −2 721 m on today's ground
+the former floor stands dry as a broad smooth uneroded bowl (THE RING; pictures in `~/Downloads/voxeldust_lakes_2026-10-18/`
+`basin_lake_at_8km_level_-2002m.png`, `basin_lake_at_128m_spill_-2721m_the_ring.png`). FORM (a′) on the bench:
+`fine::l1::Waters` (each node's standing water: the sea, a lake at its fine level where named, none on a lake node whose row
+stands at or over it) read by the outlets, the base levels and the water map; `solve_l1_levels` (the levels by lake id, the
+lowest node of the lake); `L1Tile::spills` (each lake's pass in the raster). The basin lake's 18 tiles solved again at
+−2 721.25 m: their spills give −2 721.25 m — THE LEVEL HOLDS AFTER ONE ROUND; 242 137 cells under water; the side view shows
+eroded slopes down to the water and no ring (`basin_lake_form_a_prime_resolved_-2721m.png`). Mountain lake #688 (4 nodes at
+3 005 m) drains whole at the fine level (its rasters' lowest pass 1 749 m, under its whole floor): a valley at 128 m, the
+8 km lake only in the far map (B115 item 2's registered step). A defect of the bench on the way: it named a lake by its
+middle node, not its lowest, so the first round applied no level.
+- 2026-10-18 (later) — B115 FORM (a′) BUILT INTO THE GAME'S PATH (lint-clean, NOTHING RUN in the game yet; the design
+§4): each lake's fine level by its own rounds in the planet's shard (`vd_bins::fine_source`: `Job::Round`, a lake's tiles
+solved with that lake alone at the trial level, the lowest spill lowering it until it holds, bound 8; the level kept in the
+store under the fine family's level number 0); every 128 m tile's final solve waits for the levels of its domain's lakes and
+names them (`fine::l1::solve_l1_levels`, `Waters`: a lake node whose row stands at or over its lake's fine level is dry);
+the 16 m water inside the 128 m water's reach (`fine::water::raster_water_within`, W16); FINE_VERSION 6, L2_VERSION 4.
+Interims registered (DEFERRED, slice W2 item 8): a tile beside a lake solves twice on its first visit; a lake's rounds name
+that lake alone; a base level through an 8 km chain to a lake outside the domain stays its 8 km word; no test run (B74).
+- 2026-10-19 — THE OWNER'S LOOK AT FINE_VERSION 6 in the window, 14.5 km over the basin lake: *"Doesn't look believable"*
+— flat smooth plates with straight edges beside the lake water, meeting it in an X. THE CAUSE (MEASURED): all 255 nodes of
+the closed basin lake end their water (the 8 km world gives a closed lake's nodes no receiver); with the lake at its fine
+level −2 721.25 m, the 162 nodes whose floor stands over it read dry and receiverless, so `Waters` named each a DRY END,
+whose points under its row stay outlets at the smooth 8 km surface — a playa plate one node square wide. Reproduced on the
+bench by the game's own path (`planet_stand water-game 3,97,21`: the 25 tiles around, 8 lakes in their domains, each lake's
+rounds from the shared plain solves, the final solves, the ring finished and stitched): node-square plates and square
+pieces of water south of the lake. A live store does not copy for reading (redb refuses the copy), so the bench path was the
+proof. CURED (FINE_VERSION 7): a lowered lake's dry floor drains into its lake — its base level is the lake's fine level
+(Powell), never a dry end (`Waters::lowered_base_m`; `standing_water_outlets`' dry end excludes a lake's floor); on the same
+path the plates and the square water are gone, the former floor eroded like the land around (its curvature 11.4 m against the
+land's 11.5 m; 9.5 m before). The lakes' levels on the path: the basin lake −2 002 → −2 721.25 m, the −341 m lakes → −731 and
+−775.5 m, −1 312 → −1 529.5 m, −2 984 → −2 985.5 m, four hold (each after one round). Pictures:
+`~/Downloads/voxeldust_lakes_2026-10-19/` (from above and from 14 km, before and after). STILL SEEN (older than this change):
+small lakes with rounded or star-shaped shores (a lake's floor is the smooth 8 km surface under its level, B105 Q1 (b), so the
+shore is that surface's contour), and broad smooth floors of the dry pockets (B114's parked basin defects).
+- 2026-10-19 — RULING B116 BUILT (lint-clean, NOTHING RUN — no test, not yet in the window). THE FAR WATER'S CAUSES (read
+in the code): from rung 13 up the client read the 8 km lakes (rungs 10–14 read the pyramid's level 1, 16 km blocks; each
+rung above one level coarser) — the lake's 8 km level and a smooth interpolation of block means that mix lake floor and land;
+on rungs 7–12 a coarse copy drew a place wet only where its MEAN GROUND stood under the water. PART 1 (no new data; FINE_VERSION
+8): `fine::tile::class_mean_levels` — each coarse copy cell stands at the mean ground of its MAJORITY CLASS (the wet cells'
+floor where at least half are wet, else the dry cells' ground), so the shore falls where half the finest cells are wet and the
+depth under the water stays true for the depth law's colour (the design's "mean visible surface" would have made every
+coarse copy's water depth nought, a colour step; the majority class keeps the same three values a cell carries). The client's
+water rule unchanged. PART 2 (SL6 yes; PROTO_MINOR 41, an appended `BulkMsg::ArtifactLakes`, disc 9): `fine::far` — each 8 km
+node under or beside a lake (MEASURED: 18 662 under, 25 089 beside) gets a row (wet share, water level, the wet cells' mean
+floor; 9 bytes raw) folded from its finished 128 m tile (`tile_far_nodes`); the planet's shard lists every lake tile as idle
+work after the tiles any view names (`fine_source`: `far_begin`, `far_fold`; a refused tile leaves the list), keeps the coded
+list in its store (family 12, keyed by the fine input word) and sends it once to each gateway (`fine_ship`); the gateway keeps
+it beside the realm's cache, outside `whole`, and serves it once to a session at minor 41 that holds the artifact; the client
+folds each pyramid level from it by the majority class (`fold_level`: a block at least half wet stands at its wet floor and
+holds the lake's level, else at its dry ground's mean — its own block mean less the wet part), replaces the folded blocks'
+heights and water words, and builds again every far piece built before (`ChunkGeometry::far`, the lane's `far`); the far
+water rule reads a folded block's level whatever side the fine node states (the sea's nodes keep the sea). Tests written:
+the majority class, the far list's round trip, the block fold, the store key; NOT RUN (B74); the far emit, the gateway's lake
+serving and the client's fold have none (registered).
+- 2026-10-19 — THE OWNER'S FLIGHT ON FINE_VERSION 8 (B116 deployed): *"different rungs are a bit different and has some issues
+during transition. They should be 100% seamless"* — water rectangles, white lines and pale patches as the eye came down.
+THE CAUSE (MEASURED in the shard's and the client's logs): the far lake list was not whole (its 1 959 lake tiles were idle
+work), and during the flight the backlog of tiles a view names rose 0 → 110, because the idle lake work held every solve
+thread (a solve 20–30 s, not pre-empted); a piece whose tile had not arrived drew the ROUGH ground with the 8 km lake level,
+up to 700 m over the lake's 128 m level, so the water stood as node squares (the rectangles) and their edges over the
+ground (the white lines) until the fine tile came. TWO CURES (FINE_VERSION 9 with the dry pits): (1) a waiting piece draws a
+lake only from the 128 m data — from the far list's folded block or node when the list is applied, else no lake at all
+(`chunks.rs`, the sea sheet's fallback; the sea stays); (2) the idle work (the far lakes' tiles, the lakes' rounds, the far
+copies) takes at most HALF the solve threads (`fine_source::IDLE_THREADS_DIVISOR`), so a tile a view names starts at once.
+The price of (2) is near nought: MEASURED (`ps -M` on the planet's shard, 2026-10-19 12:20) the seven solve threads run
+at 51–53 % of a core each, 3.6 cores together, while ten performance cores stand idle — the "utility" class of ruling B91
+keeps them on the machine's four efficiency cores, so four threads do about the work of seven. THE SAME MEASUREMENT
+EXPLAINS THE SLOW WARM-UP: a raw solve takes 17–32 s in the shard against about 5.5 s a tile on one bench thread (the full
+count, B115 item 3); the far list's 1 959 tiles take about 2–3 hours at this rate. RULED B117 (the owner: "Default, low
+priority"): the solve threads now run in the default class at its lowest relative priority (−15); MEASURED after the
+redeploy, a raw solve 3.0–5.1 s. THEN THE SHARE RULE NARROWED: the 60 km stand over the basin named about 1 700 far copies
+(the rough pieces 2 889 → 3 054, falling about 0.3 a second), which the half share held on four threads while three stood
+idle; now any tile a view names (whole or for its coarse copies) takes every thread, and only the far lakes' tiles no view
+names keep the half share (`fine_source::State::viewed`). NOT RUN (B74); the transitions on a fully loaded view are
+measured next.
+- 2026-10-19 — THE DRY HOLLOWS' PITS (FINE_VERSION 9; `docs/investigation/2026-10-19/lake_floor_design.md` §0.6): MEASURED
+(`planet_stand dry-ends`) 6 584 of the home planet's nodes end their water on dry ground, 5 451 of them in 148 hollows of
+more than one node (the largest 2 322); the fine level gave each such node a dry end's playa, so a hollow's floor stood as
+node-square plates. NOW only the hollow's PIT (the steepest descent among its dry-end nodes, `l1::Waters::dry_pit`) keeps a
+playa; the other nodes are land whose base level is the pit's floor (Powell). On the bench the smooth patches REMAIN where a
+node's row stands only metres over its base level (its rise collapses to the floor): registered with B114's pocket floors.
+- 2026-10-19 — THE RUNG PICTURES (step 3 of the owner's "100% seamless" request; headless `--capture --pilot`, nadir stands
+over the basin at 60 / 120 / 240 / 400 / 560 / 800 / 1 120 / 1 600 / 2 250 / 3 200 / 4 500 / 6 400 / 9 000 km, each on both
+sides of a rung change (`switch_m(r)` = 2^r × 917 m: 9→10 at 469 km, 12→13 at 3 755 km), each taken when no piece is pending
+and the rough count stops; the far lake list whole: 43 751 nodes, 264 470 bytes). MEASURED so far: (1) rungs 7 → 8 → 9 → 10
+(60 → 560 km, each pair scaled to one ground) keep the same lakes at the same places, their shores within 1–2 pixels;
+(2) THE PALE PATCHES the owner saw are NOT a rung fault: the 128 m water map itself holds them (`planet_stand water-game
+… 3,96,22`): the basin lake at its fine level −2 721.25 m stands only in the deepest parts of its SMOOTH 8 km floor (B105 Q1
+(b)), a few to tens of metres deep, so the depth law shows the floor through it; where the 8 km rows hold a valley along one
+node column (B82's straight valleys) the smooth floor's contour is a strip with two straight sides (node column 774: 3.2 km
+by 20 km). Its cure is the lake floor design's (the drowned basin, `docs/investigation/2026-10-19/lake_floor_design.md`
+§0.3); (3) THE HORIZON'S EDGE: at the 60 km stand 321 pieces 1 400–1 540 km away (past the 887 km horizon, kept for the peaks
+behind it) stay on the rough ground — the client's skyline asks farther than the shard names fine tiles (B87's one rule
+reads two reaches); off a nadir frame, seen toward the horizon; (4) A VIEW FROM HEIGHT NAMES THOUSANDS OF TILES for their
+coarse copies alone (the 60 km stand about 1 700, the 400 km stand about 6 000 more), 8–15 minutes each on the seven
+threads; until a tile lands its pieces stand on the rough ground. The home planet holds 138 624 tiles: about 25 hours on
+seven threads to solve them all ahead (B86 item 6).
+- 2026-10-19 — THE FAR LAKE LIST'S WAY TO THE CLIENT (the rung pictures, continued). SEEN: at 3 200 km (rung 12) the lakes
+stand — a branching network and a lake about 400–500 km wide with an island; at 4 500 km (rung 13) nearly all vanish, the
+large lake whole. MEASURED with two new instruments (the gateway logs the list cached whole and served to a session; the
+client's dev state names each realm whose list it folded, `far_held`): the planet's shard keeps the whole list (43 751
+rows, 264 470 bytes), the gateway caches it whole (9 parts) at the first view, and the client folds all its rows — but the
+gateway served it only AFTER the session's fine levels, and only in a beat with budget left: the warm client got it about
+70 s after login, when its pieces were complete. Until a client holds the list, rung 13 and up draw NO lake at all (the
+pyramid's own water words hold none there), so every load shows the lakes vanishing at the 3 755 km change; the 4 500 km
+picture was taken before the list came. CURES (the gateway, `artifact.rs`): (1) THE LIST FIRST — served once the session
+holds the artifact, before any fine level (B86's far copies first); (2) a realm the session forgets (it leaves the picture)
+clears its "list sent" mark, so its return serves the list again; (3) a re-drive after a shed send serves the list again
+(it leaves in one beat, all parts at once; the client keeps the parts it holds). The picture script now waits for the
+folded list too. NOT RUN (B74): no test of the gateway's lake serving yet (registered with B116 item (e)).
+- 2026-10-19 — THE RUNG 12 → 13 CHANGE CURED IN THE CLIENT (two rules; client only, no world change): with the list
+first, the lakes stand at 4 500 km as at 3 200 km, but rung 13 drew hundreds of DOTS of water over land rung 12 draws dry.
+(1) THE FOLD BY THE MAJORITY CLASS (`fine::far::fold_level`): a block less than half wet holds no water (it carried its
+lake's level before), the rule a fine tile's coarse copy follows; the same for a node the list names on the 8 km rows
+(`chunks.rs`, a node at least half wet). The dots stayed — (2) THE CAUSE: a LAND node let the sea stand wherever its drawn
+ground dipped under the sea's level, and beside the lakes under the sea's level (−200 to −1 800 m) the folded blocks'
+true deep floors pulled the smooth rung-13 ground of the land around them under 0 m; CURED: a land node holds the sea only
+when it touches a sea node (`sea_sheet`'s `coastal`), so the coast still follows the ground inside a coastal node and no
+inland hollow holds the sea (the fine water map decides that nearer). MEASURED after (`/tmp/vd-w2-win/shots_v9d`, nadir
+over the basin, the list folded at every picture): rungs 12 → 13 → 14 → 15 keep the same lakes at the same places; WHAT
+STAYS: (a) the 12 → 13 change coarsens the water 4 × at once (rung 12 the tile's 4 km cells, rung 13 the pyramid's 16 km
+blocks: the levels a far view holds), so lakes narrower than about 8 km thin out or break there; (b) the sea's far coast
+moves 1–3 pixels at each change from rung 13 up (B116 item 3, registered); (c) the pale patches (the lake floor design).
+- 2026-10-19 — THE OWNER IN THE WINDOW (the rung changes cured): *"I some areas where water should be on the same level,
+this happens. The rest looks good, but the only problem is slow loading, but maybe we will work on the performance
+optimization later?"* — a WALL OF WATER: one valley drawn at two levels 595 m apart, a stepped vertical edge between them.
+THE CAUSE (MEASURED, `planet_stand water-game … 3,98,25`, `rows`): at the corner of four 128 m tiles (node (792, 199) of the
+blue lake 4669015) the solve of tile (98, 25) filled a deep valley (ground −741 to −833 m) with the green lake 4687251 at
+−136 m, the solve of tile (99, 24) — whose domain does not hold the green lake — with the blue lake at −731 m; the corner
+rule's cut joined them. The green lake's rounds had read rasters with the blue lake at its 8 km word (−341 m); the blue
+lake's fine level eroded its former floor into valleys, and in the FINAL raster of (98, 25) the green lake passes at
+−549 m (and lake 4683601 at −415 m under −192 m). THE CURE (B115's law over all the lakes at once, FINE_VERSION 10): a
+round names the other lakes at their settled levels, and a final raster that shows a lake passing under its level reopens
+it; on the bench (`water-game … joint`) one more pass settles it: the green lake drains whole (its 8 km floor stands over
+the pass), its basin becomes land graded to the blue lake, no two levels touch. THE LOADING SPEED registered for the
+performance step (the owner's word): a tile 3–5 s on the solve threads, a view from height names thousands of tiles for
+their coarse copies, the whole home planet about 25 hours of solves (B86 item 6's advance calculation).

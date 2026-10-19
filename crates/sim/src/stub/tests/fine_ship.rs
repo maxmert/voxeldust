@@ -86,6 +86,10 @@ impl FineTiles for Stated {
                 .collect(),
         )
     }
+    /// The stated provider folds no far lakes (ruling B116's list is the composition root's; its emit is registered owed).
+    fn far_lakes(&self) -> Option<Arc<[crate::io::Bytes]>> {
+        None
+    }
 }
 
 /// The bulk bytes the shard sent to `to` this tick with the audience given, in order.

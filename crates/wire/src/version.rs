@@ -380,7 +380,12 @@ pub const PROTO_MAJOR: u16 = 1;
 /// surface wind of each climate cell in parts of at most 32 KiB, after the coast's — the sun's glint on the sea reads its
 /// speed (Cox & Munk 1954), the waves its direction. A FIELD APPEND to an arm minor 39 shipped, which postcard cannot make
 /// additive, so [`PROTO_MINOR_FLOOR`] moves to 40: a minor-39 client is refused, never served a head it would mis-frame.
-pub const PROTO_MINOR: u16 = 40;
+/// **41** — THE FAR LAKES (owner-approved 2026-10-19 under SL6, ruling B116 part 2: "Please build both parts right
+/// away"): a new `BulkMsg::ArtifactLakes` (disc 9) ships the realm's far lake list (each 8 km node under or beside a lake:
+/// its wet share, water level and wet floor, folded from its finished 128 m tiles) in parts of at most 32 KiB, late and
+/// unannounced by the head. APPENDED, so the floor does not move: a gateway sends it only to a session that negotiated
+/// 41, and an older client keeps the 8 km lakes far away.
+pub const PROTO_MINOR: u16 = 41;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.

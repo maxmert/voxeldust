@@ -1058,6 +1058,13 @@ impl ClientState {
                     .realms()
                     .filter_map(|(r, c)| c.fine().map(|b| (format!("{r:?}"), b.len() as u64)))
                     .collect(),
+                // ★ THE FAR LAKE LISTS (ruling B116 part 2): each realm whose list is folded, with its rows.
+                far_held: self
+                    .artifacts
+                    .book()
+                    .realms()
+                    .filter_map(|(r, c)| c.far_rows_count().map(|n| (format!("{r:?}"), n as u64)))
+                    .collect(),
             },
             sky: self
                 .sky_draw

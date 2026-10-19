@@ -526,6 +526,35 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     COMPUTED BY THE PLANET'S SHARD AT LOAD (the seasons chain once on the stored ground, kept in its store, one bulk part).
     ★ B110 (2026-10-18, the owner in the window on S2: "Looks amazing … let's commit and move to waves please"): THE SEA'S
     LIGHT ACCEPTED (the sky's part waits for the clouds); one local commit; S3 THE WAVES NEXT (B107's plane waves).
+    ★ B111 (2026-10-18, the owner on S3: "waves … more like on windless lake" → "make sure you have ground rules and laws
+    in your context … look at the open sourced ocean and waves solutions, ideally we just re-use. Ok, let's fix the wind
+    first if we can"): THE WIND FIRST, BY LAW (amends B100 item 2 for the trades' momentum mixing and the storm belts'
+    closure; the cause first against ExoPlaSim and NCEP as readings; the world moves only on the owner's word); THE WAVES'
+    METHOD RE-USED FROM OPEN SOURCE inside B106/B107/W16/T3; the seasonal wind's SL6 ask open.
+    ★ B112 (2026-10-18, "Build Step 2" / "Wait for the wind"): THE WIND'S STEP 2 — the balance lets the mean cell carry
+    the tropics' energy (weak temperature gradient inside the cells, the storms' diffusion outside), benched against
+    ExoPlaSim and NCEP/GPCP as readings; the world moves once with Steps 1+2 after the owner's look; THE WAVES WAIT FOR
+    THE WIND (S3's two shader cures stand).
+    ★ B113 (2026-10-18): THE WIND'S RESEARCH BESIDE (no closure passes home/Earth/aquaplanet together; the two-layer
+    exchange researched read-only in the replica, nothing in the game until all three pass); STEP 1 STAYS AS LAW (the
+    owner: "We don't need any sims … if it's wrong or is a sim, remove") and joins the next generator change (no new first
+    solve on this tree until then); LAKES AND RIVERS (W1–W2) NEXT.
+    ★ B114 (2026-10-18, "Rivers and water map first"): W1–W2 CONTINUE; the 8 km world's basin defects (the deposit's
+    one-node lines in filled flats, the deep closed pockets; parked by B12) stay registered interims; their cure is its own
+    step and joins the next generator change.
+    ★ B115 (2026-10-18, "(a), then (a′) if needed" / "Register it" / "Count first"): A LAKE STANDS AT ITS 128 m SPILL (W11's
+    law on the finer ground: the lower of its 8 km level and its lowest 128 m pass; one fine level per lake in the shard's
+    store, the water maps written with it, no SL6 ask; the lake's tiles solved again only if a bathtub ring shows); the far
+    step at rung 13 REGISTERED; THE FULL COUNT FIRST (every lake, closed and spilling, its whole rim) on the bench.
+    ★ B116 (2026-10-19, "The rung change should be seamless also for the water" → "Please build both parts right away"):
+    PART 1 — a fine tile's coarse copies hold the MEAN VISIBLE SURFACE and their WET SHARE decides the water (rungs 7–12, no
+    new data); PART 2 — the planet's shard solves every lake's 128 m tiles once per world version and sends ONE LIST (each
+    8 km node under or beside a lake: index, wet share, mean surface; ~300 KB home planet; SL6 YES); the client folds the far
+    levels; the sea's far coast stays registered; amends B115 item 2.
+    ★ B117 (2026-10-19, the owner: "Default, low priority"): THE SOLVES TAKE THE IDLE FAST CORES (amends B91 item 1) —
+    MEASURED: B91's macOS "utility" class kept every solve thread on the 4 efficiency cores beside 10 idle fast cores (a 128 m
+    tile 17–32 s against 5.5 s on the bench); now the default class at its lowest relative priority (−15); B91's late
+    frames measured again at the next window look.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

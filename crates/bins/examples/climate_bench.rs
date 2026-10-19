@@ -23,6 +23,14 @@
 //!   picture — `OUT_DIR/TAG_relief.png` (the ground by height, shaded by a light from the north-west, the sea dark),
 //!   `OUT_DIR/TAG_rain.png` (the rain rows on the one rain scale), `OUT_DIR/TAG_rivers.png` (the discharge rows, the
 //!   larger rivers brighter) — and the land's rain readings.
+//! - `chain-winds WORLD OUT_DIR [THREADS]`: THE SEA'S WIND (2026-10-18; the owner: "let's fix the wind first"): the
+//!   game's seasons chain from a cold state on `WORLD` — a stored home-planet `FILE.art`, or `earth` for Earth's charter
+//!   on Earth's relief (`/tmp/vd-g27/bench/earth_z.bin` from `earth-data`) — each season's surface wind in its two parts
+//!   (the cells' law and Gill's departures) as `OUT_DIR/<tag>_winds.f32` (seasons × 4 parts × rows × cols, little-endian
+//!   f32: cell east, cell north, departure east, departure north, m/s), each cell's sea share as `OUT_DIR/<tag>_sea.f32`
+//!   and the shape in `OUT_DIR/<tag>_meta.txt`; the cells' closure by row as `OUT_DIR/<tag>_rows.f32` (seasons × 5 × rows:
+//!   the energy transport W, the gross moist stability J/kg, the moist energy J/kg, the mass flux kg/s, the cells' share;
+//!   then the seasons' rising branch's sines), for an outside reading against ExoPlaSim's home run and NCEP's Earth.
 //! - `earth-s1 DIR [ROWS]`: THE ENERGY BALANCE AND THE RAIN BELT on Earth's charter over Earth's land and sea (S1): the
 //!   periodic year of `vd_terrain::seasons::balance` on the climate grid (ROWS latitude bands, 90 by default), its cost,
 //!   the zonal temperatures by season, a continental swing, and the energy-flux equator by month beside GPCP's zonal
@@ -1590,6 +1598,149 @@ fn chain_fixed(art: &str, threads: usize) {
     );
 }
 
+/// ★ THE SEA'S WIND by season and part (the mode `chain-winds`).
+fn chain_winds(world: &str, out: &Path, threads: usize) {
+    std::fs::create_dir_all(out).expect("the output folder");
+    let body = home_planet();
+    let fine = MacroLattice::of(&body).expect("the home planet's lattice");
+    let steps = vd_terrain::solve::Z_STEPS_PER_M;
+    let (tag, words, z, ocean, level) = if world == "earth" {
+        let bytes = std::fs::read("/tmp/vd-g27/bench/earth_z.bin").expect("run earth-data first");
+        let z: Vec<i32> = bytes
+            .chunks_exact(4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) * steps)
+            .collect();
+        let area: Vec<u64> = (0..fine.node_count() as u32)
+            .map(|k| fine.area_m2(k))
+            .collect();
+        let ocean = vd_terrain::land::ocean_mask(&fine, &z, &area, 0).ocean;
+        ("earth", earth_words(), z, ocean, 0)
+    } else {
+        let a = vd_bins::artifact_file::read(world).expect("the world reads");
+        let z: Vec<i32> = a.rows.iter().map(|r| i32::from(r.z_m) * steps).collect();
+        let ocean: Vec<bool> = a
+            .rows
+            .iter()
+            .map(|r| {
+                (r.receiver_facies >> vd_terrain::artifact::FACIES_SHIFT)
+                    & vd_terrain::solve::FACIES_SEA
+                    != 0
+            })
+            .collect();
+        (
+            "home",
+            vd_terrain::home::home_solve_words(),
+            z,
+            ocean,
+            i32::from(a.sea_m) * steps,
+        )
+    };
+    let sea = vd_terrain::climate::SeaView {
+        level,
+        ocean: &ocean,
+    };
+    let mut state = vd_terrain::seasons::chain::SeasonState::new(&fine, threads);
+    let clock = std::time::Instant::now();
+    let _ = vd_terrain::seasons::chain::seasonal_climate(
+        &body,
+        &fine,
+        &words,
+        &z,
+        Some(sea),
+        threads,
+        &mut state,
+    );
+    println!(
+        "{tag}: the chain in {:.0} s, the spin-up {:?}",
+        clock.elapsed().as_secs_f64(),
+        state.last_spin
+    );
+    let grid = ClimateGrid::new(
+        Gf::from_f64(body.ladder().radius_m()),
+        vd_terrain::seasons::chain::CLIMATE_ROWS,
+    );
+    let share = sea_share(&fine, &grid, &ocean);
+    let f32s = |v: &mut Vec<u8>, xs: &[Gf]| {
+        for x in xs {
+            v.extend_from_slice(&(x.to_f64() as f32).to_le_bytes());
+        }
+    };
+    let mut winds = Vec::new();
+    for w in &state.last_season_winds {
+        for part in [&w.cell_east, &w.cell_north, &w.dep_east, &w.dep_north] {
+            f32s(&mut winds, part);
+        }
+    }
+    std::fs::write(out.join(format!("{tag}_winds.f32")), winds).expect("the winds save");
+    // The cells' closure by row and season: transport (W), gross moist stability (J/kg), moist energy (J/kg), mass flux
+    // (kg/s), the cells' share, then each season's rising branch's sine.
+    let mut rows_bytes = Vec::new();
+    for w in &state.last_season_winds {
+        for part in [
+            &w.row_transport,
+            &w.row_gms,
+            &w.row_h,
+            &w.row_psi,
+            &w.row_share,
+        ] {
+            f32s(&mut rows_bytes, part);
+        }
+    }
+    for w in &state.last_season_winds {
+        f32s(&mut rows_bytes, &[w.rising_sin_lat]);
+    }
+    std::fs::write(out.join(format!("{tag}_rows.f32")), rows_bytes).expect("the rows save");
+    let mut sea_bytes = Vec::new();
+    f32s(&mut sea_bytes, &share);
+    std::fs::write(out.join(format!("{tag}_sea.f32")), sea_bytes).expect("the sea saves");
+    std::fs::write(
+        out.join(format!("{tag}_meta.txt")),
+        format!(
+            "seasons {} parts 4 rows {} cols {}\n",
+            state.last_season_winds.len(),
+            grid.rows,
+            grid.cols
+        ),
+    )
+    .expect("the shape saves");
+    // The year's mean of the seasons' speeds over the sea's cells (the shipped reading's own rule), by area.
+    let mut sea_speeds: Vec<(f64, f64)> = (0..grid.len())
+        .filter(|&i| share[i].to_f64() > 0.5)
+        .map(|i| {
+            let s = state
+                .last_season_winds
+                .iter()
+                .map(|w| {
+                    let e = (w.cell_east[i] + w.dep_east[i]).to_f64();
+                    let n = (w.cell_north[i] + w.dep_north[i]).to_f64();
+                    e.hypot(n)
+                })
+                .sum::<f64>()
+                / state.last_season_winds.len() as f64;
+            (s, grid.area[grid.row(i)].to_f64())
+        })
+        .collect();
+    sea_speeds.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f64 = sea_speeds.iter().map(|x| x.1).sum();
+    let at = |q: f64| {
+        let mut acc = 0.0;
+        for (s, a) in &sea_speeds {
+            acc += a;
+            if acc >= q * total {
+                return *s;
+            }
+        }
+        f64::NAN
+    };
+    println!(
+        "{tag}: the sea's year mean of the seasons' speeds: median {:.1}, 95 % {:.1}, max {:.1} m/s; the maps in {}",
+        at(0.5),
+        at(0.95),
+        sea_speeds.last().map_or(f64::NAN, |x| x.0),
+        out.display()
+    );
+}
+
 /// Pictures of one width stacked top to bottom, a dark band between them (for the owner's side-by-side look).
 fn stack(out: &str, inputs: &[String]) {
     let imgs: Vec<image::RgbImage> = inputs
@@ -1634,11 +1785,21 @@ fn art_maps(art: &str, out: &Path, tag: &str, window: Option<[f64; 4]>) {
         vd_bins::drainage_gates::node_under(&fine, d) as usize
     };
     let h = ((f64::from(MAP_W) * (lat1 - lat0) / (lon1 - lon0)).round() as u32).max(1);
-    let (mut relief, mut rain, mut rivers) = (
+    let (mut relief, mut rain, mut rivers, mut waters) = (
+        image::RgbImage::new(MAP_W, h),
         image::RgbImage::new(MAP_W, h),
         image::RgbImage::new(MAP_W, h),
         image::RgbImage::new(MAP_W, h),
     );
+    // A node's discharge in m³/s: the row's class (mm·m² a year of the body's own year) over that year.
+    let year_s = vd_terrain::home::home_solve_words().year_s as f64;
+    let q_m3s = |i: usize| {
+        vd_terrain::fine::l1::decode_class(a.rows[i].discharge_log, 2) as f64 / 1_000.0 / year_s
+    };
+    let lake = |i: usize| {
+        let r = &a.rows[i];
+        !wet(i) && r.water_m != vd_terrain::artifact::DRY_M && r.water_m > r.z_m
+    };
     let height = |lat: f64, lon: f64| f64::from(a.rows[node_at(lat, lon)].z_m) - sea_m;
     let step = (lon1 - lon0) / f64::from(MAP_W);
     let km_per_px = 2.0 * std::f64::consts::PI * body.ladder().radius_m() / 1_000.0 * step / 360.0;
@@ -1691,8 +1852,67 @@ fn art_maps(art: &str, out: &Path, tag: &str, window: Option<[f64; 4]>) {
                 y,
                 image::Rgb([(v * 0.3) as u8, (v * 0.6) as u8, v as u8]),
             );
+            // THE WATERS: the sea dark blue, every lake cyan, the rivers by their discharge over the shaded land.
+            let q = q_m3s(i);
+            let w = if wet(i) {
+                [25, 45, 85]
+            } else if lake(i) {
+                [60, 200, 230]
+            } else if q >= 10_000.0 {
+                [40, 90, 255]
+            } else if q >= 1_000.0 {
+                [70, 130, 245]
+            } else if q >= 100.0 {
+                [120, 170, 230]
+            } else {
+                c.map(|v| (f64::from(v) * 0.8) as u8)
+            };
+            waters.put_pixel(x, y, image::Rgb(w));
         }
     }
+    waters
+        .save(out.join(format!("{tag}_water.png")))
+        .expect("saves");
+    // The counts: the lakes' nodes, and the rivers that reach the sea by their discharge at the mouth.
+    let lattice_rows = a.rows.len();
+    let lake_nodes = (0..lattice_rows).filter(|&i| lake(i)).count();
+    let mut mouths = [0usize; 3];
+    let mut length = [0usize; 3];
+    for i in 0..lattice_rows {
+        if wet(i) || lake(i) {
+            continue;
+        }
+        let q = q_m3s(i);
+        let class = [100.0, 1_000.0, 10_000.0];
+        for (k, &c) in class.iter().enumerate() {
+            if q >= c {
+                length[k] += 1;
+            }
+        }
+        let f = a.rows[i].receiver_facies;
+        if f & vd_terrain::artifact::RECEIVER_NONE == 0 {
+            let r =
+                fine.neighbours(i as u32)[(f & vd_terrain::artifact::RECEIVER_SLOT_MASK) as usize];
+            if r != vd_terrain::macro_lattice::NO_NODE && wet(r as usize) {
+                for (k, &c) in class.iter().enumerate() {
+                    if q >= c {
+                        mouths[k] += 1;
+                    }
+                }
+            }
+        }
+    }
+    let node_km = fine.node_m() / 1_000.0;
+    println!(
+        "{tag}: the lakes' nodes {lake_nodes} ({:.0} km²); the rivers that reach the sea with ≥ 100 / 1 000 / 10 000 m³/s: {} / {} / {}; their courses ≈ {:.0} / {:.0} / {:.0} km (8 km nodes)",
+        lake_nodes as f64 * node_km * node_km,
+        mouths[0],
+        mouths[1],
+        mouths[2],
+        length[0] as f64 * node_km,
+        length[1] as f64 * node_km,
+        length[2] as f64 * node_km
+    );
     relief
         .save(out.join(format!("{tag}_relief.png")))
         .expect("saves");
@@ -1776,6 +1996,11 @@ fn main() {
             Path::new(args.get(2).expect("an output folder")),
             args.get(3).map_or(32, |r| r.parse().expect("NLAT")),
             args.get(4).map_or(64, |r| r.parse().expect("NLON")),
+        ),
+        Some("chain-winds") => chain_winds(
+            args.get(1).expect("FILE.art or earth"),
+            Path::new(args.get(2).expect("an output folder")),
+            args.get(3).map_or(14, |t| t.parse().expect("threads")),
         ),
         Some("earth-s1") => earth_s1(
             Path::new(args.get(1).expect("an output folder")),

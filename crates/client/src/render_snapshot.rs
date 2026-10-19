@@ -459,6 +459,15 @@ impl RenderSnapshot {
         self.clock.cursor(now_s)
     }
 
+    /// ★ THE UNIVERSE'S SECOND at display wall-time `now_s` (slice S3; ruling T3: time in closed form from the tick): the
+    /// render cursor over the wire-taught tick rate, so every client's sea moves on one clock. `None` until the clock is
+    /// anchored.
+    #[must_use]
+    pub fn universe_seconds(&self, now_s: f64) -> Option<f64> {
+        let hz = self.clock.tuning().tick_hz;
+        self.clock.cursor(now_s).map(|c| c / hz)
+    }
+
     /// THE LEAD CURSOR (slice 8 step 4, the residency band): the render cursor plus the whole
     /// interpolation buffer — the freshest moment the wire has DELIVERED, which the picture draws
     /// only one buffer later. The terrain asks for the ground around the eye AT THIS MOMENT, so a

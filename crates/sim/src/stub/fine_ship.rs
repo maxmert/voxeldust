@@ -74,6 +74,9 @@ pub trait FineTiles: Send + Sync {
     /// The parts of one finished tile's levels `lo` up to (not including) `hi` — `hi` [`NONE_HELD`] for the levels to
     /// the coarsest — each encoded as the wire's `BulkMsg::FineTilePart`; `None` while the tile is not finished.
     fn parts(&self, tile: FineName, lo: u8, hi: u8) -> Option<Arc<[Bytes]>>;
+    /// ★ THE FAR LAKES' PARTS (ruling B116 part 2): the realm's far lake list, each part encoded as the wire's
+    /// `BulkMsg::ArtifactLakes`; `None` until the provider has folded every lake's tiles.
+    fn far_lakes(&self) -> Option<Arc<[Bytes]>>;
 }
 
 /// The injected provider: `None` until the artifact is here and the fine level applies (a dry body, a body still
@@ -100,6 +103,8 @@ pub struct FineGateway {
     pub named: Vec<(FineName, u8)>,
     pub sent: BTreeMap<FineName, u8>,
     pub current: Option<(FineName, u8, usize)>,
+    /// ★ Whether the realm's far lake list went to this gateway (ruling B116 part 2): once, when it exists.
+    pub far_sent: bool,
 }
 
 impl FineGateway {
@@ -231,6 +236,16 @@ pub(crate) fn emit_fine(
             );
             stats.fine_parts_sent += 1;
         };
-        stats.fine_tiles_sent += answer(source, &g.named, &mut g.sent, &mut g.current, &mut send);
+        let finished = answer(source, &g.named, &mut g.sent, &mut g.current, &mut send);
+        // ★ THE FAR LAKES (ruling B116 part 2): the realm's list once to each gateway, the moment it exists.
+        if !g.far_sent
+            && let Some(parts) = source.far_lakes()
+        {
+            for part in parts.iter() {
+                send(part.clone());
+            }
+            g.far_sent = true;
+        }
+        stats.fine_tiles_sent += finished;
     }
 }

@@ -8,8 +8,15 @@
 //!    (Held 2000; Kang & Lu 2012): `φ_d ∝ (g·H·Δ_v/(Ω²·a²))^{1/4}`, so `φ_d = 30° × √(Ω_E·a_E/(Ω·a))` — the constant
 //!    `g·H·Δ_v` calibrated on Earth's annual 30° edge (a constant the law cannot compute yet, named); an edge past the
 //!    pole is a cell over the whole hemisphere (the slow spin's global cell), never a cap. Inside the cells the mass flux
-//!    is `ψ = F/g_ms` with the gross moist stability `g_ms = h_T − h(φ)`, `h_T = 1.06 × the zonal moist energy's maximum`
-//!    (Siler, Roe & Armour 2018's 1.06, Earth; positive everywhere by construction). The lower branch carries `ψ` back
+//!    is `ψ = F/g_ms` with the gross moist stability `g_ms = h_T − h(φ)`, `h_T = 1.06 ×` the zonal moist energy's maximum
+//!    over THE CONVECTING TROPICS (Siler, Roe & Armour 2018's 1.06, Earth; positive everywhere by construction): the free
+//!    troposphere matches the convecting tropics' near-surface air (convective quasi-equilibrium, Emanuel, Neelin &
+//!    Bretherton 1994) and the weak temperature gradient spreads it over the equatorial deformation radius
+//!    `φ_eq = √(c/(2Ω·a))` (Matsuno 1966; Gill 1980), `c = N·D/π` the gravest baroclinic wave under the tropopause (Gill's
+//!    eq. 2.1), `N² = (g/T)·(g/c_p − Γ)` from the body's own lapse rate and `D` the tropopause's height at 0.1 bar
+//!    (Robinson & Catling 2014); a column whose own air outdoes that free troposphere convects through it, so its upper
+//!    air is at least the ratio over its own `h` (the same law read locally; `g_ms ≥ 0.06·h`). MEASURED (2026-10-18): over the whole globe the maximum stood at the summer pole of the
+//!    home planet's 55° tilt in most seasons (g_ms 40–61 kJ/kg at the equator against ExoPlaSim's 13–16). The lower branch carries `ψ` back
 //!    toward the rising branch in the lowest tenth of the column's mass (Siler et al.: below 900 hPa, named), so
 //!    `v = −ψ·g/(2π·a·cos φ·0.1·p_s)`.
 //! 3. **The boundary layer's balance** of the Coriolis turn and the surface drag, `f·v·δ = C_D·|U|·u` (the bulk drag law,
@@ -18,7 +25,9 @@
 //!    monsoon's westerlies where the flow turns poleward.
 //! 4. **The eddy belts** (poleward of the edges): the atmosphere's angular momentum is steady, so the surface's torque
 //!    sums to nought over the globe — the eddy belts' westerly stress returns exactly the cells' easterly torque, spread
-//!    by the eddies' own transport `|F|`; `u` from the stress by the drag law, `v` from the same balance (poleward under
+//!    by the eddies' own transport `|F|`, and only when the cells' torque IS easterly (a cells' torque of the other sign is
+//!    the cells' own error, never storm-belt easterlies, as in [`super::gill`]; MEASURED 2026-10-18: −12 m/s polar
+//!    easterlies on the home planet); `u` from the stress by the drag law, `v` from the same balance (poleward under
 //!    westerlies: the Ferrel cell's lower branch).
 //! 5. **The land–sea departure** (Lindzen & Nigam 1987): the boundary layer's pressure falls over a column warmer than its
 //!    latitude's mean, `Φ' = −(g·δ/T̄)·T'`, and the wind answers the pressure, the Coriolis turn and the same drag, `r·u' −
@@ -49,6 +58,9 @@ pub const TOP_ENERGY_RATIO: f64 = 1.06;
 pub const LOWER_BRANCH_SHARE: f64 = 0.1;
 /// ★ THE SURFACE'S DRAG COEFFICIENT over the sea (the bulk law's Earth value; named).
 pub const DRAG_COEFFICIENT: f64 = 1.3e-3;
+/// ★ THE TROPOPAUSE'S PRESSURE, Pa (Robinson & Catling 2014: the thick atmospheres of the Solar System hold their
+/// tropopause near 0.1 bar, where the air turns thin enough to the infrared; the Solar System's bodies, named).
+pub const TROPOPAUSE_PA: f64 = 10_000.0;
 /// The rounds of the departure's fixed point between its speed and its drag.
 pub const DEPARTURE_ROUNDS: usize = 6;
 
@@ -61,6 +73,12 @@ pub struct Winds {
     /// Each ROW's mean cells' share of the transport (nought in the eddy belts): the vapour's eddy diffusion carries the
     /// rest (Siler, Roe & Armour 2018's partition).
     pub cell_share: Vec<Gf>,
+    /// The cells' closure by ROW (readings for the bench): the northward energy transport at the row's centre (W), the
+    /// gross moist stability `h_T − h` (J/kg), the zonal moist energy `h` (J/kg) and the mean cells' mass flux `ψ` (kg/s).
+    pub row_transport: Vec<Gf>,
+    pub row_gms: Vec<Gf>,
+    pub row_h: Vec<Gf>,
+    pub row_psi: Vec<Gf>,
 }
 
 /// One step's fields the winds read: the temperature `t` (K), the kept sunlight `kept` (W/m²), the heat store
@@ -144,7 +162,15 @@ pub fn winds(
             }
         }
     }
-    let h_top = Gf::from_f64(TOP_ENERGY_RATIO) * h[hmax_row];
+    // The convecting tropics' band (the equatorial deformation radius) and the free troposphere's moist energy over it.
+    let s_eq = tropics_band_sin(words, omega, grid.radius_m, tz[rows / 2]);
+    let mut h_band = h[rows / 2];
+    for (&s, &hr) in grid.sin_lat.iter().zip(&h) {
+        if s.abs() <= s_eq && hr > h_band {
+            h_band = hr;
+        }
+    }
+    let h_top = Gf::from_f64(TOP_ENERGY_RATIO) * h_band;
     // The cells' edges in sin φ: Held's eddy limit scaled from Earth's; the region holds the rising branch.
     let edge_rad = Gf::from_f64(EARTH_EDGE_DEG) * Gf::from_f64(std::f64::consts::PI)
         / Gf::from_i64(180)
@@ -206,6 +232,11 @@ pub fn winds(
     let mut u_row = vec![Gf::ZERO; rows];
     let mut eddy_shape = vec![Gf::ZERO; rows];
     let mut cell_share = vec![Gf::ZERO; rows];
+    let (mut row_transport, mut row_gms, mut row_psi) = (
+        vec![Gf::ZERO; rows],
+        vec![Gf::ZERO; rows],
+        vec![Gf::ZERO; rows],
+    );
     let mut torque = Gf::ZERO;
     for r in 0..rows {
         let x = grid.sin_lat[r];
@@ -213,8 +244,11 @@ pub fn winds(
         let f_mid = ((if r == 0 { Gf::ZERO } else { f_edge[r - 1] }) + f_edge[r]) * Gf::HALF;
         let w = share(x);
         cell_share[r] = w;
-        let g_ms = h_top - h[r];
+        // A column whose own air outdoes the tropics' free troposphere convects through it (the same quasi-equilibrium,
+        // read locally): its upper air is at least the ratio over its own moist energy, so g_ms stays positive.
+        let g_ms = h_top.greater(Gf::from_f64(TOP_ENERGY_RATIO) * h[r]) - h[r];
         let psi = w * f_mid / g_ms;
+        (row_transport[r], row_gms[r], row_psi[r]) = (f_mid, g_ms, psi);
         let cosl = grid.cos_lat[r];
         let v = -psi / (two_pi_a * cosl * low_mass);
         let f = Gf::TWO * omega * x;
@@ -236,7 +270,7 @@ pub fn winds(
     for ((shape, area), cosl) in eddy_shape.iter().zip(&grid.area).zip(&grid.cos_lat) {
         shape_torque += *shape * grid.radius_m * *cosl * *area * Gf::from_i64(cols as i64);
     }
-    if shape_torque > Gf::ZERO {
+    if torque < Gf::ZERO && shape_torque > Gf::ZERO {
         for r in 0..rows {
             let stress = -torque * eddy_shape[r] / shape_torque;
             let u = {
@@ -307,6 +341,36 @@ pub fn winds(
         north,
         rising_sin_lat: rising,
         cell_share,
+        row_transport,
+        row_gms,
+        row_h: h,
+        row_psi,
+    }
+}
+
+/// ★ THE CONVECTING TROPICS' BAND, the sine of its edge's latitude: the equatorial deformation radius
+/// `φ_eq = √(c/(2Ω·a))`, `c = N·D/π` (Gill 1980, eq. 2.1), `N² = (g/T)·(g/c_p − Γ)` at the equator's temperature `t_k` with
+/// the body's own lapse rate `Γ` ([`crate::climate::LAPSE_MOIST_SHARE`] of the dry adiabat), and `D` the height where the
+/// pressure falls to [`TROPOPAUSE_PA`] along that lapse, `D = (T/Γ)·(1 − (p_tp/p_s)^{R·Γ/g})`. Air no thicker than the
+/// tropopause's pressure has no troposphere to spread a temperature: the band is the equator's row alone (a sine of
+/// nought); a band past the pole is the whole globe.
+fn tropics_band_sin(words: &BalanceWords, omega: Gf, radius_m: Gf, t_k: Gf) -> Gf {
+    let p_tp = Gf::from_f64(TROPOPAUSE_PA);
+    if words.p_surf_pa <= p_tp || omega <= Gf::ZERO {
+        return Gf::ZERO;
+    }
+    let g = gravity_from(words);
+    let dry = g / words.cp_j_kg_k;
+    let lapse = Gf::from_f64(crate::climate::LAPSE_MOIST_SHARE) * dry;
+    let r_gas = words.cp_j_kg_k / Gf::from_f64(3.5);
+    let depth = t_k / lapse * (Gf::ONE - ((p_tp / words.p_surf_pa).ln() * r_gas * lapse / g).exp());
+    let n = (g / t_k * (dry - lapse)).sqrt();
+    let c = n * depth / Gf::from_f64(std::f64::consts::PI);
+    let phi = (c / (Gf::TWO * omega * radius_m)).sqrt();
+    if phi >= Gf::from_f64(std::f64::consts::FRAC_PI_2) {
+        Gf::ONE
+    } else {
+        super::grid::cos_series(Gf::from_f64(std::f64::consts::FRAC_PI_2) - phi)
     }
 }
 
@@ -383,5 +447,34 @@ mod tests {
         assert!(u_s15 < -1.0);
         assert!(v_s15 > 0.0);
         assert_eq!(w.cell_share.len(), grid.rows);
+    }
+
+    /// ★ THE CONVECTING TROPICS' BAND by the body's own air and spin: Earth's air at Earth's spin gives a tropopause near
+    /// 16 km, a gravest wave near 53 m/s and a band near 14°; a third of the spin widens it by √3; air thinner than the
+    /// tropopause's pressure keeps the equator's row alone; a body spinning slowly enough has one band over the globe.
+    #[test]
+    fn the_tropics_band_follows_the_air_and_the_spin() {
+        let (grid, bw, _, _, _) = aquaplanet(36, 1_024);
+        let earth = Gf::from_f64(7.292e-5);
+        let t = Gf::from_f64(300.0);
+        // Earth's band between 12° and 16° (their sines 0.2079 and 0.2756).
+        let e = tropics_band_sin(&bw, earth, grid.radius_m, t).to_f64();
+        assert!((0.2079..0.2756).contains(&e), "Earth's band's sine {e}");
+        // A third of the spin: the angle √3 times as wide (the sines' ratio within 0.1 of it at these small angles).
+        let slow = tropics_band_sin(&bw, earth / Gf::from_i64(3), grid.radius_m, t).to_f64();
+        assert!(
+            (slow / e - 3f64.sqrt()).abs() < 0.1,
+            "a third of the spin: {slow} against {e}"
+        );
+        let thin = BalanceWords {
+            p_surf_pa: Gf::from_f64(TROPOPAUSE_PA),
+            ..bw
+        };
+        assert_eq!(tropics_band_sin(&thin, earth, grid.radius_m, t), Gf::ZERO);
+        assert_eq!(tropics_band_sin(&bw, Gf::ZERO, grid.radius_m, t), Gf::ZERO);
+        assert_eq!(
+            tropics_band_sin(&bw, earth / Gf::from_i64(10_000), grid.radius_m, t),
+            Gf::ONE
+        );
     }
 }

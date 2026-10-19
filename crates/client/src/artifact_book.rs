@@ -130,11 +130,50 @@ pub struct ArtifactCache {
     /// ★ A COARSE VIEW (ruling B95): the 16 m level is off — every rung reads the 128 m ground at most. A chunk whose 16 m
     /// tiles have not landed is built on this view and built again on the whole cache when they land.
     coarse: bool,
+    /// ★ THE FAR LAKES APPLIED (ruling B116 part 2): for each pyramid level `k` at index `k − 1`, the blocks the far lake
+    /// list folded into it (their heights and water words now the list's majority class); `None` until the list lands.
+    far: Option<Arc<Vec<std::collections::BTreeSet<u32>>>>,
+    /// The far lake list's rows themselves, by node (each node under or beside a lake on the 128 m ground): a piece read
+    /// on the 8 km rows takes its lakes from them.
+    far_rows: Option<Arc<Vec<vd_terrain::fine::far::FarNode>>>,
     /// Bumped on every accepted change, so a reader tells a changed cache from the one it read.
     pub epoch: u64,
 }
 
 impl ArtifactCache {
+    /// ★ Whether the far lake list is folded into the far levels (ruling B116 part 2).
+    #[must_use]
+    pub fn far_applied(&self) -> bool {
+        self.far.is_some()
+    }
+
+    /// ★ The far lake list's row of an 8 km node (ruling B116 part 2): its 128 m wet share, water level and wet floor;
+    /// `None` for a node no lake touches, or before the list lands.
+    #[must_use]
+    pub fn far_node(&self, node: u32) -> Option<vd_terrain::fine::far::FarNode> {
+        let rows = self.far_rows.as_ref()?;
+        rows.binary_search_by_key(&node, |r| r.node)
+            .ok()
+            .map(|i| rows[i])
+    }
+
+    /// ★ The far lake list's row count once folded (ruling B116 part 2), for the dev state.
+    #[must_use]
+    pub fn far_rows_count(&self) -> Option<usize> {
+        self.far_rows.as_ref().map(|rows| rows.len())
+    }
+
+    /// ★ Whether pyramid level `k`'s block `block` stands by the far lake list (ruling B116 part 2): its water is the
+    /// list's, whatever side the fine node under a place states.
+    #[must_use]
+    pub fn far_block(&self, k: u32, block: u32) -> bool {
+        self.far.as_ref().is_some_and(|f| {
+            k.checked_sub(1)
+                .and_then(|i| f.get(i as usize))
+                .is_some_and(|s| s.contains(&block))
+        })
+    }
+
     /// The fine tiles held, if any has landed.
     #[must_use]
     pub fn fine(&self) -> Option<&Arc<FineBook>> {
@@ -267,6 +306,8 @@ impl ArtifactCache {
             finer: None,
             rough: false,
             coarse: false,
+            far: None,
+            far_rows: None,
             epoch: 1,
         }
     }
@@ -478,6 +519,10 @@ pub enum ArtifactIngest {
     WindPart,
     /// A sea-wind part that made the wind whole; the rest of the artifact is still owed, so the client states nothing yet.
     WindWhole,
+    /// ★ A far lakes part kept; the list is not whole yet (ruling B116 part 2).
+    LakesPart,
+    /// The far lake list whole and folded into the far levels: the far pieces are built again with it.
+    LakesWhole,
     /// ★ A coast part that made the WHOLE ARTIFACT whole — the pyramid was already here (2026-09-22,
     /// ruling W10). The client states `ArtifactHeld { realm, digest }`, exactly as it does when the
     /// last pyramid part lands after the mask. The statement waits for BOTH, because the gateway
@@ -551,6 +596,8 @@ pub struct ArtifactReceiver {
     coasts: BTreeMap<RealmId, CoastParts>,
     /// The sea winds assembling, per realm (ruling B109), in the coast's own part form.
     winds: BTreeMap<RealmId, CoastParts>,
+    /// The far lake lists assembling, per realm (ruling B116 part 2), in the coast's own part form.
+    lakes: BTreeMap<RealmId, CoastParts>,
     /// ★ TILES THAT ARRIVED BEFORE THEIR HEAD (the far-view ship): the tiles come from the
     /// realm's shard on their own lane and the head from the gateway's cache on another, so a
     /// tile may land first. It is PARKED, bounded per realm, and applied when the head lands —
@@ -573,7 +620,13 @@ type FinePartsKey = (RealmId, FineLevel, TileKey);
 type ParkedTile = (u8, u32, u32, Vec<u8>);
 
 /// A parked fine tile: its fine level, its key, its side's shift, its first level and its decoded levels from it.
-type ParkedFine = (FineLevel, TileKey, u32, u32, Vec<Vec<i32>>);
+type ParkedFine = (
+    FineLevel,
+    TileKey,
+    u32,
+    u32,
+    vd_terrain::fine::tile::WaterLevels,
+);
 
 /// How many tiles a realm may park before its head arrives: the pace ships four a tick, so this
 /// is over a minute of tiles; past it the oldest is dropped and counted.
@@ -594,6 +647,7 @@ impl ArtifactReceiver {
         self.assembling.retain(|(r, _), _| *r != realm);
         self.coasts.remove(&realm);
         self.winds.remove(&realm);
+        self.lakes.remove(&realm);
         self.parked.remove(&realm);
         self.fine_parts.retain(|(r, _, _), _| *r != realm);
         self.fine_parked.remove(&realm);
@@ -658,6 +712,12 @@ impl ArtifactReceiver {
                 parts,
                 bytes,
             } => self.accept_wind(realm, part, parts, bytes),
+            BulkMsg::ArtifactLakes {
+                realm,
+                part,
+                parts,
+                bytes,
+            } => self.accept_lakes(realm, part, parts, bytes),
             BulkMsg::FineTilePart {
                 realm,
                 level,
@@ -696,6 +756,7 @@ impl ArtifactReceiver {
                 c.coasts_whole += 1;
             }
             ArtifactIngest::WindPart => c.wind_parts += 1,
+            ArtifactIngest::LakesPart | ArtifactIngest::LakesWhole => c.parts += 1,
             ArtifactIngest::WindWhole => {
                 c.wind_parts += 1;
                 c.winds_whole += 1;
@@ -973,6 +1034,89 @@ impl ArtifactReceiver {
         }
     }
 
+    /// ★ ONE FAR LAKES PART IN (ruling B116 part 2): the parts assemble in the coast's own way into the generator's list
+    /// (`vd_terrain::fine::far::decode_far_nodes`); when it is whole, each held pyramid level takes the list's fold
+    /// (`vd_terrain::fine::far::fold_level`) — the folded blocks' heights and water words replaced by their majority class
+    /// — and the cache's epoch bumps, so the far pieces built before it are built again with it. A part for a realm with no
+    /// head, a list already held, or a whole record the generator does not read is refused.
+    ///
+    /// **Example.** The home planet's ten parts land a while after the artifact: the basin lake's 16 km blocks now stand at
+    /// its floor where most of their ground is under water, at the lake's 128 m level −2 721 m.
+    fn accept_lakes(
+        &mut self,
+        realm: RealmId,
+        part: u32,
+        parts: u32,
+        bytes: Vec<u8>,
+    ) -> ArtifactIngest {
+        let Some(cache) = self.book.realms.get(&realm) else {
+            return ArtifactIngest::NoHead;
+        };
+        if parts == 0 || part >= parts {
+            return ArtifactIngest::Shape;
+        }
+        if cache.far.is_some() {
+            return ArtifactIngest::Duplicate;
+        }
+        let slot = self.lakes.entry(realm).or_default();
+        if slot.parts.len() != parts as usize {
+            slot.parts = vec![None; parts as usize];
+        }
+        if slot.parts[part as usize].is_some() {
+            return ArtifactIngest::Duplicate;
+        }
+        slot.parts[part as usize] = Some(bytes);
+        if !slot.parts.iter().all(Option::is_some) {
+            return ArtifactIngest::LakesPart;
+        }
+        let record: Vec<u8> = slot
+            .parts
+            .iter()
+            .flatten()
+            .flat_map(|b| b.iter().copied())
+            .collect();
+        self.lakes.remove(&realm);
+        let Some(rows) = vd_terrain::fine::far::decode_far_nodes(&record) else {
+            return ArtifactIngest::Shape;
+        };
+        let book = Arc::make_mut(&mut self.book);
+        let cache = book
+            .realms
+            .get_mut(&realm)
+            .expect("the head was read above");
+        let edge = cache.head.edge;
+        let mut blocks = Vec::with_capacity(cache.pyramid.len());
+        for (index, slot) in cache.pyramid.iter_mut().enumerate() {
+            let k = index as u32 + 1;
+            let Some(level) = slot.as_ref() else {
+                blocks.push(std::collections::BTreeSet::new());
+                continue;
+            };
+            let folded = vd_terrain::fine::far::fold_level(&rows, edge, k, |b| {
+                level.z_m.get(b as usize).copied()
+            });
+            let mut field = (**level).clone();
+            if field.water_m.is_empty() {
+                field.water_m = vec![vd_terrain::artifact::DRY_M; field.z_m.len()];
+            }
+            for (&b, fb) in &folded {
+                if let (Some(z), Some(w)) = (
+                    field.z_m.get_mut(b as usize),
+                    field.water_m.get_mut(b as usize),
+                ) {
+                    *z = fb.z_m;
+                    *w = fb.level_m;
+                }
+            }
+            blocks.push(folded.into_keys().collect());
+            *slot = Some(Arc::new(field));
+        }
+        cache.far = Some(Arc::new(blocks));
+        cache.far_rows = Some(Arc::new(rows));
+        cache.epoch += 1;
+        ArtifactIngest::LakesWhole
+    }
+
     fn accept_tile(
         &mut self,
         realm: RealmId,
@@ -1067,7 +1211,8 @@ impl ArtifactReceiver {
             .flatten()
             .flatten()
             .collect();
-        let Some((ts, lo, levels)) = vd_terrain::fine::tile::decode_range(&record, level) else {
+        let Some((ts, lo, levels)) = vd_terrain::fine::tile::decode_water_range(&record, level)
+        else {
             return ArtifactIngest::Shape;
         };
         if !self.book.realms.contains_key(&realm) {
@@ -1097,7 +1242,7 @@ impl ArtifactReceiver {
         key: TileKey,
         ts: u32,
         lo: u32,
-        levels: Vec<Vec<i32>>,
+        levels: vd_terrain::fine::tile::WaterLevels,
     ) -> bool {
         let Some(cache) = Arc::make_mut(&mut self.book).realms.get_mut(&realm) else {
             return false;
@@ -1115,7 +1260,7 @@ impl ArtifactReceiver {
         else {
             return false;
         };
-        if !book.insert_from(key, lo, levels) {
+        if !book.insert_water_from(key, lo, levels) {
             return false;
         }
         let held = book.held_from(key).unwrap_or(lo) as u8;
@@ -1208,11 +1353,20 @@ mod tests {
         } else {
             200
         };
-        let levels: Vec<Vec<i32>> = (0..=means)
+        let heights: Vec<Vec<i32>> = (0..=means)
             .map(|k| vec![base + k as i32; (1usize << (ts - k)) * (1usize << (ts - k))])
             .collect();
-        let whole = vd_terrain::fine::tile::encode_levels(&levels, ts).expect("codes");
-        vd_terrain::fine::tile::range_record(&whole, 0, means + 1).expect("a range")
+        // The water's planes: every cell dry (slice W2's record form).
+        let levels = vd_terrain::fine::tile::WaterLevels {
+            level: heights
+                .iter()
+                .map(|l| vec![vd_terrain::fine::stitch::MISSING; l.len()])
+                .collect(),
+            wet: heights.iter().map(|l| vec![0; l.len()]).collect(),
+            heights,
+        };
+        let whole = vd_terrain::fine::tile::encode_water_levels(&levels, ts).expect("codes");
+        vd_terrain::fine::tile::water_range_record(&whole, 0, means + 1).expect("a range")
     }
 
     /// The field a pick hands a build on the fine ground, or none while it waits or stands on the rough ground.

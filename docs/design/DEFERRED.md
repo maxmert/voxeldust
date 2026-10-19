@@ -12189,6 +12189,16 @@ generation alone), so a body solves once per generation on a machine, not once p
     - 🟥 THE SEASONS' COVERAGE (HR5) — WAITS by ruling B102 (2026-10-16): `vd_terrain::seasons` (sun, grid, balance, wind,
       gill, vapour, orography, accel, chain) holds only its 16 module tests, not 100 % of its regions and branches; the
       terrain crate's coverage gate reports the misses. WHEN: before the base freezes (B99 step 7) or on the owner's word.
+    - 🟨 THE WAVES' INTERIMS — SLICE S3 BUILT (2026-10-18, `docs/investigation/2026-10-18/sea_waves_design.md`): (1) NO
+      FETCH: the sea is fully developed everywhere (Pierson–Moskowitz); near a coast a real sea is younger and smaller
+      (JONSWAP needs the fetch up the wind to the shore — the shard could compute it from the coast mask and the wind);
+      (2) NO SWELL from far storms (the weather step); (3) THE PROFILES MOVE BY THE DEEP-WATER DISPERSION, the shallow
+      water's law scales their energy only; (4) THE SPREAD IS THE EYE'S (read once a frame under the eye; a far band's
+      directions follow the eye's wind, its energy its own place's); (5) NO HEIGHT (normals only; S5). WHEN: (1) with
+      S4 or the weather step, (2) the weather step, (3)–(5) S5.
+    - 🟥 THE WAVES' TESTS (HR5): `vd_client::waves` holds five unit tests (the transform, a profile's variance and time,
+      the block, the directions, the spread); the snapshot's `universe_seconds`, the sheet's wind vector and the
+      shader's sum have none. None RUN (B74). WHEN: with S2's owed tests.
     - 🟨 THE SEA HAS ITS LIGHT, NOT ITS WAVES — SLICES S1 AND S2 BUILT (rulings B105 Q10, B106–B109; 2026-10-18): the
       sheet on each chunk's own ground triangles, coloured by the water's depth law over its floor's paint and glinting by
       the wind's slope variance (`docs/investigation/2026-10-18/sea_light_design.md`). The waves as normals (S3, B107's
@@ -12197,6 +12207,19 @@ generation alone), so a body solves once per generation on a machine, not once p
       speed over the home planet's cells is 2.9 m/s at the median, 8.3 at the 95th percentile, 12.1 at most (1.9 at the
       coast stand), where Earth's oceans hold about 7 m/s; the glint is narrower than an Earth sea's. Not tuned (B23,
       B38). WHEN: the weather step (the weather list modulates the wind) or the desert laws' trades (B100).
+      ★ THE OWNER ON S3 (2026-10-18): *"waves definitely not like on the sea (waves are not big enough), more like on
+      windless lake"*. MEASURED the same day: ExoPlaSim's home run (T21, years 27–36, the lowest level ~140 m, each
+      month's mean wind) gives the home planet's SEA a year's mean speed of 6.2 m/s at the median (7.8 at the 95th
+      percentile, 10.5 at most) and 5.6 / 11.5 / 17.1 m/s month by month, so THE CHAIN'S SEA WIND IS ABOUT HALF OF A GCM's
+      ON THE SAME BODY. Pierson–Moskowitz at the stand's 1.9 m/s gives Hs 0.08 m and 3.2 m waves (Beaufort 2: glassy
+      wavelets, the owner's "windless lake"); at 6.2 m/s Hs 0.8 m and 34 m waves; Earth's open sea about 2.5–3 m with swell
+      most of the time. The drawing follows its law; the input is calm. Three parts missing: the chain's wind laws (the
+      trades' momentum mixing, the storm belts' closure; B100's postponed list), the wind of the moment and the swell (the
+      weather step), the crests' height (S5). ★ RULING B111 (the wind first, by law). THE CAUSE (`climate_bench
+      chain-winds`, the same day): on Earth's charter the chain's sea wind matches NCEP's (median 4.1 against 4.1 m/s);
+      on the home planet the cells' mean cell is about ten times too weak (v 0.3–0.5 against ExoPlaSim's 3.4–6.8 m/s) —
+      the cells' closure (`seasons::wind`) fails at a 55° tilt and a third of Earth's spin. WHEN: the closure's law
+      (B111 item 1), then the world moves on the owner's word.
     - 🟨 THE SEA'S WIND COSTS A FIRST LOAD (2026-10-18): the shard runs the seasons' chain once on a stored world before
       it ships the world (216 s on 12 idle threads; 812 s on the solve's share under another project's build), and the
       first login on that world waits for it; stored after, read at once. A new world's first solve adds it. WHEN: the
@@ -12213,6 +12236,67 @@ generation alone), so a body solves once per generation on a machine, not once p
       level, joined to the sea or not (G-PIT-RASTER, slice W0: 0.70 km² in 48 pits around the coast stand). A lake's node
       and a pocket's floor hold no sea, so THE LAKES ARE NOT DRAWN yet. The cure: the water map in each tile (slice W2;
       B105 Q1, Q2), whose search fills only what joins its water, and each lake at its own level. WHEN: slice W2.
+      ★ BUILT 2026-10-18 (slice W2, not yet run in the window): where the fine level serves the rung and its tile is held,
+      the sheet reads the tile's WATER MAP (`FineBook::water` through `ZField::fine_water`): the sea, each lake at its own
+      level and each carved river at its bank, the connection searched by the shard — a hollow no path joins stays dry.
+      STILL THE INTERIM: beyond the fine levels (rung 13 and up, the 8 km coast mask: the sea only, NO LAKE drawn there) and
+      on a chunk built before its tiles land (rebuilt when they land).
+    - 🟨 SLICE W2's OWN INTERIMS AND OWED ITEMS (2026-10-18; rulings B105, B114): (1) THE FAR LAKES — at rung 13 and up a
+      lake is not drawn (the pyramid's water words exist on the client, `PyramidField::water_m`; the sheet does not read
+      them yet), so a lake vanishes beyond about 7 500 km — a W16 seam to close with the far map; (2) THE NARROWER RIVERS'
+      TINT is deep water's own colour by the share (no depth, no floor through it, no glint); (3) THE 16 m LEVEL'S OUTLETS
+      under a lake are not B105 Q1 (b)'s (the 16 m setup keeps its rim exits and the sea's points; a lake's 16 m floor is
+      the law's detail on the 128 m lake floor); (4) THE GATES OWED — G-DIVIDE (contacts), G-SEAM-WATER (wet/dry across a
+      cut), G-FACE, G-FAR-EXACT, G-SLIDE, G-SWAP, G-ARRIVE-WATER, G-POND-FLICKER, G-RIVER-RUNG (the one-volume revision
+      §3.10), none run; (5) THE TESTS — written for the water map and the water record, the carve, the finish's pick, the
+      book's water, the 16 m water and the client's sheet and share have none; nothing RUN (B74); (6) THE WIDTH TABLE'S YEAR
+      (its test reads the Julian year, the chain sums the rain over the body's own year — about 5 % in a width); (7) THE
+      WORLD MOVE — FINE_VERSION 4 and L2_VERSION 3 re-solve every fine tile on its next visit (the stores keep the old
+      ones until `store_prune`). ★ 2026-10-18 (later), slice W1 item 5's bench (`planet_stand water-gates`): G-DIVIDE,
+      G-FACE and G-SEAM-WATER READ on the river mouth's and the basin lake's 3 × 3 squares (the status file); item (4)
+      keeps G-FAR-EXACT, G-SLIDE, G-SWAP, G-ARRIVE-WATER, G-POND-FLICKER and G-RIVER-RUNG. (8) ★ A PERCHED LAKE SPREADS
+      INTO THE BASIN UNDER IT (G-DIVIDE, MEASURED): south of the basin lake's square a lake at −341 m reaches 53 131 cells of
+      the −2 002 m lake (its 128 m rim cut under its level), and the finish's pick puts that water over the lower lake in a
+      cut's band (456 steps of 1.66 km, 1 058 faces). The cure is the design's own (§3.4 item 6, Fill–Spill–Merge: a still
+      water stands at most at its lowest fine outlet), one fine level per lake computed by the shard over the lake's tiles
+      — a small table per realm, an SL6 ask brought with these counts. ★ RULING B116 (2026-10-19) BUILT, NOT RUN: the far
+      lakes from the 128 m tiles (`vd_terrain::fine::far`, `vd_bins::fine_source`'s far work, `BulkMsg::ArtifactLakes`, the
+      gateway's `lakes`, the client's `accept_lakes` and far fold) and the coarse copies by the majority class (FINE_VERSION
+      8). ITS INTERIMS: (a) until a new world version's lake tiles are all folded (the realm's idle work on HALF the solve
+      threads, `IDLE_THREADS_DIVISOR`: about 3–4 hours for the home planet's 1 959 lake tiles), the far lakes keep the 8 km
+      form, and a piece whose tile has not arrived draws no lake (FINE_VERSION 9); (b) a node two or more nodes from a lake whose 128 m ground
+      the lake still floods is not in the list (its far water stays the 8 km rule's); (c) the fold takes a listed node's
+      128 m mean ground as its 8 km row (B84's hold) to read a block's dry mean; (d) THE SEA'S FAR COAST keeps the 8 km form
+      (B116 item 3); (e) no test for the far emit, the gateway's lake serving (now FIRST after the artifact, again after a
+      forget or a re-drive, 2026-10-19) or the client's fold (HR5; B74); (f) until a client holds the list, rung 13 and up
+      draw no lake at all (the pyramid's water words hold none there) — the list now goes first, so the gap is its own
+      travel time (~264 KB once). ★ THE SHORT
+      DESIGN WRITTEN
+      (`docs/investigation/2026-10-18/lake_spill_design.md`): 10 of 40 sampled spilling lakes spill under their 8 km level
+      on the 128 m ground (a lower bound); the recommended form keeps the fine level in the shard's store and needs no SL6
+      ask (the water map already crosses); the owner's answers to its three questions owed. ★ RULED B115 AND BUILT
+      2026-10-18 (form (a′), not yet in the window): each lake's fine level in the shard by its own rounds
+      (`vd_bins::fine_source`: `Job::Round`, `Round`, `tile_levels`, the level kept in the store under level number 0);
+      every 128 m tile solved with the fine levels of its domain's lakes (`fine::l1::solve_l1_levels`, `Waters`); the 16 m
+      water inside the 128 m water's reach (`fine::water::raster_water_within`); FINE_VERSION 6, L2_VERSION 4. ITS
+      INTERIMS: (a) ★ CURED THE SAME DAY: every lake's first round reads ONE shared plain solve per tile (`Job::Plain`), and
+      that solve is the tile's final raw where every lake of its domain holds its 8 km word (MEASURED at the basin lake's
+      warm-up: 3 → 8.5 finished tiles a minute); a LOWERED lake's tiles still solve once more per later round and once for
+      the final solve; (b) ★ CURED 2026-10-19 (FINE_VERSION 10, the owner's window: a 595 m wall of water at a tile corner):
+      a lake's rounds named that lake alone, so lake 4687251 kept −136 m while its neighbour's fine level (−731 m) eroded the
+      neighbour's former floor into valleys that drained it at −549 m; now THE LAKES TOGETHER — a round names every other
+      lake of the tile's domain at its settled level, and a final solve whose raster shows a lake passing under its named
+      level reopens that lake (`fine_source::reopen`: its rounds start at the pass; the raws that named its old level, the
+      finished tiles that read them and the 16 m tiles that read those are made again; its lake tiles fold again into the
+      far list). NEW INTERIMS of the cure: (b1) a raw stored before a reopen is read back after a shard restart that comes
+      before it is made again (the store keys a raw by its tile, not by the levels it named); (b2) a far list made whole
+      again after a reopen does not reach a gateway that already took the old one (`FineGateway::far_sent`), nor a session
+      that holds it; (b3) a finished tile made again after a reopen does not reach a gateway that already holds the old
+      record; all three only during a world version's warm-up; (c) a base level read through an 8 km chain to a lake outside the
+      tile's domain stays that lake's 8 km word; (d) the far step (B115 item 2); (e) no test for the rounds (HR5; B74). (1) ★ WRITTEN 2026-10-18: the
+      far lakes from the field's own water words (`chunks::sea_sheet`), not yet in the window. WHERE: `vd_terrain::fine::{water, carve, tile, finish, stitch, read, l1, l2, refine}`,
+      `vd_bins::fine_source`, `vd_client::{chunks, artifact_book}`, `ladder_fade.wgsl`. WHEN: (1)–(3) slice W2's second
+      round after the owner's look; (4)–(5) before the base freezes or on the owner's word.
     - 🟥 THE LANE'S REBUILD PATH HAS NO UNIT TEST (HR5; found 2026-10-18): `ChunkLane::upgradable` and `upgrade` (the
       rough ground of B86 item 7, the 128 m ground under the 16 m level of B95, and S1's chunks built before their
       realm's coast mask) — no test in `vd-client` reaches them. WHEN: before the base freezes (B99 step 7) or on the

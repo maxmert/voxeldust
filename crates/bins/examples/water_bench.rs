@@ -64,6 +64,26 @@ fn main() {
         wind(&args);
         return;
     }
+    if args.first().map(String::as_str) == Some("waves-cpu") {
+        let waves = vd_client::waves::WaveBands::new(HOME, 9.81);
+        let started = std::time::Instant::now();
+        let mut rows = 0;
+        for f in 0..100 {
+            rows += waves
+                .block_rows(
+                    vd_core::glam::DQuat::IDENTITY,
+                    DVec3::new(6.0e6, 1.0e6, 2.0e6),
+                    1.0e6 + f64::from(f) / 60.0,
+                    DVec3::new(0.0, 0.0, 7.0),
+                )
+                .len();
+        }
+        println!(
+            "the wave block: {:.3} ms a frame ({rows} rows in 100 frames)",
+            started.elapsed().as_secs_f64() * 10.0
+        );
+        return;
+    }
     assert_eq!(
         args.first().map(String::as_str),
         Some("pits"),

@@ -50,7 +50,7 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a};
 use vd_seed::seam::{Edge, across, partner_of};
 
 use crate::climate::Climate;
-use crate::fine::read::FineZ;
+use crate::fine::read::{FineWater, FineZ};
 use crate::macro_lattice::{MacroLattice, NO_NODE};
 use crate::solve::{MacroSolve, Z_STEPS_PER_M};
 use crate::units::{LENGTH_BITS, STEPS_PER_M};
@@ -571,6 +571,19 @@ pub trait ZField {
     /// 512 m means; the home moon's field holds none and reads its macro rows as before.
     fn fine_z(&self, _face: Face, _draw_rung: u8, _cell_rung: u8, _i: i32, _j: i32) -> FineZ {
         FineZ::Outside
+    }
+    /// ★ THE FINE WATER (slice W2, [`crate::fine::read::FineBook::water`]): the water's level and share a chunk at
+    /// `draw_rung` reads at the centre of the cell `(i, j)` of `cell_rung` on `face`, from the finished tiles' water the
+    /// field holds. A field with no fine book answers [`FineWater::Outside`], so the 8 km rule stands.
+    fn fine_water(
+        &self,
+        _face: Face,
+        _draw_rung: u8,
+        _cell_rung: u8,
+        _i: i32,
+        _j: i32,
+    ) -> FineWater {
+        FineWater::Outside
     }
 }
 

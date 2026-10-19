@@ -500,7 +500,30 @@ pub(crate) fn raster(
     (ri0, rj0, rside): (i32, i32, i32),
     drawn_at: &dyn Fn(&CellId) -> Option<Gf>,
 ) -> Option<(Vec<Option<Gf>>, Vec<Gf>)> {
+    raster_carved(s, h, face, n, down, (ri0, rj0, rside), drawn_at, None).map(|r| (r.0, r.1))
+}
+
+/// A cell's carve in the law's raster: from its triangle, its direction and its law height ([`super::carve::carve_cell`]).
+pub(crate) type CarveAt<'a> = &'a dyn Fn([u32; 3], &Dir, Gf) -> super::carve::Carve;
+
+/// [`raster`] with THE RIVER CARVE in the law's raster (slice W2; the one-volume revision §3.5): each cell's law height
+/// carved by `carve` before the detail is taken, so a channel narrower than the coarser cell arrives in the drawn ground as
+/// detail; its bank moves by the cell's own offset (the drawn ground less the law's coarser version). Returns the heights,
+/// the detail's sizes, each cell's carved river's bank (metres over the sea) and each cell's narrower rivers' share.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn raster_carved(
+    s: &Setup,
+    h: &[Gf],
+    face: Face,
+    n: i32,
+    down: u32,
+    (ri0, rj0, rside): (i32, i32, i32),
+    drawn_at: &dyn Fn(&CellId) -> Option<Gf>,
+    carve: Option<CarveAt<'_>>,
+) -> Option<(Vec<Option<Gf>>, Vec<Gf>, Vec<Option<Gf>>, Vec<Gf>)> {
     let rs = rside as usize;
+    let mut bank_law: Vec<Option<Gf>> = Vec::with_capacity(rs * rs);
+    let mut share: Vec<Gf> = Vec::with_capacity(rs * rs);
     let inv_n = vd_recipe::bend::inv_n_of(n as u32);
     let mut law: Vec<Option<Gf>> = Vec::with_capacity(rs * rs);
     let mut curve: Vec<Option<Gf>> = Vec::with_capacity(rs * rs);
@@ -511,14 +534,27 @@ pub(crate) fn raster(
             let Some(c) = chart_cell(face, ri0 + ai, rj0 + bj, n) else {
                 law.push(None);
                 curve.push(None);
+                bank_law.push(None);
+                share.push(Gf::ZERO);
                 continue;
             };
             let qd = vd_recipe::bend::direction(i32::from(c.face), c.i, c.j, inv_n);
             let (tri, w) = locate(&s.dirs, &s.graph, from, &qd)?;
             let v = s.graph.tris[tri as usize];
-            law.push(Some(
-                w[0] * h[v[0] as usize] + w[1] * h[v[1] as usize] + w[2] * h[v[2] as usize],
-            ));
+            let lz = w[0] * h[v[0] as usize] + w[1] * h[v[1] as usize] + w[2] * h[v[2] as usize];
+            match carve {
+                Some(at) => {
+                    let cv = at(v, &qd, lz);
+                    law.push(Some(cv.z));
+                    bank_law.push(cv.bank);
+                    share.push(cv.share);
+                }
+                None => {
+                    law.push(Some(lz));
+                    bank_law.push(None);
+                    share.push(Gf::ZERO);
+                }
+            }
             curve.push(Some(drawn_at(&c)?));
             if ai == 0 {
                 row_from = tri;
@@ -569,12 +605,14 @@ pub(crate) fn raster(
     };
     let clampm = |i: i64| i.clamp(0, mb as i64 - 1) as usize;
     let (mut out, mut detail) = (Vec::with_capacity(rs * rs), Vec::new());
+    let mut bank: Vec<Option<Gf>> = Vec::with_capacity(rs * rs);
     for y in 0..rs {
         let (iy, ty) = place(y);
         let wy = cr(ty);
         for x in 0..rs {
             let (Some(lz), Some(cz)) = (law[y * rs + x], curve[y * rs + x]) else {
                 out.push(None);
+                bank.push(None);
                 continue;
             };
             let (ix, tx) = place(x);
@@ -590,8 +628,9 @@ pub(crate) fn raster(
             let d = lz - low;
             detail.push(d.abs());
             out.push(Some(cz + d));
+            bank.push(bank_law[y * rs + x].map(|b| cz + b - low));
         }
     }
     detail.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
-    Some((out, detail))
+    Some((out, detail, bank, share))
 }

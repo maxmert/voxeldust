@@ -31,20 +31,22 @@ use vd_core::pose::RealmId;
 use vd_seed::bend::Face;
 use vd_sim::io::{Bytes, Store};
 use vd_sim::stub::built_store::{
-    FINE_PART_BYTES, FineAt, FineForm, read_fine_record, write_fine_record,
+    COAST_PART_BYTES, FINE_PART_BYTES, FineAt, FineForm, far_lakes_key, read_fine_record,
+    write_fine_record,
 };
 use vd_sim::stub::fine_ship::{FineName, FineTiles, NONE_HELD};
 use vd_terrain::BodyDefinition;
 use vd_terrain::artifact::{Artifact, fine_needs};
+use vd_terrain::fine::far::{FarNode, encode_far_nodes, tile_far_nodes};
 use vd_terrain::fine::finish::block_keys;
-use vd_terrain::fine::l1::{TileKey, solve_l1};
-use vd_terrain::fine::l2::solve_l2;
+use vd_terrain::fine::l1::{OutletRule, TileKey, Waters, solve_l1_levels};
+use vd_terrain::fine::l2::solve_l2_with;
 use vd_terrain::fine::level::{FineLevel, LevelGeom};
 use vd_terrain::fine::read::FineBook;
 use vd_terrain::fine::stitch::Field;
 use vd_terrain::fine::tile::{
-    decode_levels, decode_raw, encode_levels, encode_raw, finish, input_word_of, range_record,
-    raw_field,
+    WaterLevels, decode_raw_water, decode_water_levels, encode_raw_water, encode_water_levels,
+    finish_water, input_word_of, raw_field, water_planes, water_range_record,
 };
 use vd_terrain::macro_lattice::MacroLattice;
 use vd_wire::channels::BulkMsg;
@@ -55,13 +57,60 @@ pub const LEVEL_L1: u8 = 1;
 /// A tile of a level: the key every map of the work holds.
 pub type LKey = (FineLevel, TileKey);
 
-/// A finish's nine raw fields with their tiles (NW … SE; none past a cube corner).
-type Block = Box<[Option<(TileKey, Arc<Field>)>; 9]>;
+/// ★ A RAW TILE WITH ITS WATER (slice W2): the raster's heights, its water's level and its wet share, each a field on
+/// the level's global cells.
+pub type RawTile = [Field; 3];
+
+/// ★ THE OUTLET RULE THE GAME'S FINE TILES ARE SOLVED UNDER (slice W2; ruling B105 Q1 (b), B114): every standing water's
+/// points under its level are outlets, each node's base level its own water, the rivers carved, the water map made.
+pub const GAME_RULE: OutletRule = OutletRule::StandingWater;
+
+/// A finish's nine raw tiles with their keys (NW … SE; none past a cube corner).
+type Block = Box<[Option<(TileKey, Arc<RawTile>)>; 9]>;
+
+/// ★ A LAKE'S FINE LEVEL IN THE STORE (ruling B115): it rides the fine family under level number 0 (no tile has it), the
+/// lake's id in the tile index, keyed by the 128 m level's input word — so a world change never serves an old level.
+const LAKE_LEVEL_AT: u8 = 0;
+/// The stored lake level's form.
+const LAKE_LEVEL_FORM: u8 = 1;
+/// ★ A LAKE'S ROUNDS' BOUND (ruling B115, form (a′)): the rounds stop when the level holds; the bound only guarantees an
+/// end. MEASURED (the bench, 2026-10-18): the basin lake held after one round.
+const LAKE_ROUND_BOUND: u32 = 8;
+
+/// ★ IDLE WORK'S SHARE OF THE SOLVE THREADS, as a divisor (2026-10-19): the far lakes' tiles no view names may fill at most
+/// half the threads, so a tile a view reads starts at once. MEASURED before (the owner's flight over the basin, ruling
+/// B116's first deploy): the lake tiles' solves held all seven threads for 10–30 s each, the tiles the flight needed rose to
+/// 110 waiting, and the pieces over them stood on the 8 km ground. A far copy a view names is the ground that view draws
+/// on the rough form until it lands, so it takes every thread when no whole tile waits (ruling B117: a solve about 5 s, so
+/// a whole tile the flight then needs waits about that long for a thread; MEASURED at the 60 km stand over the basin: its
+/// view named about 1 700 far copies, which the half share left on four threads while three stood idle).
+const IDLE_THREADS_DIVISOR: usize = 2;
+
+/// One lake's rounds (ruling B115, form (a′)): the level its tiles are solved at now, the round's number (round 0 at the
+/// 8 km word reads the tiles' shared plain solves), and each tile's answer — its raster's spill for the lake, or none.
+struct Round {
+    level: i32,
+    n: u32,
+    got: BTreeMap<TileKey, Option<i32>>,
+}
+
+/// ★ A TILE'S PLAIN SOLVE (every lake at its 8 km word): the spills of every lake in its raster — round 0 of each of them
+/// at once — and its raw field and record, which are the tile's final raw where every lake of its domain holds its 8 km
+/// word.
+struct Plain {
+    spills: Vec<(u32, i32)>,
+    raw: Option<(Arc<RawTile>, Option<Vec<u8>>)>,
+}
 
 /// One piece of work.
 enum Job {
-    /// Solve a raw tile (a 16 m tile with the finished 128 m book it refines).
-    Solve(LKey, Option<Arc<FineBook>>),
+    /// Solve a raw tile (a 16 m tile with the finished 128 m book it refines), each named lake at its fine level.
+    Solve(LKey, Option<Arc<FineBook>>, Arc<BTreeMap<u32, i32>>),
+    /// ★ A LAKE'S ROUND (ruling B115): solve one of its 128 m tiles with the lake at the level and every other lake of the
+    /// tile's domain at its settled level (the lakes together, 2026-10-19), for its spill.
+    Round(u32, i32, TileKey, Arc<BTreeMap<u32, i32>>),
+    /// ★ A 128 m TILE'S PLAIN SOLVE (ruling B115): every lake at its 8 km word — the first round of every lake in its raster.
+    Plain(TileKey),
     /// Read a stored raw record back.
     LoadRaw(LKey, Vec<u8>),
     /// Finish a tile from its nine raw fields (NW … SE; none past a cube corner).
@@ -70,11 +119,28 @@ enum Job {
     LoadFinished(LKey, Vec<u8>),
 }
 
+/// A 128 m final solve's check (the lakes together): the levels it named and every lake's spill in its raster.
+type Checked = (Arc<BTreeMap<u32, i32>>, Vec<(u32, i32)>);
+
 /// One answer: a raw field (and its record when freshly solved, to store), or a finished record and its levels (and
 /// whether to store it).
 enum Answer {
-    Raw(LKey, Option<Arc<Field>>, Option<Vec<u8>>),
-    Finished(LKey, Option<(Vec<u8>, Vec<Vec<i32>>)>, bool),
+    /// A raw field (and its record when freshly solved), and for a 128 m tile's final solve the levels it named and every
+    /// lake's spill in its raster (the lakes together: a lake passing under its level reopens).
+    Raw(LKey, Option<Arc<RawTile>>, Option<Vec<u8>>, Option<Checked>),
+    /// A lake's round: the lake, the level, the tile, and the tile's spill for the lake (none where it holds, or where the
+    /// solve answered nothing).
+    Round(u32, i32, TileKey, Option<i32>),
+    /// A plain solve: the tile, its raw field and record, and every lake's spill in its raster.
+    Plain(
+        TileKey,
+        Option<Arc<RawTile>>,
+        Option<Vec<u8>>,
+        Vec<(u32, i32)>,
+    ),
+    /// A finished tile: its record and levels (and whether to store it), and the far rows of its nodes under or beside a lake
+    /// (ruling B116 part 2), folded on the worker so the tick only keeps them.
+    Finished(LKey, Option<(Vec<u8>, WaterLevels)>, bool, Vec<FarNode>),
 }
 
 /// What a worker reads: the body, its lattice, its artifact, and each level's numbers.
@@ -95,44 +161,144 @@ impl Ctx {
     }
 }
 
+/// A solved raster (its side, heights, water map and narrower rivers' shares) as a raw tile's three fields and its record.
+fn raw_of(
+    key: TileKey,
+    geom: LevelGeom,
+    (side, quarters, water, share): (usize, Vec<i32>, Vec<i32>, Vec<u8>),
+) -> (RawTile, Option<Vec<u8>>) {
+    let (level, wet) = water_planes(&water, &share);
+    let raw = [
+        raw_field(key, geom, side, quarters),
+        raw_field(key, geom, side, level),
+        raw_field(key, geom, side, wet),
+    ];
+    let record = encode_raw_water(&raw[0], &raw[1].v, &raw[2].v, geom.shift);
+    (raw, record)
+}
+
+/// ★ A FINISHED 128 m TILE'S FAR ROWS (ruling B116 part 2): its nodes under or beside a lake, folded from its levels
+/// (`vd_terrain::fine::far::tile_far_nodes`); none for a 16 m tile or a tile that did not finish.
+fn far_rows_of(ctx: &Ctx, (level, key): LKey, levels: Option<&WaterLevels>) -> Vec<FarNode> {
+    let Some(levels) = levels.filter(|_| level == FineLevel::L1) else {
+        return Vec::new();
+    };
+    let none = BTreeMap::new();
+    let waters = Waters::new(&ctx.lattice, &ctx.artifact, &none);
+    let keep = |n: u32| {
+        waters.under_lake(n)
+            || ctx
+                .lattice
+                .neighbours(n)
+                .into_iter()
+                .any(|m| m != vd_terrain::macro_lattice::NO_NODE && waters.under_lake(m))
+    };
+    tile_far_nodes(
+        key,
+        levels,
+        ctx.geom(FineLevel::L1),
+        &ctx.lattice,
+        ctx.artifact.sea_m,
+        keep,
+    )
+}
+
 /// ★ ONE JOB'S WORK, the same on any thread and any host.
 fn work(ctx: &Ctx, job: Job) -> Answer {
     match job {
-        Job::Solve(lk @ (level, key), book) => {
-            let geom = ctx.geom(level);
-            let raster = match (level, book) {
-                (FineLevel::L1, _) => solve_l1(&ctx.body, &ctx.lattice, &ctx.artifact, key)
-                    .map(|t| (t.side, t.quarters)),
-                (FineLevel::L2, Some(book)) => {
-                    solve_l2(&ctx.body, &ctx.lattice, &ctx.artifact, &book, key)
-                        .map(|t| (t.side, t.quarters))
+        Job::Round(lake, level, key, others) => {
+            let mut levels = (*others).clone();
+            levels.insert(lake, level);
+            let spill = solve_l1_levels(
+                &ctx.body,
+                &ctx.lattice,
+                &ctx.artifact,
+                key,
+                GAME_RULE,
+                &levels,
+            )
+            .and_then(|t| t.spills.iter().find(|&&(l, _)| l == lake).map(|&(_, p)| p));
+            Answer::Round(lake, level, key, spill)
+        }
+        Job::Plain(key) => {
+            let geom = ctx.geom(FineLevel::L1);
+            let none = BTreeMap::new();
+            match solve_l1_levels(
+                &ctx.body,
+                &ctx.lattice,
+                &ctx.artifact,
+                key,
+                GAME_RULE,
+                &none,
+            ) {
+                Some(t) => {
+                    let spills = t.spills.clone();
+                    let (raw, record) =
+                        raw_of(key, geom, (t.side, t.quarters, t.water, t.river_share));
+                    Answer::Plain(key, Some(Arc::new(raw)), record, spills)
                 }
+                None => Answer::Plain(key, None, None, Vec::new()),
+            }
+        }
+        Job::Solve(lk @ (level, key), book, levels) => {
+            let geom = ctx.geom(level);
+            let mut checked = None;
+            let raster = match (level, book) {
+                (FineLevel::L1, _) => solve_l1_levels(
+                    &ctx.body,
+                    &ctx.lattice,
+                    &ctx.artifact,
+                    key,
+                    GAME_RULE,
+                    &levels,
+                )
+                .map(|t| {
+                    checked = Some((Arc::clone(&levels), t.spills));
+                    (t.side, t.quarters, t.water, t.river_share)
+                }),
+                (FineLevel::L2, Some(book)) => solve_l2_with(
+                    &ctx.body,
+                    &ctx.lattice,
+                    &ctx.artifact,
+                    &book,
+                    key,
+                    GAME_RULE,
+                )
+                .map(|t| (t.side, t.quarters, t.water, t.river_share)),
                 (FineLevel::L2, None) => None,
             };
-            let raw = raster.map(|(side, quarters)| raw_field(key, geom, side, quarters));
-            let record = raw.as_ref().and_then(|f| encode_raw(f, geom.shift));
-            Answer::Raw(lk, raw.map(Arc::new), record)
+            match raster.map(|r| raw_of(key, geom, r)) {
+                Some((raw, record)) => Answer::Raw(lk, Some(Arc::new(raw)), record, checked),
+                None => Answer::Raw(lk, None, None, None),
+            }
         }
         Job::LoadRaw(lk @ (level, key), bytes) => Answer::Raw(
             lk,
-            decode_raw(&bytes, key, ctx.geom(level)).map(Arc::new),
+            decode_raw_water(&bytes, key, ctx.geom(level)).map(Arc::new),
+            None,
             None,
         ),
         Job::Finish(lk @ (level, _), block) => {
             let geom = ctx.geom(level);
             let slots: [Option<(TileKey, &Field)>; 9] =
-                std::array::from_fn(|k| block[k].as_ref().map(|(t, f)| (*t, &**f)));
-            let levels = finish(slots, geom);
-            let out = levels
-                .and_then(|levels| encode_levels(&levels, geom.ts).map(|record| (record, levels)));
-            Answer::Finished(lk, out, true)
+                std::array::from_fn(|k| block[k].as_ref().map(|(t, f)| (*t, &f[0])));
+            let plane = |p: usize| -> [Option<&Field>; 9] {
+                std::array::from_fn(|k| block[k].as_ref().map(|(_, f)| &f[p]))
+            };
+            let levels = finish_water(slots, plane(1), plane(2), geom);
+            let out = levels.and_then(|levels| {
+                encode_water_levels(&levels, geom.ts).map(|record| (record, levels))
+            });
+            let far = far_rows_of(ctx, lk, out.as_ref().map(|(_, l)| l));
+            Answer::Finished(lk, out, true, far)
         }
         Job::LoadFinished(lk @ (level, _), bytes) => {
             let ts = ctx.geom(level).ts;
-            let levels = decode_levels(&bytes, level)
+            let levels = decode_water_levels(&bytes, level)
                 .filter(|(t, _)| *t == ts)
                 .map(|(_, levels)| levels);
-            Answer::Finished(lk, levels.map(|levels| (bytes, levels)), false)
+            let far = far_rows_of(ctx, lk, levels.as_ref());
+            Answer::Finished(lk, levels.map(|levels| (bytes, levels)), false, far)
         }
     }
 }
@@ -166,7 +332,9 @@ pub struct FineMeter {
 /// [`work`], timed into `meter` by the job's kind.
 fn timed_work(ctx: &Ctx, job: Job, meter: &FineMeter) -> Answer {
     let (done, nanos) = match &job {
-        Job::Solve(..) => (&meter.raw_solved, Some(&meter.raw_solve_nanos)),
+        Job::Solve(..) | Job::Round(..) | Job::Plain(..) => {
+            (&meter.raw_solved, Some(&meter.raw_solve_nanos))
+        }
         Job::LoadRaw(..) => (&meter.raw_loaded, None),
         Job::Finish(..) => (&meter.finished_made, Some(&meter.finish_nanos)),
         Job::LoadFinished(..) => (&meter.finished_loaded, None),
@@ -198,7 +366,7 @@ struct State {
     pool: Pool,
     /// Held raw fields, finished records, their levels' wire parts as sessions asked for them (by the first level and the
     /// level past the last), and the shard's own book of finished levels.
-    raw: BTreeMap<LKey, Arc<Field>>,
+    raw: BTreeMap<LKey, Arc<RawTile>>,
     finished: BTreeMap<LKey, Arc<Vec<u8>>>,
     wire: BTreeMap<(LKey, u8, u8), Arc<[Bytes]>>,
     /// The 128 m book and the 16 m book.
@@ -216,6 +384,30 @@ struct State {
     named: Vec<Vec<(LKey, bool)>>,
     reasons: Vec<LKey>,
     whole: BTreeSet<LKey>,
+    /// Every tile some view names (whole or for its coarse copies): the rest of the reasons are the far lakes' idle work.
+    viewed: BTreeSet<LKey>,
+    /// ★ THE LAKES (ruling B115): each lake's settled fine level, the lakes in their rounds, the round solves in flight,
+    /// the lakes the store does not hold, and two caches — each 128 m tile's domain lakes, each lake's tiles.
+    lake_level: BTreeMap<u32, i32>,
+    rounds: BTreeMap<u32, Round>,
+    round_flight: BTreeSet<(u32, TileKey)>,
+    /// The tiles' plain solves (their spills, and their raw while a served block may still take it as final), those in
+    /// flight, and the lakes settled since the store last took them.
+    plain: BTreeMap<TileKey, Plain>,
+    plain_flight: BTreeSet<TileKey>,
+    settled: Vec<(u32, i32)>,
+    /// ★ THE FAR LAKES (ruling B116 part 2): whether the work began (the store read, or the lake tiles listed), the lake
+    /// tiles still to fold — the realm's idle work, after every tile a view reads — the rows folded so far (each node under
+    /// or beside a lake, folded on the workers), and the list's wire parts once whole.
+    far_started: bool,
+    advance: BTreeSet<LKey>,
+    /// Every lake tile of the far list, so a tile finished again after a lake reopens is folded again.
+    far_tiles: BTreeSet<LKey>,
+    far_rows: BTreeMap<u32, FarNode>,
+    far_parts: Option<Arc<[Bytes]>>,
+    lakes_unstored: BTreeSet<u32>,
+    tile_lakes: BTreeMap<TileKey, Arc<BTreeSet<u32>>>,
+    lake_tiles: BTreeMap<u32, Arc<BTreeSet<TileKey>>>,
 }
 
 /// A book's slot in [`State::books`].
@@ -352,6 +544,21 @@ impl FineWork {
                 named: Vec::new(),
                 reasons: Vec::new(),
                 whole: BTreeSet::new(),
+                viewed: BTreeSet::new(),
+                lake_level: BTreeMap::new(),
+                rounds: BTreeMap::new(),
+                round_flight: BTreeSet::new(),
+                plain: BTreeMap::new(),
+                plain_flight: BTreeSet::new(),
+                settled: Vec::new(),
+                far_started: false,
+                advance: BTreeSet::new(),
+                far_tiles: BTreeSet::new(),
+                far_rows: BTreeMap::new(),
+                far_parts: None,
+                lakes_unstored: BTreeSet::new(),
+                tile_lakes: BTreeMap::new(),
+                lake_tiles: BTreeMap::new(),
             })),
             meter,
         })
@@ -428,6 +635,363 @@ impl FineWork {
             .collect()
     }
 
+    /// A lake's fine level's place in the store (ruling B115; [`LAKE_LEVEL_AT`]).
+    fn lake_at(&self, lake: u32) -> FineAt {
+        FineAt {
+            form: FineForm::Raw,
+            input: self.inputs[0],
+            level: LAKE_LEVEL_AT,
+            face: 0,
+            tx: lake,
+            ty: 0,
+        }
+    }
+
+    /// ★ THE LAKE LEVELS A 128 m TILE'S SOLVE NAMES (ruling B115): `Ok` with the lakes of the tile's domain whose fine level
+    /// is not their 8 km word, once every lake there has settled; `Err` with the lakes still in their rounds. A level the
+    /// store holds is read back; a lake it does not hold starts its rounds.
+    fn tile_levels(
+        &self,
+        state: &mut State,
+        store: Option<&dyn Store>,
+        key: TileKey,
+    ) -> Result<BTreeMap<u32, i32>, Vec<u32>> {
+        let none = BTreeMap::new();
+        let waters = Waters::new(&self.ctx.lattice, &self.ctx.artifact, &none);
+        let lakes = Arc::clone(
+            state
+                .tile_lakes
+                .entry(key)
+                .or_insert_with(|| Arc::new(waters.domain_lakes(key))),
+        );
+        let (mut levels, mut waiting) = (BTreeMap::new(), Vec::new());
+        for &lake in lakes.iter() {
+            if !state.lake_level.contains_key(&lake) && !state.lakes_unstored.contains(&lake) {
+                match store.map(|s| read_fine_record(s, &self.lake_at(lake))) {
+                    Some(Ok(Some(bytes))) => match bytes[..] {
+                        [LAKE_LEVEL_FORM, a, b, c, d] => {
+                            state
+                                .lake_level
+                                .insert(lake, i32::from_le_bytes([a, b, c, d]));
+                        }
+                        _ => {
+                            state.lakes_unstored.insert(lake);
+                        }
+                    },
+                    _ => {
+                        state.lakes_unstored.insert(lake);
+                    }
+                }
+            }
+            let word = waters.lake_level_q(lake);
+            match state.lake_level.get(&lake) {
+                Some(&level) => {
+                    if level != word {
+                        levels.insert(lake, level);
+                    }
+                }
+                None => {
+                    state.rounds.entry(lake).or_insert_with(|| Round {
+                        level: word,
+                        n: 0,
+                        got: BTreeMap::new(),
+                    });
+                    state
+                        .lake_tiles
+                        .entry(lake)
+                        .or_insert_with(|| Arc::new(waters.lake_tiles(lake)));
+                    waiting.push(lake);
+                }
+            }
+        }
+        if waiting.is_empty() {
+            Ok(levels)
+        } else {
+            Err(waiting)
+        }
+    }
+
+    /// The jobs in flight: raw and finished work, the lakes' rounds and the plain solves.
+    fn busy(state: &State) -> usize {
+        state.in_flight.len() + state.round_flight.len() + state.plain_flight.len()
+    }
+
+    /// ★ A LAKE'S ROUND IS IN (ruling B115, form (a′)): once every tile of the lake has answered, the lowest spill lowers
+    /// the level and the tiles are solved again, until it holds (or the bound ends it at the lowest spill found); a settled
+    /// level waits for the store in `settled`.
+    fn advance(state: &mut State, lake: u32) {
+        let all = state.lake_tiles.get(&lake).map_or(0, |t| t.len());
+        let Some(round) = state.rounds.get_mut(&lake) else {
+            return;
+        };
+        if round.got.len() < all {
+            return;
+        }
+        let next = round
+            .got
+            .values()
+            .flatten()
+            .copied()
+            .fold(round.level, i32::min);
+        if next == round.level || round.n + 1 >= LAKE_ROUND_BOUND {
+            state.rounds.remove(&lake);
+            state.lake_level.insert(lake, next);
+            state.settled.push((lake, next));
+        } else {
+            round.level = next;
+            round.n += 1;
+            round.got.clear();
+        }
+    }
+
+    /// The lakes of a final raster that pass under the level its solve named (their 8 km word where it named none), with the
+    /// lowest pass of each.
+    fn passes_under(&self, levels: &BTreeMap<u32, i32>, spills: &[(u32, i32)]) -> Vec<(u32, i32)> {
+        let none = BTreeMap::new();
+        let waters = Waters::new(&self.ctx.lattice, &self.ctx.artifact, &none);
+        let mut out: BTreeMap<u32, i32> = BTreeMap::new();
+        for &(lake, pass) in spills {
+            let named = levels
+                .get(&lake)
+                .copied()
+                .unwrap_or_else(|| waters.lake_level_q(lake));
+            if pass < named {
+                let e = out.entry(lake).or_insert(pass);
+                *e = (*e).min(pass);
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// ★ THE OTHER LAKES A ROUND NAMES (the lakes together, 2026-10-19): every other lake of the tile's domain whose settled
+    /// level is not its 8 km word. MEASURED before (the owner's window, a 595 m wall of water at a tile corner): a lake's
+    /// rounds named that lake alone, so lake 4687251 found no pass at −136 m while its neighbour stood at its 8 km word;
+    /// the neighbour's fine level (−731 m) eroded its former floor into valleys, and in the final solve the lake passed at
+    /// −549 m — two tiles' solves then gave one valley two waters.
+    fn others_of(&self, state: &mut State, tile: TileKey, lake: u32) -> BTreeMap<u32, i32> {
+        let none = BTreeMap::new();
+        let waters = Waters::new(&self.ctx.lattice, &self.ctx.artifact, &none);
+        let lakes = Arc::clone(
+            state
+                .tile_lakes
+                .entry(tile)
+                .or_insert_with(|| Arc::new(waters.domain_lakes(tile))),
+        );
+        lakes
+            .iter()
+            .filter(|&&m| m != lake)
+            .filter_map(|&m| {
+                let level = *state.lake_level.get(&m)?;
+                (level != waters.lake_level_q(m)).then_some((m, level))
+            })
+            .collect()
+    }
+
+    /// ★ A LAKE REOPENS (the lakes together, 2026-10-19): a final raster shows it passing at `pass`, under the level its
+    /// solve named, so it drains — its rounds start again at the pass, its level leaves the settled set (and the store is
+    /// not read for it), and every 128 m raw that named its old level goes, with the finished tiles that read them and the
+    /// 16 m tiles that read those; each is made again (and stored over the old) and a lake tile is folded again into the
+    /// far list. Levels only fall, so the lakes settle.
+    fn reopen(&self, state: &mut State, lake: u32, pass: i32) {
+        let none = BTreeMap::new();
+        let waters = Waters::new(&self.ctx.lattice, &self.ctx.artifact, &none);
+        let was = state.lake_level.remove(&lake);
+        tracing::info!(
+            lake,
+            was_q = ?was,
+            pass_q = pass,
+            "a lake passes under its level in a final solve: it drains to the pass (the lakes together, B115)"
+        );
+        state.lakes_unstored.insert(lake);
+        state.rounds.insert(
+            lake,
+            Round {
+                level: pass,
+                n: 1,
+                got: BTreeMap::new(),
+            },
+        );
+        state
+            .lake_tiles
+            .entry(lake)
+            .or_insert_with(|| Arc::new(waters.lake_tiles(lake)));
+        let raws: Vec<LKey> = state
+            .tile_lakes
+            .iter()
+            .filter(|(_, lakes)| lakes.contains(&lake))
+            .map(|(&t, _)| (FineLevel::L1, t))
+            .collect();
+        let mut finished: BTreeSet<LKey> = BTreeSet::new();
+        for raw in &raws {
+            state.raw.remove(raw);
+            state.unstored.insert((*raw, false));
+            if let Some(plain) = state.plain.get_mut(&raw.1) {
+                plain.raw = None;
+            }
+            finished.extend(self.block_of(*raw).into_iter().flatten());
+        }
+        let finer: Vec<LKey> = state
+            .raw
+            .keys()
+            .chain(state.finished.keys())
+            .copied()
+            .filter(|&k| k.0 == FineLevel::L2 && self.reads(k).iter().any(|r| finished.contains(r)))
+            .collect();
+        for k in finer {
+            state.raw.remove(&k);
+            state.unstored.insert((k, false));
+            finished.insert(k);
+        }
+        for key in finished {
+            if state.finished.remove(&key).is_some() || state.unstored.contains(&(key, true)) {
+                state.wire.retain(|(k, _, _), _| *k != key);
+                Arc::make_mut(&mut state.books[slot(key.0)]).remove(key.1);
+                state.book_changed.insert(key);
+            }
+            state.unstored.insert((key, true));
+            if state.far_tiles.contains(&key) {
+                state.advance.insert(key);
+                state.far_parts = None;
+            }
+        }
+    }
+
+    /// Hands out a lake's round while threads are free: round 0 reads each tile's plain solve (and asks once for each plain
+    /// solve not made yet, for every lake at once) where no other lake of the tile's domain stands lowered, a later round
+    /// (or a round 0 beside a lowered lake) solves the tile with the lake at its level and the others at theirs.
+    fn round_work(&self, state: &mut State, lake: u32, threads: usize) {
+        let (Some((level, n)), Some(tiles)) = (
+            state.rounds.get(&lake).map(|r| (r.level, r.n)),
+            state.lake_tiles.get(&lake).map(Arc::clone),
+        ) else {
+            return;
+        };
+        for &tile in tiles.iter() {
+            if state
+                .rounds
+                .get(&lake)
+                .is_none_or(|r| r.got.contains_key(&tile))
+            {
+                continue;
+            }
+            let others = self.others_of(state, tile, lake);
+            if n == 0
+                && others.is_empty()
+                && let Some(plain) = state.plain.get(&tile)
+            {
+                let spill = plain
+                    .spills
+                    .iter()
+                    .find(|&&(l, _)| l == lake)
+                    .map(|&(_, p)| p);
+                if let Some(round) = state.rounds.get_mut(&lake) {
+                    round.got.insert(tile, spill);
+                }
+                continue;
+            }
+            if Self::busy(state) >= threads {
+                continue;
+            }
+            if n == 0 && others.is_empty() {
+                if state.plain_flight.insert(tile) {
+                    Self::submit(state, &self.ctx, &self.meter, Job::Plain(tile));
+                }
+            } else if state.round_flight.insert((lake, tile)) {
+                Self::submit(
+                    state,
+                    &self.ctx,
+                    &self.meter,
+                    Job::Round(lake, level, tile, Arc::new(others)),
+                );
+            }
+        }
+        Self::advance(state, lake);
+    }
+
+    /// The far lake list's wire parts: the record cut at the coast's size, each a `BulkMsg::ArtifactLakes`.
+    fn far_parts_of(&self, record: &[u8]) -> Arc<[Bytes]> {
+        let parts = record.len().div_ceil(COAST_PART_BYTES).max(1);
+        (0..parts)
+            .map(|part| {
+                let start = (part * COAST_PART_BYTES).min(record.len());
+                let end = (start + COAST_PART_BYTES).min(record.len());
+                let msg = BulkMsg::ArtifactLakes {
+                    realm: self.realm,
+                    part: part as u32,
+                    parts: parts as u32,
+                    bytes: record[start..end].to_vec(),
+                };
+                vd_sim::io::bytes(
+                    postcard::to_allocvec(&msg).expect("a closed wire enum serializes"),
+                )
+            })
+            .collect()
+    }
+
+    /// ★ THE FAR LAKES BEGIN (ruling B116 part 2), once, on the first tick with the realm's store: the list the store keeps
+    /// under this fine input word, or else every 128 m tile that holds a node under or beside a lake, listed as the
+    /// realm's idle work.
+    fn far_begin(&self, state: &mut State, store: Option<&dyn Store>) {
+        let Some(store) = store.filter(|_| !state.far_started) else {
+            return;
+        };
+        state.far_started = true;
+        if let Some(record) = store.get(&far_lakes_key(self.inputs[0])) {
+            state.far_parts = Some(self.far_parts_of(&record));
+            tracing::info!(
+                bytes = record.len(),
+                "the far lakes read back from the store (ruling B116)"
+            );
+            return;
+        }
+        let (lattice, artifact) = (&self.ctx.lattice, &self.ctx.artifact);
+        let none = BTreeMap::new();
+        let waters = Waters::new(lattice, artifact, &none);
+        let mut keep = BTreeSet::new();
+        for node in 0..artifact.rows.len() as u32 {
+            if waters.under_lake(node) {
+                keep.insert(node);
+                for m in lattice.neighbours(node) {
+                    if m != vd_terrain::macro_lattice::NO_NODE {
+                        keep.insert(m);
+                    }
+                }
+            }
+        }
+        let shift = FineLevel::L1.tile_nodes_shift();
+        state.advance = keep
+            .iter()
+            .map(|&node| {
+                let (face, ni, nj) = lattice.split(node);
+                (
+                    FineLevel::L1,
+                    TileKey {
+                        face,
+                        tx: ni >> shift,
+                        ty: nj >> shift,
+                    },
+                )
+            })
+            .collect();
+        state.far_tiles = state.advance.clone();
+        tracing::info!(
+            nodes = keep.len(),
+            tiles = state.advance.len(),
+            "the far lakes begin: the lake tiles join the realm's idle work (ruling B116)"
+        );
+    }
+
+    /// ★ ONE LAKE TILE FOLDED (ruling B116 part 2): its kept nodes' rows from its finished levels; the list is whole when the
+    /// last lake tile is folded.
+    fn far_fold(state: &mut State, key: LKey, rows: Vec<FarNode>) {
+        if !state.advance.remove(&key) {
+            return;
+        }
+        for row in rows {
+            state.far_rows.insert(row.node, row);
+        }
+    }
+
     /// The tiles around `key` (NW … SE) on any face, at its level; none past a cube corner (B2's face-edge cut: every
     /// tile finishes).
     fn block_of(&self, (level, key): LKey) -> [Option<LKey>; 9] {
@@ -498,8 +1062,19 @@ impl FineTiles for FineWork {
         let mut wrote = false;
         for answer in Self::answers(state) {
             match answer {
-                Answer::Raw(key, field, record) => {
+                Answer::Raw(key, field, record, checked) => {
                     state.in_flight.remove(&(key, false));
+                    // ★ THE LAKES TOGETHER (2026-10-19): a lake passing under the level this final solve named drains
+                    // there — the solve is not kept, the lake reopens, and the tile waits for its level again.
+                    if let Some((levels, spills)) = &checked {
+                        let lower = self.passes_under(levels, spills);
+                        if !lower.is_empty() {
+                            for (lake, pass) in lower {
+                                self.reopen(state, lake, pass);
+                            }
+                            continue;
+                        }
+                    }
                     match field {
                         Some(field) => {
                             if let (Some(store), Some(record)) = (store.as_deref_mut(), record) {
@@ -514,7 +1089,49 @@ impl FineTiles for FineWork {
                         }
                     }
                 }
-                Answer::Finished(key, out, store_it) => {
+                Answer::Round(lake, level, tile, spill) => {
+                    state.round_flight.remove(&(lake, tile));
+                    if let Some(round) = state.rounds.get_mut(&lake).filter(|r| r.level == level) {
+                        round.got.insert(tile, spill);
+                        Self::advance(state, lake);
+                    }
+                }
+                Answer::Plain(tile, raw, record, spills) => {
+                    state.plain_flight.remove(&tile);
+                    // Round 0 of every lake in the raster reads this one solve — where no other lake of the tile's
+                    // domain stands lowered (else its round names them).
+                    let candidates: Vec<u32> = state
+                        .rounds
+                        .iter()
+                        .filter(|(lake, r)| {
+                            r.n == 0
+                                && state
+                                    .lake_tiles
+                                    .get(lake)
+                                    .is_some_and(|t| t.contains(&tile))
+                        })
+                        .map(|(&lake, _)| lake)
+                        .collect();
+                    let waiting: Vec<u32> = candidates
+                        .into_iter()
+                        .filter(|&lake| self.others_of(state, tile, lake).is_empty())
+                        .collect();
+                    for lake in waiting {
+                        let spill = spills.iter().find(|&&(l, _)| l == lake).map(|&(_, p)| p);
+                        if let Some(round) = state.rounds.get_mut(&lake) {
+                            round.got.insert(tile, spill);
+                        }
+                        Self::advance(state, lake);
+                    }
+                    state.plain.insert(
+                        tile,
+                        Plain {
+                            spills,
+                            raw: raw.map(|r| (r, record)),
+                        },
+                    );
+                }
+                Answer::Finished(key, out, store_it, far) => {
                     state.in_flight.remove(&(key, true));
                     match out {
                         Some((record, levels)) => {
@@ -523,12 +1140,15 @@ impl FineTiles for FineWork {
                                 state.unstored.remove(&(key, true));
                                 wrote = true;
                             }
+                            Self::far_fold(state, key, far);
                             state.finished.insert(key, Arc::new(record));
-                            Arc::make_mut(&mut state.books[slot(key.0)]).insert(key.1, levels);
+                            Arc::make_mut(&mut state.books[slot(key.0)])
+                                .insert_water_from(key.1, 0, levels);
                             state.book_changed.insert(key);
                         }
                         None => {
                             state.refused.insert((key, true));
+                            state.advance.remove(&key);
                         }
                     }
                 }
@@ -549,11 +1169,38 @@ impl FineTiles for FineWork {
             })
             .filter(|key| seen.insert(*key))
             .collect();
+        // ★ THE FAR LAKES' TILES LAST (ruling B116 part 2): the list begins on the first tick with the store; a lake tile
+        // whose finish or block was refused leaves the list; the rest follow every tile a view names, as idle work.
+        self.far_begin(state, store.as_deref());
+        let refused: Vec<LKey> = state
+            .advance
+            .iter()
+            .copied()
+            .filter(|&k| {
+                state.refused.contains(&(k, true))
+                    || self
+                        .block_of(k)
+                        .iter()
+                        .flatten()
+                        .any(|b| state.refused.contains(&(*b, false)))
+            })
+            .collect();
+        for k in refused {
+            state.advance.remove(&k);
+        }
+        let advance: Vec<LKey> = state
+            .advance
+            .iter()
+            .copied()
+            .filter(|k| seen.insert(*k))
+            .collect();
+        state.reasons.extend(advance);
         state.whole = named
             .iter()
             .flatten()
             .filter_map(|&(key, whole)| whole.then_some(key))
             .collect();
+        state.viewed = named.iter().flatten().map(|&(key, _)| key).collect();
         let threads = match &state.pool {
             Pool::Threads { threads, .. } => *threads,
             Pool::Inline { .. } => 1,
@@ -604,10 +1251,15 @@ impl FineTiles for FineWork {
             }
         }
         state.raw.retain(|key, _| keep_raw.contains(key));
+        for (tile, plain) in &mut state.plain {
+            if !keep_raw.contains(&(FineLevel::L1, *tile)) {
+                plain.raw = None;
+            }
+        }
         // ★ THE NEXT WORK, nearest first, never more in flight than threads (the order follows the newest reasons).
         let reasons = state.reasons.clone();
         for key in reasons {
-            if state.in_flight.len() >= threads {
+            if Self::busy(state) >= threads {
                 break;
             }
             if state.finished.contains_key(&key)
@@ -640,6 +1292,15 @@ impl FineTiles for FineWork {
             if !serving.contains(&key) {
                 continue;
             }
+            // Idle work (a far lake tile no view names) fills only its share of the threads.
+            let limit = if state.viewed.contains(&key) {
+                threads
+            } else {
+                threads.div_ceil(IDLE_THREADS_DIVISOR)
+            };
+            if Self::busy(state) >= limit {
+                continue;
+            }
             let block = self.block_of(key);
             if block.iter().flatten().all(|b| state.raw.contains_key(b)) {
                 let slots =
@@ -654,13 +1315,12 @@ impl FineTiles for FineWork {
                 continue;
             }
             for raw in block.into_iter().flatten() {
-                if state.in_flight.len() >= threads {
+                if Self::busy(state) >= limit {
                     break;
                 }
                 if state.raw.contains_key(&raw) | state.in_flight.contains(&(raw, false)) {
                     continue;
                 }
-                state.in_flight.insert((raw, false));
                 let stored = if state.unstored.contains(&(raw, false)) {
                     None
                 } else {
@@ -668,17 +1328,94 @@ impl FineTiles for FineWork {
                         .as_deref()
                         .and_then(|s| read_fine_record(s, &self.at(raw, false)).ok().flatten())
                 };
-                match stored {
-                    Some(bytes) => {
-                        Self::submit(state, &self.ctx, &self.meter, Job::LoadRaw(raw, bytes))
+                if let Some(bytes) = stored {
+                    state.in_flight.insert((raw, false));
+                    Self::submit(state, &self.ctx, &self.meter, Job::LoadRaw(raw, bytes));
+                    continue;
+                }
+                state.unstored.insert((raw, false));
+                // ★ THE LAKES FIRST (ruling B115): a 128 m tile solves once every lake in its domain has its fine level;
+                // meanwhile those lakes' rounds take the free threads.
+                let levels = if raw.0 == FineLevel::L1 {
+                    match self.tile_levels(state, store.as_deref(), raw.1) {
+                        Ok(levels) => levels,
+                        Err(waiting) => {
+                            for lake in waiting {
+                                self.round_work(state, lake, limit);
+                            }
+                            continue;
+                        }
                     }
-                    None => {
-                        state.unstored.insert((raw, false));
-                        let book = (raw.0 == FineLevel::L2).then(|| Arc::clone(&state.books[0]));
-                        Self::submit(state, &self.ctx, &self.meter, Job::Solve(raw, book));
+                } else {
+                    BTreeMap::new()
+                };
+                // ★ THE PLAIN SOLVE IS FINAL where no lake of the tile's domain stands lower than its 8 km word — and no
+                // lake of its raster passes under its word there (the lakes together).
+                if levels.is_empty() && raw.0 == FineLevel::L1 {
+                    let lower = state
+                        .plain
+                        .get(&raw.1)
+                        .map(|p| self.passes_under(&BTreeMap::new(), &p.spills))
+                        .unwrap_or_default();
+                    if !lower.is_empty() {
+                        for (lake, pass) in lower {
+                            self.reopen(state, lake, pass);
+                        }
+                        continue;
                     }
                 }
+                if levels.is_empty()
+                    && raw.0 == FineLevel::L1
+                    && let Some((field, record)) =
+                        state.plain.get_mut(&raw.1).and_then(|p| p.raw.take())
+                {
+                    if let (Some(store), Some(record)) = (store.as_deref_mut(), record) {
+                        write_fine_record(store, &self.at(raw, false), &record);
+                        state.unstored.remove(&(raw, false));
+                        store.commit();
+                    }
+                    state.raw.insert(raw, field);
+                    continue;
+                }
+                state.in_flight.insert((raw, false));
+                let book = (raw.0 == FineLevel::L2).then(|| Arc::clone(&state.books[0]));
+                Self::submit(
+                    state,
+                    &self.ctx,
+                    &self.meter,
+                    Job::Solve(raw, book, Arc::new(levels)),
+                );
             }
+        }
+        // ★ THE FAR LAKES WHOLE (ruling B116 part 2): the last lake tile folded, the list is coded, kept and offered.
+        if state.far_started && state.far_parts.is_none() && state.advance.is_empty() {
+            let rows: Vec<FarNode> = state.far_rows.values().copied().collect();
+            let record = encode_far_nodes(&rows);
+            if let Some(store) = store.as_deref_mut() {
+                store.put(&far_lakes_key(self.inputs[0]), &record.clone().into());
+                store.commit();
+            }
+            tracing::info!(
+                nodes = rows.len(),
+                bytes = record.len(),
+                "the far lakes are whole: kept and offered to the gateways (ruling B116)"
+            );
+            state.far_parts = Some(self.far_parts_of(&record));
+        }
+        // ★ THE SETTLED LAKES TO THE STORE (ruling B115): each level once, so a later tile beside a known lake reads it back.
+        if let Some(store) = store
+            && !state.settled.is_empty()
+        {
+            for (lake, level) in std::mem::take(&mut state.settled) {
+                let b = level.to_le_bytes();
+                write_fine_record(
+                    store,
+                    &self.lake_at(lake),
+                    &[LAKE_LEVEL_FORM, b[0], b[1], b[2], b[3]],
+                );
+                state.lakes_unstored.remove(&lake);
+            }
+            store.commit();
         }
         // ★ THE METER'S GAUGES (send-ahead's first step): the tiles named, those not finished yet, the jobs in flight.
         let backlog = state
@@ -692,7 +1429,7 @@ impl FineTiles for FineWork {
         self.meter.backlog.store(backlog as u64, Ordering::Relaxed);
         self.meter
             .in_flight
-            .store(state.in_flight.len() as u64, Ordering::Relaxed);
+            .store(Self::busy(state) as u64, Ordering::Relaxed);
     }
 
     fn want(&self, dir: [f64; 3], radial_m: f64) -> Vec<(FineName, u8)> {
@@ -765,6 +1502,10 @@ impl FineTiles for FineWork {
         FineLevel::from_id(level).map_or(0, |l| (l.mean_levels() + 1) as u8)
     }
 
+    fn far_lakes(&self) -> Option<Arc<[Bytes]>> {
+        self.lock().far_parts.clone()
+    }
+
     fn parts(&self, tile: FineName, lo: u8, hi: u8) -> Option<Arc<[Bytes]>> {
         let level = FineLevel::from_id(tile.0)?;
         let key = (
@@ -787,7 +1528,7 @@ impl FineTiles for FineWork {
         } else {
             u32::from(hi).min(top)
         };
-        let parts = self.wire_parts(key, &range_record(&record, u32::from(lo), end)?);
+        let parts = self.wire_parts(key, &water_range_record(&record, u32::from(lo), end)?);
         state.wire.insert((key, lo, hi), Arc::clone(&parts));
         Some(parts)
     }

@@ -528,6 +528,22 @@ pub enum BulkMsg {
         parts: u32,
         bytes: Vec<u8>,
     },
+    /// ★ ONE PART OF THE FAR LAKES (2026-10-19, ruling B116 part 2; SL6 owner-approved: "Please build both parts right
+    /// away"): `bytes` holds part `part` of `parts` of the realm's far lake list (the generator's own form,
+    /// `vd_terrain::fine::far::encode_far_nodes`) — each 8 km node under or beside a lake, its wet share, its water level
+    /// and its wet floor, folded from the realm's finished 128 m tiles once per world version. It comes LATE (the lake
+    /// tiles are solved as the realm's idle work), so no head announces it: it rides the realm audience once per gateway
+    /// when it exists, and a gateway serves it to a session that holds the realm's artifact. Parts of at most 32 KiB.
+    /// APPENDED (discriminant 9, minor 41).
+    ///
+    /// **Example.** The home planet's list is 43 751 nodes, about 300 KB in ten parts; from 20 000 km the basin lake
+    /// stands at its 128 m level −2 721 m with the outline its tiles give.
+    ArtifactLakes {
+        realm: RealmId,
+        part: u32,
+        parts: u32,
+        bytes: Vec<u8>,
+    },
 }
 
 /// ★ ONE CHUNK ROW on the diff lane (R-3, R-13; the storage report's shape, §4.2): which chunk at
@@ -1533,6 +1549,15 @@ mod tests {
                     bytes: vec![4, 5],
                 },
                 8,
+            ),
+            (
+                BulkMsg::ArtifactLakes {
+                    realm: RealmId::Planet(7),
+                    part: 0,
+                    parts: 10,
+                    bytes: vec![6],
+                },
+                9,
             ),
         ];
         for (msg, index) in bulk {

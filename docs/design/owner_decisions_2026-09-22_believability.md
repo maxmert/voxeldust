@@ -2748,3 +2748,150 @@ art's own step stays where B99 put it (after the base), its questions per B36 Q1
 
 **Example.** Over the coast stand the open sea is deep navy, the glint a narrow path under the 1.9 m/s wind, the sky's
 sheen stronger toward the horizon; next, the same sea moves with the wind's waves.
+
+## B111 (2026-10-18) — THE WIND FIRST, BY LAW; THE WAVES' METHOD RE-USED FROM OPEN SOURCE
+
+The owner in the window, 30 m over the sea 8 km off the coast stand, on slice S3 (the waves as normals): *"Looks good, but
+waves definitely not like on the sea (waves are not big enough), more like on windless lake"*. MEASURED the same day
+(DEFERRED, the chain's surface wind): the climate's wind at the stand is 1.9 m/s (Pierson–Moskowitz: Hs 0.08 m, 3 m waves,
+Beaufort 2), the sea's median 2.9 m/s, where ExoPlaSim's home run gives the same body's sea 6.2 m/s at its lowest level
+(~140 m). Then the owner: *"Please make sure you have ground rules and laws in your context and that you never break it.
+Then continue to work on the waves. Please look at the open sourced ocean and waves solutions, ideally we just re-use.
+Ok, let's fix the wind first if we can"*.
+
+1. **THE WIND FIRST, IF A LAW CAN FIX IT** (amends B100 item 2 for the wind's own laws: the trades' momentum mixing and the
+   storm belts' closure come forward; the desert's radiative sink and the saturation law stay postponed). The cause first:
+   the chain's seasonal sea wind read part by part (the cells' law, Gill's departures) against ExoPlaSim's home run and
+   NCEP's Earth — READINGS, never targets (B38, B41); then the missing law, published and applied as stated with its
+   named calibration; no cap, no knob (B23). The world moves once (a new generator, the home planet solved again) only
+   on the owner's word with the numbers.
+2. **THE WAVES' METHOD RE-USED FROM OPEN SOURCE** where the rules allow: B106 holds (the methods and permissive code PORTED
+   into our own drawing, no plugin), B107 holds (plane waves in the planet's 3D space, no chart, no seam), W16/B16 hold
+   (one shape at every distance, one fade rule with no rung in it), T3 holds (the time from the universe clock), the waves
+   stay LOOK ONLY. A study of the open ocean codes (their spectra and inputs, displacement, foam, far field, and what wind
+   their pictures show) comes before the next wave slice.
+3. **THE SEASONAL WIND (SL6) STAYS OPEN** — asked with its measured gain when the wind's law is known.
+
+**Example.** Off the coast stand the climate blows 1.9 m/s and the sea shows glassy wavelets; once the trades' law gives the
+planet's sea the wind its own spin and sunlight drive, the same sea carries waves tens of metres long, and the far coast's
+sea in its windy season rougher still — with no number set by hand.
+
+## B112 (2026-10-18) — THE WIND'S STEP 2 BUILT; THE WAVES WAIT FOR THE WIND
+
+On the cause (`docs/investigation/2026-10-18/sea_wind_and_waves_study.md`: on Earth the chain's sea wind equals NCEP's,
+4.1 m/s; on the home planet it is a third of ExoPlaSim's, 2.0 against 6.0 m/s; the mean cell 15–35× too weak, chiefly
+because the balance carries energy across the equator only by diffusion, ≤ 2 PW against 8) and on Step 1's bench reading
+(the cells' law: Earth unchanged, the home planet 2.0 → 2.2 m/s), the owner chose:
+
+1. **BUILD STEP 2** — the balance lets the mean cell carry the tropics' energy (the weak temperature gradient inside the
+   cells; the storms keep their diffusion outside); designed and benched against ExoPlaSim (the home planet) and NCEP and
+   GPCP (Earth stays right), as READINGS (B38, B41); then THE WORLD MOVES ONCE with Steps 1 and 2 together (a new
+   generator, the home planet solved again, new pins) after the owner's look at the numbers and the maps.
+2. **THE WAVES WAIT FOR THE WIND** — no wave slice (S4, S5, swell) until the wind's cure lands; S3's two cures of the same
+   day (the energy at the peak, the pixel's own filter) stand.
+
+**Example.** The pilot over the home planet's tropical sea finds glassy wavelets today; once the balance lets the planet's
+own cell carry its summer half's heat across the equator, the trades blow several metres a second there, and only then
+does the sea's next slice raise its crests.
+
+## B113 (2026-10-18) — THE WIND'S RESEARCH BESIDE; STEP 1 KEPT AS LAW; LAKES AND RIVERS NEXT
+
+On Step 2's research (`docs/investigation/2026-10-18/sea_wind_and_waves_study.md` §5: no closure passes the home planet
+against ExoPlaSim, Earth against NCEP and a 50 m aquaplanet against GFDL together; the lever is the sea's surface exchange
+by the cells' own wind, the land's exchange and the free troposphere's outgoing heat — a two-layer intermediate climate):
+
+1. **THE WIND'S RESEARCH GOES ON BESIDE** — read-only, in the NumPy replica of the balance; each piece tested on the three
+   references; nothing enters the game until one form passes all three (B38, B41, B112).
+2. **STEP 1 STAYS — IT IS LAW, NOT A STAND-IN** (the owner: *"We don't need any sims. Will it be re-used as part of the law?
+   If yes, keep it, if it's wrong or is a sim, remove"*): `h_T` over the convecting tropics (quasi-equilibrium and the weak
+   temperature gradient over the equatorial deformation radius, `c = N·D/π` from the body's own lapse rate and the 0.1 bar
+   tropopause), the local quasi-equilibrium (`g_ms ≥ 0.06·h`), the storm belts' sign rule (the steady angular momentum, as
+   `seasons::gill`). The two-layer form reads the same band. It moves the world, so it joins THE NEXT GENERATOR CHANGE; until
+   then no new first solve runs on this tree's binaries.
+3. **LAKES AND RIVERS NEXT** (B105, B106: slices W1–W2 — the water map in each tile, each lake at its own level, then the
+   rivers), while the waves wait for the wind (B112).
+
+**Example.** The pilot over the home planet's tropical sea still sees glassy wavelets; meanwhile the lake in the belt's
+valley stands at its own level behind its outlet, and the river below it runs to the sea — and when the climate's two-layer
+exchange passes its three references, the trades rise and the sea's waves with them.
+
+## B114 (2026-10-18) — RIVERS AND THE WATER MAP FIRST; THE BASINS STAY PARKED
+
+The owner asked for the planet's waters from above (`climate_bench art-maps … <tag>_water.png`; 1 164 lakes at the 8 km
+scale, 0.9 % of the land; 360 / 24 / 0 rivers reach the sea with ≥ 100 / 1 000 / 10 000 m³/s). Two features seen there are
+the 8 km world's KNOWN basin defects (DEFERRED: the deposit's one-node lines inside a filled flat basin, the "washboard";
+"THE SOLVE MAKES CLOSED POCKETS NO EARTH BASIN RESEMBLES"), parked by B12. The owner: *"Rivers and water map first"*.
+
+1. **W1–W2 CONTINUE** (the river carve, the water map in each tile, lakes and rivers drawn in the window); the basin
+   defects stay REGISTERED INTERIMS and show inside some lakes (one-node dry lines, branching lakes over deep pockets).
+2. **THE BASINS' CURE FOLLOWS AS ITS OWN STEP** and joins the next generator change.
+
+**Example.** The pilot over the east continent's big lake sees thin straight islands across its shallow water — the
+basin's known interim — while the rivers the next slice carves run into it from the belt.
+
+## B115 (2026-10-18) — A LAKE STANDS AT ITS 128 m SPILL; THE FULL COUNT FIRST
+
+THE FINDING (status file, 2026-10-18 later; `docs/investigation/2026-10-18/lake_spill_design.md`): slice W1 item 5's bench
+found a perched lake at −341 m spreading into the −2 002 m basin lake under it (G-DIVIDE, 53 136 cells), and the spill count
+found 10 of 40 sampled spilling lakes whose 128 m ground cuts their rim under their 8 km level (the drop 4.0 / 28.8 / 502 /
+773 m at p10 / p50 / p90 / most; a lower bound). The 8 km lake stands at its brim node's height; the 128 m level holds only
+that node's mean, so its valleys cut the rim. The owner, on the three questions: *"(a), then (a′) if needed"*, *"Register
+it"*, *"Count first"*.
+
+1. **THE LAW IS W11's ON THE FINER GROUND**: a still water stands at most at its lowest outlet, so a lake's FINE LEVEL is the
+   lower of its 8 km level and its lowest 128 m pass to lower ground. The planet's shard computes it once per world version
+   over the finished 128 m squares of the lake's tiles, keeps it in its store and writes each tile's water map with it
+   (form (a)); no new data crosses (the water map crosses already, B105 Q2), so no SL6 ask. The lake's tiles solve again
+   at the fine level (form (a′)) ONLY IF the side views show the smooth "bathtub ring" between the two levels.
+2. **THE FAR STEP IS REGISTERED**: from rung 13 up the far map reads the 8 km level, so a lake whose level drops steps at the
+   rung 12 → 13 swap; G-SWAP reads it until the advance calculation holds a whole body and the pyramid becomes the exact
+   fold of the tiles (the one-volume revision §3.6, Q10). No per-realm table to the client now.
+3. **THE FULL COUNT FIRST**: every lake, closed and spilling, its whole rim (every tile of the lake), on the bench, before
+   the build.
+
+**Example.** Lake #16 stands at −163 m on the 8 km world, but one 128 m valley of its brim node runs down to −936 m. Under
+this ruling the shard finds that pass, the lake's water maps hold it at −936 m inside its own hollow, and the basin under it
+keeps its own water.
+
+## B116 (2026-10-19) — THE WATER'S RUNG CHANGE IS SEAMLESS; THE FAR LAKES FROM THE 128 m TILES (amends B115 item 2)
+
+THE LOOK (the owner in the window over the basin lake, FINE_VERSION 7): *"Far view do not represent real shape of the water
+areas, that's why it changes a lot when I fly closer. The rung change should be seamless also for the water"*. The causes,
+read in the code: from rung 13 up the far map reads the 8 km lakes (their 8 km level, the 8 km ground's outline — the basin
+lake −2 002 m far against −2 721 m near; mountain lake #688 a lake far, a valley near); on rungs 7–12 a coarse copy draws a
+place wet only where its MEAN GROUND stands under the water, so a shore cell (half floor, half land) draws dry. After the
+proposal was explained (two parts, the data that crosses), the owner: *"Please build both parts right away"*.
+
+1. **PART 1 — RUNGS 7–12 (no new data)**: each coarse copy of a fine tile holds the MEAN OF THE VISIBLE SURFACE (the water's
+   surface where water stands, the ground elsewhere) in place of the mean ground, and its WET SHARE decides where the water
+   stands — the one-volume revision §3.6's own rule; every coarser rung shows the average of the finest shore (a new fine
+   version; the records keep their three values and their size).
+2. **PART 2 — RUNG 13 AND UP (SL6 YES)**: the planet's shard solves every lake's 128 m tiles once per world version (the
+   advance calculation's first part, B86 item 6), keeps the fold in its store, and sends ONE LIST per planet — each 8 km node
+   under or beside a lake: its index, its wet share and its mean visible surface (MEASURED on the home planet: 18 662 nodes
+   under a lake, 25 089 beside one, about 300 KB raw) — from the planet's shard through the gateway to the client, once per
+   world version, beside the coast mask and the wind; the client folds the coarser far levels itself. Until it exists (a new
+   world version's first solves) the far lakes keep the 8 km form.
+3. **THE SEA'S FAR COAST** keeps the 8 km form (folding it needs every coast tile solved), registered.
+4. **B115 item 2 is amended**: the far step is no longer an accepted interim for the lakes.
+
+**Example.** A pilot flies from orbit toward the basin: from 20 000 km the lake stands at −2 721 m with the outline its 128 m
+tiles give, and at each rung change below that its shore moves less than a pixel; mountain lake #688 is a valley at every
+distance.
+
+## B117 (2026-10-19) — THE SOLVES TAKE THE IDLE FAST CORES (amends B91 item 1)
+
+MEASURED (the planet's shard warming FINE_VERSION 9 on the owner's M4 Pro, 10 fast and 4 efficiency cores): the seven solve
+threads ran at 51–53 % of a core each, 3.6 cores together, while the ten fast cores stood idle — B91's macOS "utility" class
+keeps a thread on the efficiency cores even on a quiet machine. A 128 m tile took 17–32 s in the shard against about 5.5 s
+on one bench thread, and the far lake list (1 959 tiles) about 2–3 hours. A test of seven spinners: "utility" 0.26 of a core
+each, the default class 0.92; the default class at its lowest relative priority 0.91 alone, and 0.35 beside ten busy
+default threads while they got 0.68 each. Asked with these numbers, the owner chose *"Default, low priority"*.
+
+1. **THE SOLVE THREADS RUN IN THE DEFAULT CLASS AT ITS LOWEST RELATIVE PRIORITY (−15) on macOS** (`vd_bins::thread_class`);
+   Linux keeps nice 10. The solve's bytes do not depend on its class.
+2. **B91's late frames are measured again** at the owner's next window look (the window's late frames a minute at a login
+   while a solve runs).
+
+**Example.** The home planet's shard solves the basin lake's tiles on the idle fast cores, about 5 s a tile; when the owner
+opens the window and flies, the window's frame takes about two thirds of any core it shares with a solve.
