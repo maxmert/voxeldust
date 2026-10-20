@@ -76,7 +76,7 @@ fn inner_relief_m(e_mm_yr: f64) -> f64 {
 }
 
 /// The release gate's pinned digest of the home planet's artifact (`crates/bins/tests/home_artifact_pin.rs`).
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6ac9_f81d_0b21_0db3, 0xd3b9_c08d_8919_5424];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0xddad_33b9_72ca_7ebb, 0xfcb3_cec0_6fe7_11ba];
 
 /// Whole metres of a height in sixteenths, rounded half up: the artifact's own rounding.
 fn metres(sixteenths: i32) -> i32 {

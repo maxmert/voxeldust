@@ -2608,3 +2608,8 @@ minute), registered with the loading speed (DEFERRED, the loading screen entry).
 one red (`artifact_book::a_fine_tile_is_assembled_held_and_read_and_a_chunk_waits_for_it`) was older than this work — its
 far copies were built in the levels form without water, which the client stopped reading at slice W2; brought to the
 water form, all 409 pass. The pins next: the one-core golden record, then the artifact pin on all the cores.
+- 2026-10-20 — GENERATOR 28's PINS (ruling B122 item 3, at the commit): the one-core golden record solved the home planet
+in 11 968 s and pinned digest `[0xddad33b972ca7ebb, 0xfcb3cec06fe711ba]`, `HOME_IDENTITY_MEASURED` 0x37cf3d0a57f5fe0c,
+the sea at 3 660 m (generator 27: 3 666 m) and the ocean share 7 728 (7 724); the golden fields written again. The
+artifact pin then solved the home planet on all 14 cores in 2 796 s: the same digest, GREEN (the sea 3 660 m, the ocean
+77.28 %).

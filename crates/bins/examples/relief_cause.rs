@@ -41,7 +41,7 @@ use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
 use vd_terrain::solve::{FACIES_SEA, Schedule, Z_STEPS_PER_M, solve_full};
 
 /// The release gate's pinned digest of the home planet's artifact (`crates/bins/tests/home_artifact_pin.rs`).
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6ac9_f81d_0b21_0db3, 0xd3b9_c08d_8919_5424];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0xddad_33b9_72ca_7ebb, 0xfcb3_cec0_6fe7_11ba];
 /// A belt node: land whose uplift over the age is this much or more, metres (MEASURED on the first run: no land node
 /// rises 1 000 m, and 3.69 % of the land rises 100 m or more).
 const BELT_M: i32 = 100;

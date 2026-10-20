@@ -16,7 +16,7 @@ use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::par::Cores;
 
 /// The committed digest of the home planet's artifact on this build.
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x6ac9_f81d_0b21_0db3, 0xd3b9_c08d_8919_5424];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0xddad_33b9_72ca_7ebb, 0xfcb3_cec0_6fe7_11ba];
 
 #[test]
 fn the_home_planets_artifact_digests_to_its_committed_words() {
