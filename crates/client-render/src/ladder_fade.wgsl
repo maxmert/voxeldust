@@ -399,6 +399,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let sea = sea_waves(in.world_position.xyz, in.world_tangent.xyz, in.color.a, water_foot);
     pbr_input.N = sea.xyz;
     pbr_input.material.perceptual_roughness = sqrt(sqrt(sea.w));
+    // ★ THE ALPHA CARRIED THE DEPTH, NEVER A COVER (2026-10-20, the owner's pale squares on the far water): the water is
+    // opaque, so the mask (kept for the far edge's prepass) never reads the depth. MEASURED before: the mask's 0.5 dropped
+    // every water pixel less than half a metre deep, while the deep floor is cut from a 128th of a cell (0.125 m at rung
+    // 4) — a delta's flat front 0.2 m under the old lake drew neither its floor nor its water, and the sky showed through.
+    pbr_input.material.base_color.a = 1.0;
 #endif
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     var out: FragmentOutput;

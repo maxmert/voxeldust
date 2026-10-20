@@ -61,9 +61,11 @@ pub type LKey = (FineLevel, TileKey);
 /// the level's global cells.
 pub type RawTile = [Field; 3];
 
-/// ★ THE OUTLET RULE THE GAME'S FINE TILES ARE SOLVED UNDER (slice W2; ruling B105 Q1 (b), B114): every standing water's
-/// points under its level are outlets, each node's base level its own water, the rivers carved, the water map made.
-pub const GAME_RULE: OutletRule = OutletRule::StandingWater;
+/// ★ THE OUTLET RULE THE GAME'S FINE TILES ARE SOLVED UNDER (slice W2; rulings B105 Q1 (b), B114, B118, B122): THE DELTAS —
+/// the 128 m tiles are solved as the drowned basin (every lake's basin land that drains along the lake's own tree to its
+/// deepest node) on THE BEDROCK ([`Ctx::bed`]), and each lake's laid rock is laid back as deltas from its rivers' mouths;
+/// the water map floods that ground at the lake's level; the sea's points under its level are outlets, the rivers carved.
+pub const GAME_RULE: OutletRule = OutletRule::Deltas;
 
 /// A finish's nine raw tiles with their keys (NW … SE; none past a cube corner).
 type Block = Box<[Option<(TileKey, Arc<RawTile>)>; 9]>;
@@ -148,6 +150,10 @@ struct Ctx {
     body: BodyDefinition,
     lattice: MacroLattice,
     artifact: Arc<Artifact>,
+    /// ★ THE BEDROCK VIEW the 128 m solves and the lakes' bookkeeping read (ruling B122; `l1::bedrock_view`): the artifact
+    /// with each lake record's laid rock taken off its row, made once per world version under [`OutletRule::Deltas`]; the
+    /// artifact itself under every other rule. The reach and the 16 m level read the rows the client reads.
+    bed: Arc<Artifact>,
     /// The 128 m level's numbers and the 16 m level's.
     geoms: [LevelGeom; 2],
 }
@@ -184,7 +190,7 @@ fn far_rows_of(ctx: &Ctx, (level, key): LKey, levels: Option<&WaterLevels>) -> V
         return Vec::new();
     };
     let none = BTreeMap::new();
-    let waters = Waters::new(&ctx.lattice, &ctx.artifact, &none);
+    let waters = Waters::new(&ctx.lattice, &ctx.bed, &none);
     let keep = |n: u32| {
         waters.under_lake(n)
             || ctx
@@ -212,7 +218,7 @@ fn work(ctx: &Ctx, job: Job) -> Answer {
             let spill = solve_l1_levels(
                 &ctx.body,
                 &ctx.lattice,
-                &ctx.artifact,
+                &ctx.bed,
                 key,
                 GAME_RULE,
                 &levels,
@@ -226,7 +232,7 @@ fn work(ctx: &Ctx, job: Job) -> Answer {
             match solve_l1_levels(
                 &ctx.body,
                 &ctx.lattice,
-                &ctx.artifact,
+                &ctx.bed,
                 key,
                 GAME_RULE,
                 &none,
@@ -247,7 +253,7 @@ fn work(ctx: &Ctx, job: Job) -> Answer {
                 (FineLevel::L1, _) => solve_l1_levels(
                     &ctx.body,
                     &ctx.lattice,
-                    &ctx.artifact,
+                    &ctx.bed,
                     key,
                     GAME_RULE,
                     &levels,
@@ -485,10 +491,16 @@ impl FineWork {
         }
         let drawn = artifact.drawn_range_m(&lattice);
         let head_band = (drawn.0, drawn.1, artifact.sea_m);
+        let bed = if GAME_RULE == OutletRule::Deltas {
+            Arc::new(vd_terrain::fine::l1::bedrock_view(&artifact, &lattice))
+        } else {
+            Arc::clone(&artifact)
+        };
         let ctx = Arc::new(Ctx {
             body,
             lattice,
             artifact: Arc::clone(&artifact),
+            bed,
             geoms,
         });
         let meter = Arc::new(FineMeter::default());
@@ -657,7 +669,7 @@ impl FineWork {
         key: TileKey,
     ) -> Result<BTreeMap<u32, i32>, Vec<u32>> {
         let none = BTreeMap::new();
-        let waters = Waters::new(&self.ctx.lattice, &self.ctx.artifact, &none);
+        let waters = Waters::new(&self.ctx.lattice, &self.ctx.bed, &none);
         let lakes = Arc::clone(
             state
                 .tile_lakes
@@ -748,7 +760,7 @@ impl FineWork {
     /// lowest pass of each.
     fn passes_under(&self, levels: &BTreeMap<u32, i32>, spills: &[(u32, i32)]) -> Vec<(u32, i32)> {
         let none = BTreeMap::new();
-        let waters = Waters::new(&self.ctx.lattice, &self.ctx.artifact, &none);
+        let waters = Waters::new(&self.ctx.lattice, &self.ctx.bed, &none);
         let mut out: BTreeMap<u32, i32> = BTreeMap::new();
         for &(lake, pass) in spills {
             let named = levels
@@ -770,7 +782,7 @@ impl FineWork {
     /// −549 m — two tiles' solves then gave one valley two waters.
     fn others_of(&self, state: &mut State, tile: TileKey, lake: u32) -> BTreeMap<u32, i32> {
         let none = BTreeMap::new();
-        let waters = Waters::new(&self.ctx.lattice, &self.ctx.artifact, &none);
+        let waters = Waters::new(&self.ctx.lattice, &self.ctx.bed, &none);
         let lakes = Arc::clone(
             state
                 .tile_lakes
@@ -794,7 +806,7 @@ impl FineWork {
     /// far list. Levels only fall, so the lakes settle.
     fn reopen(&self, state: &mut State, lake: u32, pass: i32) {
         let none = BTreeMap::new();
-        let waters = Waters::new(&self.ctx.lattice, &self.ctx.artifact, &none);
+        let waters = Waters::new(&self.ctx.lattice, &self.ctx.bed, &none);
         let was = state.lake_level.remove(&lake);
         tracing::info!(
             lake,
@@ -944,7 +956,7 @@ impl FineWork {
             );
             return;
         }
-        let (lattice, artifact) = (&self.ctx.lattice, &self.ctx.artifact);
+        let (lattice, artifact) = (&self.ctx.lattice, &self.ctx.bed);
         let none = BTreeMap::new();
         let waters = Waters::new(lattice, artifact, &none);
         let mut keep = BTreeSet::new();

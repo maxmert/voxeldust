@@ -2468,3 +2468,143 @@ it; on the bench (`water-game … joint`) one more pass settles it: the green la
 the pass), its basin becomes land graded to the blue lake, no two levels touch. THE LOADING SPEED registered for the
 performance step (the owner's word): a tile 3–5 s on the solve threads, a view from height names thousands of tiles for
 their coarse copies, the whole home planet about 25 hours of solves (B86 item 6's advance calculation).
+- 2026-10-19 — THE LAKE FLOORS ON THE BENCH (the owner: "Lake floors"; one local commit before it, e7a5298): the drowned
+basin on today's laws (`lake_floor_design.md` §0.7) — its flat plate cured by a drainage tree inside each drowned lake
+(`l1::Waters::drowned_receiver`, `l1::drowned_exits`; bench only, the game's rule unchanged); from above every lake fills
+eroded valleys with branching shores (the pale films and the rounded blobs gone), the basin lake keeps −2 002 m; from 14 km
+the ridges between the arms are steep with evenly spaced coves. The owner's look owed before any world change.
+- 2026-10-19 — RULING B118 BUILT (FINE_VERSION 11; lint-clean, NOTHING RUN — no test): THE DROWNED BASIN IS THE GAME'S
+LAKE FLOOR (`fine_source::GAME_RULE = OutletRule::Drowned`): every lake's basin is land draining along the lake's tree to
+its deepest node (`l1::Waters::drowned_receiver`, `l1::drowned_exits`), the water map floods that eroded ground at the
+lake's level; the lakes together (B115, FINE_VERSION 10) unchanged. Deployed with stands over the basin for the side view.
+- 2026-10-19 — THE OWNER IN THE WINDOW ON B118 (three pictures): *"The shores and not deep places have those weird effects.
+Plus underwater nothing is rendered, that prevents going underwater in the future. Also, are we sure that we correctly
+applied the shores formation?"* THE CAUSES (read in the code): (1) SHALLOW WATER AS A TWO-TONE PATTERN — the sheet is
+opaque and coloured by each vertex's depth (B109); under a few metres of water the drowned land's 16 m relief (gullies and
+spurs a few metres high) turns into sharp teal and dark-blue patches; (2) UNDERWATER NOTHING — every ground triangle more
+than one extractor step under the water is cut where a sheet is drawn (`sea_sheet`'s `deep`; the step is the cell's
+128th, 8 mm at rung 0, so near the eye nearly the whole floor goes), the sheet has no underside and the water no medium
+seen from inside, so under the surface the eye sees the sky through the floor and the chunks' skirts stand as pillars;
+(3) THE SHORES' FORMATION — the drowned basin is a FLOODED RIVER LANDSCAPE (the land eroded down to the lake's deepest
+node, then flooded): a young reservoir's drowned valleys and steep spurs. A long-lived natural lake's shore follows three
+laws not applied: the rivers graded to the LAKE's level (Powell; B105 Q1 (b) had it, B118 does not), the floor filled by
+SEDIMENT with deltas at the river mouths, and the WAVES' shoreface (an equilibrium profile and smoothed headlands and bays,
+driven by the wind and the fetch). Also seen: a square of uniform deep water at the basin's pit (B118 interim (b4)).
+- 2026-10-19 — RULING B119's RESEARCH AND SHORT DESIGN (`docs/investigation/2026-10-19/lake_shore_laws_design.md`): two
+research agents (the laws with their formulas and calibration bodies; the landscape and terrain models' lake floors, deltas
+and shores). The base level at the lake (Powell 1875; Davis 1902), sediment focusing to a flat deep floor (Lehman 1975;
+Hilton 1985) and the wave-built shoreface (Bruun/Dean `h = A·y^(2/3)` to Hallermeier's closure depth, the waves from the
+wind and the fetch) are EQUILIBRIUM forms that need no age; deltas and the plan's smoothing need a lake's age the rows do
+not hold. Proposed: Part 1 the rivers end at the lake (a second land solve per lake tile), Part 2 the focused floor and the
+shoreface, Part 3 (deltas, smoothing) at the next generator change with a lake-age byte; the grain size by the river's
+Shields competence at the mouth. The owner's answers owed (Q1–Q3).
+- 2026-10-19 — RULING B121 BUILT (lint-clean; NOTHING RUN but the home planet's first solve on the bench): GENERATOR 28 /
+ARTIFACT KEY 29 / ARTIFACT_VERSION 10. The 8 km solve keeps each node's time its water rose (`MacroSolve::lake_since_yr`,
+marked at each pass's end: under its lake's water — its flood level over its ground, off the ocean — or forgotten) and the
+rock its basin fill laid in it since (`MacroSolve::laid`, each sweep's rise around the basin deposit, B51's own fill); the
+artifact keeps the records of the nodes under a lake at the present (`artifact::LakeRecord`: the age in kyr, the laid rock
+in quarter metres), stored as one row (`built_store::artifact_lakes_key`, family 13), folded into the digest, NEVER shipped
+in a tile (no SL6). The wind's Step 1 (B113) is solved first here. OWED: the pins (the home artifact digest, the golden rows)
+recorded again — a test run, the owner's word first (B74); the bench file reads its older form as "no lakes".
+- 2026-10-19 — GENERATOR 28's FIRST SOLVE READ (2 712.7 s on 12 cores; the sea 3 660 m, land 21.7 %; the world moved from
+generator 27 by the wind's Step 1: the land's height moved 47 m at the median). THE LAKE RECORD's DEFECT MEASURED: half the
+record's nodes (8 094 of 16 445) stood under less than 1 m of water, and 91 % of them read the youngest age (250 kyr) and
+no laid rock — the mark read `z_flood > z`, so every node the deposit had filled up to its lake's level counted as dry and
+forgot its age and its rock (the deposit is B51's fill: it fills each lake node up to the level and passes the rest on, so
+a filled node is the 8 km delta's top). CURED (no world change, the record only): a node is its lake's while it stands AT
+OR UNDER the level of the water body that covers its depression (`lakes::Lakes::body_level`, kept by the last budget of
+each pass in `MacroSolve::lake_level`), under the water or filled by rock up to it; the record holds those nodes. Solved
+again (2 650.8 s): the rows byte for byte the same, the record 16 445 → 23 353 nodes (6 908 filled up to the level); the
+nodes under less than 1 m of water now hold their rock (laid 0: 91 % → 28 %; median 13 m, 90th percentile 295 m); the
+ages' 10th / 50th / 90th percentiles 250 kyr / 563 kyr / 10.6 Myr. World file `/tmp/vd-fast/home28c.art`.
+- 2026-10-19 — PART 3 ON THE BENCH (ruling B121; `l1::OutletRule::Deltas`, `l1::bedrock_view`, `l1::delta_fans`,
+`l1::competence_m`; `planet_stand water-game … deltas`): the 128 m tile is solved as the drowned basin on THE BEDROCK
+(each record's laid rock taken off its row; a filled node given its lake's word), and the rock is laid back as DELTAS: each
+lake's rock in the domain shared among its rivers by their water, each share a delta from its mouth — its top at the
+lake's level (Gilbert 1885), its front at the angle its grain rests at (the Shields competence at the mouth by Soulsby &
+Whitehouse 1997: sand and gravel at 35°, mud at 10° by Adams et al. 2001), reaching only through the lake's water and
+over earlier deltas' tops; a share too small for the whole front fills the floor at its foot first; the rock a water has
+no room for runs on down the drainage to the next water. MEASURED at the old lake (face 3, tile 126,12; 10.6 Myr, 473 m
+laid on average; the record before the cure): the rock laid equals the records' to 0.001 %, every share finds room; from
+above today's spiky drowned valleys become smooth shores with flat delta plains filling the arms. FOUND ON THE WAY: the
+waves' forms need far less than the youngest lake's age (a barrier forms in months, Pyramid Lake; a wave-cut bench limits
+its own width, Anderson, Densmore & Ellis 1999), so the age decides the deltas only; the waves' shore is an equilibrium form.
+- 2026-10-20 — PART 3 ON THE CURED RECORD (`home28c.art`; four places, each under B118 and the deltas; `lake_shore_laws_design.md`
+§5): the old lake (face 3, tile 126,12) — smooth shores and delta plains in the arms, the lake at its 8 km word (−2 214 m)
+where B118 drains it to −2 429 m; the basin lake (3,95,23) — −955 m against B118's −1 516 m (the word −900 m), bays closed
+by plains; the deep lake (5,2,103) — the branching drowned valleys become flat valley floors at the lake's level; the
+shallow lake (1,40,88) — no water under either rule (its rows stand under 1 m of water, so the 128 m level reads them
+dry). The rock laid equals the records' to 0.001 % on every tile but three at the old lake (11–125 km³ with no room in the
+domain). THE PRICE MEASURED: the rock moves between 8 km nodes (at the old lake the record nodes' means a median 253 m
+under their rows, the plains up to 547 m over them; B118 ±220 m); the far rungs read the 128 m truth through the far
+lake list. New bench modes: `planet_stand lake-views`, `delta-views` (views from a square's dumps). The owner's look owed.
+- 2026-10-20 — RULING B122 BUILT (FINE_VERSION 12; clippy clean, NOTHING RUN — no test): THE DELTAS ARE THE GAME'S LAKE FLOOR
+(`fine_source::GAME_RULE = OutletRule::Deltas`; the planet's shard keeps `Ctx::bed`, the bedrock view made once per world
+version, for the 128 m solves, the lakes' levels and rounds and the far lake list; the reach and the 16 m level read the
+rows the client reads). DEPLOYED to slot 22: the cured generator-28 world stored for the home planet (`store-put`
+`home28c.art`); the other planets' generator-28 first solves run in their shards; three stands over the deltas
+(accounts 1000 the old lake, 1001 the deep lake, 1002 the basin lake; 300 m over the water, 10–22 km from the largest
+delta top, `/tmp/vd-w2-win/poses_p3.txt`). The home planet's far lakes: 1 378 lake tiles.
+- 2026-10-20 — THE OWNER IN THE WINDOW AT THE OLD LAKE: *"I stuck on the loading screen, it showed full load of chunks, but
+loading screen did not disappear"*. MEASURED (the client's own screen diagnostic): the screen waited 12 minutes on rung 7–10
+pieces still on the rough ground, their 128 m tiles (NegY/120…126/22–23, about 640 km out) not yet solved — the shard's
+tiles took 4–33 s each beside two far planets' generator-28 first solves (still running after 10 h). TWO DEFECTS: (1) THE
+BAR COUNTED A PIECE ON THE ROUGH GROUND AS DONE (it read every piece built while the screen waited for their tiles) —
+CURED: a piece counts only on its fine ground (`ChunkLane::is_rough`, the stand-ins too); (2) the home planet's shard ends
+when its last occupant leaves, so its lake work (1 218 reasons) stopped with the window — registered beside B86 item 6.
+- 2026-10-20 — THE OWNER AT THE DELTAS (five pictures): *"Shores are not believable, but the rest is ok"*. TWO CAUSES:
+(A) NEAR THE EYE, THE 16 m LEVEL — a delta's top stands exactly at its lake's level, the 16 m law's detail put half its
+cells under the water, the 16 m water spread through them only inside the 128 m column rule's band, and beside the band
+stood dry ground under the same level: walls of water along 128 m cell edges, rectangles and blue specks. MEASURED in the
+stored 16 m tiles at the pictures' node (face 3, node 1008,100): 988 wall sides (water beside dry ground under its level).
+CURED (16 m version 5; rulings W6 and W16): where the 128 m sample at a 16 m cell holds no water and a water stands beside
+it, the cell's ground is held at that water's level. (B) AT 128 m, THE DELTAS' CONES — every gully mouth (up to 14 593 a
+tile) built a cone about itself: rows of round scallops and small circles. A "shallowest water first" infill per node was
+TRIED and REFUTED (a drowned valley landscape's shallowest water lies over the drowned ridges: it built plains in the
+lakes' middles, rings of water around them, and kept the branching arms). CURED (FINE_VERSION 13): only a river the width
+law makes at least a cell wide builds a delta (none at the old lake); the narrower streams' rock is the lake's SHOREFACE,
+a band of one reach from every shore point, its top at the lake's level, its front at the lake's largest river's grain —
+the narrow arms fill, the shore runs smooth; the rock laid equals the records' (tile 126,12: 771.691 of 771.691 km³).
+- 2026-10-20 — THE SHORE'S EDGE (headless stills at the old lake stand on FINE_VERSION 13 / 16 m version 5): the band ran
+smooth in plan, but near the eye the shore stepped in right angles — the 16 m hold raised whole 128 m samples (8 × 8 cells
+of 16 m). CURED (16 m version 6): the hold reads the 128 m DRAWN ground at each 16 m cell (W6: the finer detail never
+carries the ground across the water relative to the coarser), so the 16 m shore follows the coarser ground's own crossing.
+TRIED AND REFUTED: a top rising inland at its streams' grade (the water-weighted mean of their last links, 0.13–0.40 on the
+old lake's mountain shore) — the band became an embankment up to 400 m over the lake; a sediment top stays at the level.
+KEPT (FINE_VERSION 14): each lake's grain from that mean grade (a river entering at a domain's rim had read a slope of
+nought, so mud). Seen and unexplained: pale flat strips on the open water from 300 m up — no island and no flat dry ground
+under them in the stored 128 m and 16 m tiles (a drawing matter, to measure).
+- 2026-10-20 — THE OWNER: *"There are still a lot of places like this - squared shores (maybe we need to restart server?)"*
+— a restart changed nothing (*"Nope exactly the same"*; the gateway had replaced its tiles at every shard start). MEASURED
+headless at the owner's picture place (account 1003, the capture's probe): the dark square regions hold NO ground pixel —
+the client draws WATER there and cuts the ground under it. CAUSE: the delta tops and the shoreface band stood EXACTLY at
+the lake's level, so a centimetre of rounding decided wet or dry and whole 128 m blocks of plain (the column rule's reach)
+became sheets of water, the 16 m dips blue specks in them. CURED: the tops stand at their river's BANKFULL stage over the
+level (the channel law's depth for its water; a delta plain is built by the floods that overtop its banks) — FINE_VERSION
+15 (the old lake: 0.2 m, its main stream small); the 16 m hold keeps a held cell at the 128 m drawn ground under it,
+never at the level (16 m version 7).
+- 2026-10-20 — B123's TWO DRAWING DEFECTS. (1) THE PALE FLAT STRIPS ON THE FAR WATER — MEASURED headless at the old lake
+stand (account 1000): 3 644 pale pixels 2.5–3.1 km out, in one rung-4 piece's footprint (NegY 8330,834); with the whole
+floor drawn (`VD_TERRAIN_SPLIT_DRAWS=2`) the strips showed the lake's floor, so the WATER was missing there. CAUSE: the
+draw's occlusion (ruling B89) judged a column by its ground's peak alone, so a rung-3 column of the lake whose floor stands
+deep under the water was hidden behind the near shore — its water with it; rung 4 draws no ground in rung 3's territory and
+the floor beyond is cut under its water, so the ray met nothing and the sky showed. A new measurement's switch
+(`VD_TERRAIN_NO_OCCLUSION=1`) took the strips away (0 pale pixels). CURED: ONE water rule (`chunks::WaterReader`, the
+sheet's own, moved out of `sea_sheet`), read at each column's span samples; the skyline and the occlusion judge a column
+by the higher of its ground's peak and that water (`ladder_view::column_water_top_m`); the wall a column raises stays its
+ground's floor. After: 0 pale pixels with the occlusion on; it still hides 835 pieces at the stand (1 209 before). TWO
+SMALLER DEFECTS FOUND ON THE WAY, CURED: the skirts were added after the cut deep floor, so the renderer's "leave out the
+last `floor_cut` triangles" dropped every skirt of a piece over water and drew as many deep-floor triangles (now the
+skirts go in before the cut floor); the water's material masked at alpha 0.5 while its alpha carries the depth, so every
+water pixel under half a metre deep was dropped (a hole over a cut floor at rungs 0–5, and the shore 0.5 m short
+elsewhere; now the water is opaque after the waves read the depth). TRIED AND REFUTED: the earlier try at the water top
+from the pyramid's block words (no change; the sheet reads the fine water map at these rungs). Picture:
+`~/Downloads/voxeldust_lakes_2026-10-19/part3/pale_strips_before_left_after_right.png`. (2) THE LOADING SCREEN — after the
+earlier two cures (the bar counts a piece done only on its fine ground; a far body whose world has not arrived is not
+waited for) the screen closed in all three window runs, after 1 min 51 s, 2 min 5 s and 3 min 36 s; the waits before it
+are pieces on the rough ground whose tiles have all landed, rebuilt at the lane's pace (17–40 such pieces for up to a
+minute), registered with the loading speed (DEFERRED, the loading screen entry).
+- 2026-10-20 — THE COMMIT'S CHECKS (the owner: *"Pins, then commit"*): `vd-client`'s unit tests 408 of 409 passed; the
+one red (`artifact_book::a_fine_tile_is_assembled_held_and_read_and_a_chunk_waits_for_it`) was older than this work — its
+far copies were built in the levels form without water, which the client stopped reading at slice W2; brought to the
+water form, all 409 pass. The pins next: the one-core golden record, then the artifact pin on all the cores.

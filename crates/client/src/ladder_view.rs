@@ -1443,6 +1443,48 @@ struct SpanEntry {
     span: ColumnSpan,
     generation: u64,
     provisional: bool,
+    /// The highest water over the column ([`column_water_top_m`]), a radius in metres.
+    water_top_m: Option<f64>,
+}
+
+/// Whether the water over a column can still come: a body with a sea whose artifact announces a coast mask not yet here.
+/// A span read then is provisional, so its water top is read again when the mask lands.
+fn water_waits(body: &BodyDefinition, artifact: Option<&ArtifactCache>) -> bool {
+    body.sea_m().is_some()
+        & artifact.is_some_and(|a| a.coast().is_none() & (a.head.coast_parts > 0))
+}
+
+/// ★ THE WATER OVER A COLUMN (2026-10-20, the owner's pale squares on the far water): the highest level the one water
+/// reader ([`crate::chunks::WaterReader`], the sheet's own rule) states at the column's sample grid — the span's own
+/// twenty-five places — as a radius in metres; `None` where no sample holds water or no water can be drawn yet. MEASURED
+/// before: the draw's occlusion (ruling B89) judged a column by its ground's peak alone, so a column of the old lake whose
+/// floor stands deep under the water was hidden behind the near shore 2.5–3.1 km out, its water with it, and the sky
+/// showed through as pale flat strips (3 644 pixels on the stand; none with the occlusion off).
+fn column_water_top_m(
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    col: Column,
+) -> Option<f64> {
+    let reader = crate::chunks::WaterReader::new(body, artifact?, col.rung)?;
+    let n_l = body.ladder().cells_per_edge(col.rung);
+    let last = n_l as i32 - 1;
+    let edge = CHUNK_EDGE as i32;
+    let step = (edge - 1) >> vd_terrain::digest::SAMPLE_GAPS_LOG2;
+    let (x0, y0) = (col.x * edge, col.y * edge);
+    let mut top: Option<f64> = None;
+    for i in 0..vd_terrain::digest::COLUMN_SAMPLES_PER_EDGE {
+        for j in 0..vd_terrain::digest::COLUMN_SAMPLES_PER_EDGE {
+            let dir = direction(
+                col.face,
+                face_param((x0 + i * step).min(last), n_l),
+                face_param((y0 + j * step).min(last), n_l),
+            );
+            if let Some(r) = reader.level_r(dir) {
+                top = Some(top.map_or(r, |t: f64| t.max(r)));
+            }
+        }
+    }
+    top
 }
 
 /// THE SPAN OF A COLUMN ON WHAT THE CLIENT HOLDS: the artifact's field at the column's rung when
@@ -1662,7 +1704,7 @@ impl Sweep<'_> {
         &mut self,
         col: Column,
         geo: &ColumnGeometry,
-        span: &ColumnSpan,
+        (span, top_m): (&ColumnSpan, f64),
         inside_horizon: bool,
         next: &mut Vec<Column>,
     ) {
@@ -1714,7 +1756,7 @@ impl Sweep<'_> {
             self.drawn.push(DrawnColumn {
                 col,
                 z: (span.lo, span.hi.min(top_z)),
-                peak_m: span.peak_m,
+                peak_m: top_m,
                 floor_m: span.sampled_low_m
                     - (span.peak_m - span.sampled_high_m)
                     - f64::from(cell_m(col.rung))
@@ -1779,13 +1821,16 @@ impl AskBound {
 }
 
 impl LadderView {
-    /// The surface span and peak of a column, read once per residency, stamped with this descent.
+    /// The surface span and peak of a column, read once per residency, stamped with this descent — and ★ THE COLUMN'S
+    /// DRAWN TOP (2026-10-20): the higher of its ground's peak and the water over it ([`column_water_top_m`]), what the
+    /// skyline and the draw's occlusion judge the column by (a lake's surface shows over a near shore where its floor does
+    /// not). The wall a column raises stays its ground's floor.
     fn span(
         &mut self,
         body: &BodyDefinition,
         artifact: Option<&ArtifactCache>,
         col: Column,
-    ) -> ColumnSpan {
+    ) -> (ColumnSpan, f64) {
         let generation = self.generation;
         let entry = self
             .spans
@@ -1795,7 +1840,8 @@ impl LadderView {
                 if e.provisional {
                     let (span, provisional) = column_span(body, artifact, col);
                     e.span = span;
-                    e.provisional = provisional;
+                    e.provisional = provisional | water_waits(body, artifact);
+                    e.water_top_m = column_water_top_m(body, artifact, col);
                 }
             })
             .or_insert_with(|| {
@@ -1803,11 +1849,15 @@ impl LadderView {
                 SpanEntry {
                     span,
                     generation,
-                    provisional,
+                    provisional: provisional | water_waits(body, artifact),
+                    water_top_m: column_water_top_m(body, artifact, col),
                 }
             });
         entry.generation = generation;
-        entry.span
+        let top_m = entry
+            .water_top_m
+            .map_or(entry.span.peak_m, |w| entry.span.peak_m.max(w));
+        (entry.span, top_m)
     }
 
     /// How many spans the view holds.
@@ -1961,7 +2011,7 @@ impl LadderView {
                     far.push(col);
                     continue;
                 }
-                let span = self.span(body, artifact, col);
+                let (span, top_m) = self.span(body, artifact, col);
                 // The guaranteed floor of the DRAWN ground: the lowest sample less the bounds the
                 // peak adds (the field's), less a cell (the extractor's mesh stands within a
                 // cell of the field) and the sink its mesh may stand under while a finer rung is
@@ -1974,7 +2024,7 @@ impl LadderView {
                         - crate::chunks::sink_m(body, col.rung);
                     skyline.raise(&geo.quad, floor);
                 }
-                sweep.descend(col, &geo, &span, true, &mut next);
+                sweep.descend(col, &geo, (&span, top_m), true, &mut next);
             }
             level = next;
         }
@@ -1991,13 +2041,13 @@ impl LadderView {
                 if geo.near > reach {
                     continue;
                 }
-                let span = self.span(body, artifact, col);
+                let (span, top_m) = self.span(body, artifact, col);
                 let margin = if self.kept.contains(&col) {
                     KEEP_MARGIN_RAD
                 } else {
                     WANT_MARGIN_RAD
                 };
-                let clears = skyline.clears(geo.phi, geo.az, geo.rho, span.peak_m, margin);
+                let clears = skyline.clears(geo.phi, geo.az, geo.rho, top_m, margin);
                 if clears {
                     cleared.insert(col);
                 } else {
@@ -2028,7 +2078,13 @@ impl LadderView {
                 // inside the horizon (between three quarters of it and the horizon) is ground the
                 // picture draws now, and its chunks are urgent, never "revealed" (refutation
                 // R4-1: the gap under-read it as a reveal) - while the skyline clears it.
-                sweep.descend(col, &geo, &span, clears & (geo.near <= horizon), &mut next);
+                sweep.descend(
+                    col,
+                    &geo,
+                    (&span, top_m),
+                    clears & (geo.near <= horizon),
+                    &mut next,
+                );
             }
             level = next;
         }
@@ -2109,7 +2165,7 @@ impl LadderView {
                     x: key.x.div_euclid(1 << step),
                     y: key.y.div_euclid(1 << step),
                 };
-                let peak_m = self.span(body, artifact, caster).peak_m;
+                let peak_m = self.span(body, artifact, caster).0.peak_m;
                 let low_m = if low_m == f64::MAX { peak_m } else { low_m };
                 // The caster's own nearest point, never nearer than the eye's height over the
                 // relief (a column wider than the eye is high reads under the eye by the disc).

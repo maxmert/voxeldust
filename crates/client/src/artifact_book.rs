@@ -1482,15 +1482,21 @@ mod tests {
         assert_eq!(rx.accept(other(3, &record)), ArtifactIngest::FineTile);
         // ★ FAR COPIES FIRST (B86 item 3): a tile's coarse levels alone are held; finer levels join them below; levels that
         // stop short of the coarsest a fresh tile needs are refused.
+        // The levels in slice W2's water form (every cell dry), the only form the client reads.
         let levels = |lo: u32, hi: u32| {
-            let whole = vd_terrain::fine::tile::encode_levels(
-                &(0..=vd_terrain::fine::read::MEAN_LEVELS)
-                    .map(|k| vec![100 + k as i32; (32usize >> k) * (32usize >> k)])
-                    .collect::<Vec<_>>(),
-                5,
-            )
-            .expect("codes");
-            vd_terrain::fine::tile::range_record(&whole, lo, hi).expect("a range")
+            let heights: Vec<Vec<i32>> = (0..=vd_terrain::fine::read::MEAN_LEVELS)
+                .map(|k| vec![100 + k as i32; (32usize >> k) * (32usize >> k)])
+                .collect();
+            let water = vd_terrain::fine::tile::WaterLevels {
+                level: heights
+                    .iter()
+                    .map(|l| vec![vd_terrain::fine::stitch::MISSING; l.len()])
+                    .collect(),
+                wet: heights.iter().map(|l| vec![0; l.len()]).collect(),
+                heights,
+            };
+            let whole = vd_terrain::fine::tile::encode_water_levels(&water, 5).expect("codes");
+            vd_terrain::fine::tile::water_range_record(&whole, lo, hi).expect("a range")
         };
         let far = |tx: u32, ty: u32, bytes: &[u8]| BulkMsg::FineTilePart {
             realm: wet,

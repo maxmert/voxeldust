@@ -72,3 +72,23 @@ THE CURE, written (bench only until the owner's word; FINE_VERSION 9): from a no
 lowest neighbour that also ends dry and stands lower, until none does — the hollow's PIT (`l1::Waters::dry_pit`). Only the pit
 keeps a dry end's playa; the hollow's other nodes are land whose base level is the pit's floor (Powell). Its pictures beside
 today's are OWED (the bench runs when the window's warm-up is done).
+
+### 0.7 The drowned basin on today's laws (2026-10-19, after FINE_VERSION 10; the owner: "Lake floors")
+
+MEASURED on the bench with the lakes together (`planet_stand water-game … drowned joint`), at the two pale places of the
+rung pictures:
+- **THE FLAT PLATE CURED.** Its cause: under the drowned rule a lake's only outlet inside the lake was its pit (its deepest
+  node), so a tile whose domain does not hold the pit filled its part of the basin to the domain's lowest rim point — 17
+  whole nodes at exactly −1 707.8 m, a kilometre over their own rows. THE CURE: a drowned lake's nodes drain along a tree
+  to the pit (a priority flood over the lake's nodes from the pit, the lowest pass of rows first, ties by index:
+  `l1::Waters::drowned_receiver`); the base level follows the tree to the pit's row, and a link that leaves the domain is
+  an exit like a river's, at its bed (`l1::drowned_exits`). After: 3 782 flat dry cells in the whole 3 × 3 ring (the plate's
+  region alone held about 67 700), the plate's place a set of drowned valleys.
+- **THE LEVELS.** The basin lake keeps its 8 km level, −2 002 m (today's rule −2 721.25 m), and covers about 6 times
+  today's cells in tile (96, 22); lake 4677496 stands at −1 362.25 m (today's −1 767 m).
+- **FROM ABOVE:** each lake fills the eroded valleys with branching shores, islands and peninsulas — no pale film, no
+  rounded or star-shaped blob.
+- **FROM 14 km:** the ridges between the water's arms rise steeply, their gullies evenly spaced, so a shore holds a row of
+  small coves (the "saw-tooth" of §0.5). Steady-state erosion spaces its valleys evenly (Perron, Kirchner & Dietrich 2009),
+  so flooded dissected land shows such rows; the owner's look decides whether they are believable.
+Pictures: `~/Downloads/voxeldust_lakes_2026-10-19/floors/`.

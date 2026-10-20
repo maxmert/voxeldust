@@ -177,6 +177,10 @@ pub struct TerrainConfig {
     /// every chunk and its probe twin with the engine's frustum culling OFF, so a hole that
     /// vanishes under it is a culling box, not a missing mesh. A measurement's switch.
     pub no_cull: bool,
+    /// ★ THE OCCLUSION ABLATION (2026-10-20, the pale squares on the far water): `VD_TERRAIN_NO_OCCLUSION=1` hides no
+    /// column the nearer ground hides (ruling B89), so a hole that vanishes under it is the occlusion's. A measurement's
+    /// switch.
+    pub no_occlusion: bool,
     /// ★ THE DRAW-COUNT ABLATIONS (ruling B22 step 2, before the draw batches are built):
     /// `VD_TERRAIN_SPLIT_DRAWS=<n>` draws every drawn chunk as `n` meshes, each with an `n`-th of
     /// its triangles and only the vertices they use (the same triangles and nearly the same
@@ -428,6 +432,7 @@ impl TerrainConfig {
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
             no_cull: std::env::var(NO_CULL_ENV).is_ok_and(|v| v == "1"),
+            no_occlusion: std::env::var("VD_TERRAIN_NO_OCCLUSION").is_ok_and(|v| v == "1"),
             split_draws: env_or(SPLIT_DRAWS_ENV, 1usize).max(1),
             thin: env_or(THIN_ENV, 1usize).max(1),
             covered: std::env::var(COVERED_ENV).is_ok_and(|v| v == "1"),
@@ -2598,7 +2603,9 @@ impl Terrain {
             if config.hide_rung.is_some_and(|h| key.rung >= h) {
                 continue;
             }
-            let hide = ladder.wanted.is_hidden(*key) & !shadow_wanted.contains_key(&(realm, *key));
+            let hide = ladder.wanted.is_hidden(*key)
+                & !shadow_wanted.contains_key(&(realm, *key))
+                & !config.no_occlusion;
             hidden += u64::from(hide);
             if hide == drawn.hidden {
                 continue;
@@ -3848,16 +3855,31 @@ pub(crate) fn sync_terrain(
         let (mut resident, mut wanted) = (0u64, 0u64);
         let mut whole = own_in_picture;
         for eb in &with_bodies {
+            // ★ A FAR BODY WHOSE WORLD HAS NOT ARRIVED IS NOT WAITED FOR (2026-10-20, the owner stuck on the screen at the
+            // old lake: the large planet and the desert world, 196 and 208 million km out, were still in their first solves
+            // on their shards after ten hours, so their ladders could never land): the screen waits for the eye's own realm
+            // and for every body whose world this client holds; one still solving on its shard comes in when its world
+            // lands (the far body's pop-in, registered with W18).
+            if picture_realm != Some(eb.realm) && terrain.lane.artifact(eb.realm).is_none() {
+                continue;
+            }
             let Some(ladder) = terrain.ladders.get(&eb.realm) else {
                 whole = false;
                 continue;
             };
             wanted += ladder.wanted.keys.len() as u64;
+            // ★ A PIECE IS DONE ON ITS FINE GROUND (2026-10-20, the owner: "it showed full load of chunks, but loading
+            // screen did not disappear"): a piece built on the rough ground or drawn as a stand-in still waits for its
+            // tiles, so the bar counts it as waiting, as the screen's own question does.
             resident += ladder
                 .wanted
                 .keys
                 .iter()
-                .filter(|k| terrain.lane.is_resident(eb.realm, **k))
+                .filter(|k| {
+                    terrain.lane.is_resident(eb.realm, **k)
+                        && !terrain.lane.is_rough(eb.realm, **k)
+                        && !terrain.drawn_stand_ins.contains(&(eb.realm, **k))
+                })
                 .count() as u64;
             whole &= ladder.landed
                 & (terrain.lane.rough_resident(eb.realm) == 0)
@@ -4223,7 +4245,8 @@ pub(crate) fn sync_terrain(
                 .ladders
                 .get(&realm)
                 .is_some_and(|l| l.wanted.is_hidden(key))
-            & !casts_itself;
+            & !casts_itself
+            & !terrain.config.no_occlusion;
         let (entity, twin) = match (empty, mesh) {
             (true, _) => (None, None),
             (false, mesh) => {

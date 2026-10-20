@@ -3520,15 +3520,26 @@ fn store_water(body: &BodyDefinition, lattice: &MacroLattice, args: &[String], p
         .split(',')
         .map(|x| x.trim().parse().expect("an integer"))
         .collect();
-    let version: u64 = args.get(3).expect("VERSION").parse().expect("a version");
+    // `VERSION` the fine version; `VERSION,L2` reads the 16 m level's tiles of that 16 m version (tile keys in nodes).
+    let versions: Vec<u64> = args
+        .get(3)
+        .expect("VERSION[,L2_VERSION]")
+        .split(',')
+        .map(|v| v.parse().expect("a version"))
+        .collect();
+    let level = if versions.len() > 1 { FineLevel::L2 } else { FineLevel::L1 };
     let out = args.get(4).expect("OUT_DIR");
     std::fs::create_dir_all(out).expect("the output directory");
     let input = {
         use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
         let d = artifact.digest();
-        fnv1a_u64(fnv1a_u64(fnv1a_u64(FNV_OFFSET, d[0]), d[1]), version)
+        let l1 = fnv1a_u64(fnv1a_u64(fnv1a_u64(FNV_OFFSET, d[0]), d[1]), versions[0]);
+        match versions.get(1) {
+            Some(&v2) => fnv1a_u64(l1, (u64::from(level.id()) << 32) | v2),
+            None => l1,
+        }
     };
-    let geom = LevelGeom::of(FineLevel::L1, body, lattice).expect("a level");
+    let geom = LevelGeom::of(level, body, lattice).expect("a level");
     let s0 = geom.side() as usize;
     let (tw, th) = ((r[3] - r[1] + 1) as usize, (r[4] - r[2] + 1) as usize);
     let (w, h) = (tw * s0, th * s0);
@@ -3538,7 +3549,7 @@ fn store_water(body: &BodyDefinition, lattice: &MacroLattice, args: &[String], p
             let at = FineAt {
                 form: FineForm::Finished,
                 input,
-                level: FineLevel::L1.id(),
+                level: level.id(),
                 face: r[0] as u8,
                 tx: tx as u32,
                 ty: ty as u32,
@@ -3547,7 +3558,7 @@ fn store_water(body: &BodyDefinition, lattice: &MacroLattice, args: &[String], p
                 println!("  tile ({}, {tx}, {ty}): none stored", r[0]);
                 continue;
             };
-            let Some((_, levels)) = decode_water_levels(&bytes, FineLevel::L1) else {
+            let Some((_, levels)) = decode_water_levels(&bytes, level) else {
                 println!(
                     "  tile ({}, {tx}, {ty}): a record that does not decode",
                     r[0]
@@ -3574,6 +3585,31 @@ fn store_water(body: &BodyDefinition, lattice: &MacroLattice, args: &[String], p
             println!("  tile ({}, {tx}, {ty}): {}", r[0], list.join(", "));
         }
     }
+    // The square kept for a closer reading: heights and water (quarter metres, `i32::MIN` where none), row by row.
+    for (name, v) in [("stored_z.i32", &z), ("stored_water.i32", &lv)] {
+        let bytes: Vec<u8> = v.iter().flat_map(|q| q.to_le_bytes()).collect();
+        std::fs::write(format!("{out}/{name}"), bytes).expect("the dump writes");
+    }
+    // ★ THE WALLS: water cells beside a dry cell whose ground stands under that water's level (four neighbours).
+    let mut walls = 0usize;
+    for c in 0..w * h {
+        if lv[c] == MISSING {
+            continue;
+        }
+        let (x, y) = (c % w, c / w);
+        for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+            if nx < w && ny < h {
+                let o = ny * w + nx;
+                if lv[o] == MISSING && z[o] != MISSING && z[o] < lv[c] {
+                    walls += 1;
+                }
+            }
+        }
+    }
+    println!(
+        "the walls: {walls} water-cell sides beside dry ground under the water's level, over {} water cells",
+        lv.iter().filter(|&&l| l != MISSING).count()
+    );
     let mut levels: Vec<i32> = lv.iter().copied().filter(|&l| l != MISSING).collect();
     levels.sort_unstable();
     levels.dedup();
@@ -3630,6 +3666,281 @@ fn store_water(body: &BodyDefinition, lattice: &MacroLattice, args: &[String], p
 /// (later rounds) until its level holds, each tile's final solve with its domain's lowered lakes named, the 3 × 3 ring
 /// finished with its water and stitched. Prints each lake's level and each finished tile's water levels; draws the square
 /// from above (`OUT_DIR/game_water.png`: each water level its own colour) and from 14 km up (`OUT_DIR/game_high.png`).
+/// ★ THE LAKE'S VIEWS FROM A BENCH SQUARE'S DUMPS (`water-game`'s `game_z.i32` and `game_water.i32`): the eye over the main
+/// lake's water near its middle, facing the nearest shore and the opposite way, 400 m and 4 km over the water.
+/// `planet_stand lake-views SEED DIR [DIR …]`; each DIR gets `over_*.png`, every one from the eye the LAST DIR chooses (the
+/// same square under several rules, seen from one place).
+fn lake_views(args: &[String]) {
+    let mut chosen: Option<(f64, f64, f64)> = None;
+    for dir in args[2..].iter().rev() {
+        let read = |name: &str| -> Vec<i32> {
+            std::fs::read(format!("{dir}/{name}"))
+                .expect("the dump reads")
+                .chunks_exact(4)
+                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        };
+        let (z, lv) = (read("game_z.i32"), read("game_water.i32"));
+        let w = (z.len() as f64).sqrt() as usize;
+        let missing = i32::MIN;
+        let mut by_level: BTreeMap<i32, (f64, f64, f64)> = BTreeMap::new();
+        for (c, &l) in lv.iter().enumerate() {
+            if l != missing {
+                let e = by_level.entry(l).or_insert((0.0, 0.0, 0.0));
+                e.0 += 1.0;
+                e.1 += (c % w) as f64;
+                e.2 += (c / w) as f64;
+            }
+        }
+        let Some((&level, &(count, sx, sy))) =
+            by_level.iter().max_by(|a, b| a.1.0.total_cmp(&b.1.0))
+        else {
+            println!("{dir}: no lake");
+            continue;
+        };
+        // The main lake's water cell farthest from every dry cell (a walk out from the dry cells, four neighbours).
+        let _ = (sx, sy);
+        let mut far = vec![u32::MAX; w * w];
+        let mut queue: std::collections::VecDeque<usize> = (0..w * w)
+            .filter(|&c| lv[c] == missing && z[c] != missing)
+            .collect();
+        for &c in &queue {
+            far[c] = 0;
+        }
+        while let Some(c) = queue.pop_front() {
+            let (x, y) = (c % w, c / w);
+            for (nx, ny) in [
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x, y.wrapping_sub(1)),
+                (x, y + 1),
+            ] {
+                if nx < w && ny < w && far[ny * w + nx] == u32::MAX {
+                    far[ny * w + nx] = far[c] + 1;
+                    queue.push_back(ny * w + nx);
+                }
+            }
+        }
+        let eye = (0..w * w)
+            .filter(|&c| lv[c] == level)
+            .max_by_key(|&c| (far[c], std::cmp::Reverse(c)))
+            .expect("a water cell");
+        let (mut ex, mut ey) = ((eye % w) as f64, (eye / w) as f64);
+        // The nearest dry cell, ring by ring.
+        let mut shore = None;
+        'rings: for r in 1..w as i64 {
+            for k in -r..=r {
+                for (dx, dy) in [(k, -r), (k, r), (-r, k), (r, k)] {
+                    let (x, y) = (ex as i64 + dx, ey as i64 + dy);
+                    if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < w {
+                        let c = y as usize * w + x as usize;
+                        if lv[c] == missing && z[c] != missing {
+                            shore = Some((x as f64, y as f64));
+                            break 'rings;
+                        }
+                    }
+                }
+            }
+        }
+        let Some((sx, sy)) = shore else {
+            continue;
+        };
+        let mut to_shore = (sx - ex).atan2(-(sy - ey)).to_degrees();
+        if let Some((x, y, h)) = chosen {
+            (ex, ey, to_shore) = (x, y, h);
+        } else {
+            chosen = Some((ex, ey, to_shore));
+        }
+        let at = ey as usize * w + ex as usize;
+        // The eye's height over the ground under it: over the water where water stands there, else over the ground.
+        let depth = if lv[at] == missing {
+            0.0
+        } else {
+            f64::from(lv[at] - z[at]) / 4.0
+        };
+        let zf: Vec<f32> = z
+            .iter()
+            .map(|&q| {
+                if q == missing {
+                    f32::NAN
+                } else {
+                    q as f32 / 4.0
+                }
+            })
+            .collect();
+        let wf: Vec<f32> = lv
+            .iter()
+            .map(|&q| {
+                if q == missing {
+                    f32::NAN
+                } else {
+                    q as f32 / 4.0
+                }
+            })
+            .collect();
+        for (name, over, heading, pitch) in [
+            ("over_low_shore", 400.0, to_shore, 4.0),
+            ("over_low_back", 400.0, to_shore + 180.0, 4.0),
+            ("over_high_shore", 4_000.0, to_shore, 25.0),
+            ("over_high_back", 4_000.0, to_shore + 180.0, 25.0),
+        ] {
+            let path = format!("{dir}/{name}.png");
+            render_view_water(
+                &zf,
+                Some(&wf),
+                w,
+                128.0,
+                (ex, ey),
+                depth + over,
+                heading,
+                pitch,
+                &path,
+            );
+        }
+        println!(
+            "{dir}: the main lake {:.1} m ({count} cells); the eye over ({ex}, {ey}), {depth:.0} m of water, the shore at ({sx}, {sy})",
+            f64::from(level) / 4.0
+        );
+    }
+}
+
+/// ★ THE LARGEST DELTA FROM THE SIDE (ruling B121 Part 3's bench): from one square solved under the drowned rule (`OLD`) and
+/// the deltas (`NEW`), the largest connected plain the deltas raised to a lake's level (more than 20 m over the old ground),
+/// seen from over the water 1.5 km up and 10 km out, the same eye in both. `planet_stand delta-views SEED OLD NEW`.
+fn delta_views(args: &[String]) {
+    let read = |dir: &str, name: &str| -> Vec<i32> {
+        std::fs::read(format!("{dir}/{name}"))
+            .expect("the dump reads")
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    };
+    let (old, new) = (&args[2], &args[3]);
+    let (z0, z1, lv1) = (
+        read(old, "game_z.i32"),
+        read(new, "game_z.i32"),
+        read(new, "game_water.i32"),
+    );
+    let w = (z1.len() as f64).sqrt() as usize;
+    let missing = i32::MIN;
+    // The raised plain: dry cells over 20 m higher than the old ground, beside a water at their own height.
+    let raised: Vec<bool> = (0..w * w)
+        .map(|c| z0[c] != missing && z1[c] != missing && lv1[c] == missing && z1[c] - z0[c] > 80)
+        .collect();
+    let mut comp = vec![u32::MAX; w * w];
+    let mut best: (usize, f64, f64) = (0, 0.0, 0.0);
+    let mut next = 0u32;
+    for s0 in 0..w * w {
+        if !raised[s0] || comp[s0] != u32::MAX {
+            continue;
+        }
+        let (mut n, mut sx, mut sy) = (0usize, 0.0, 0.0);
+        let mut stack = vec![s0];
+        comp[s0] = next;
+        while let Some(c) = stack.pop() {
+            n += 1;
+            sx += (c % w) as f64;
+            sy += (c / w) as f64;
+            let (x, y) = (c % w, c / w);
+            for (nx, ny) in [
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x, y.wrapping_sub(1)),
+                (x, y + 1),
+            ] {
+                if nx < w && ny < w && raised[ny * w + nx] && comp[ny * w + nx] == u32::MAX {
+                    comp[ny * w + nx] = next;
+                    stack.push(ny * w + nx);
+                }
+            }
+        }
+        if n > best.0 {
+            best = (n, sx / n as f64, sy / n as f64);
+        }
+        next += 1;
+    }
+    let (n, cx, cy) = best;
+    if n == 0 {
+        println!("no raised plain");
+        return;
+    }
+    // The water cell nearest the plain's middle, and the eye 10 km on past it, over the water.
+    let water = (0..w * w)
+        .filter(|&c| lv1[c] != missing)
+        .min_by(|&a, &b| {
+            let d = |c: usize| ((c % w) as f64 - cx).powi(2) + ((c / w) as f64 - cy).powi(2);
+            d(a).total_cmp(&d(b))
+        })
+        .expect("a water cell");
+    let (wx, wy) = ((water % w) as f64, (water / w) as f64);
+    let (dx, dy) = (wx - cx, wy - cy);
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let mut k = 78.0;
+    let (mut ex, mut ey) = (wx, wy);
+    while k > 0.0 {
+        let (x, y) = (wx + dx / len * k, wy + dy / len * k);
+        if x >= 0.0
+            && y >= 0.0
+            && (x as usize) < w
+            && (y as usize) < w
+            && lv1[y as usize * w + x as usize] != missing
+        {
+            (ex, ey) = (x, y);
+            break;
+        }
+        k -= 4.0;
+    }
+    let heading = (cx - ex).atan2(-(cy - ey)).to_degrees();
+    for (dir, z, lv) in [
+        (old.as_str(), &z0, read(old, "game_water.i32")),
+        (new.as_str(), &z1, lv1.clone()),
+    ] {
+        let at = ey as usize * w + ex as usize;
+        let depth = if lv[at] == missing {
+            0.0
+        } else {
+            f64::from(lv[at] - z[at]) / 4.0
+        };
+        let zf: Vec<f32> = z
+            .iter()
+            .map(|&q| {
+                if q == missing {
+                    f32::NAN
+                } else {
+                    q as f32 / 4.0
+                }
+            })
+            .collect();
+        let wf: Vec<f32> = lv
+            .iter()
+            .map(|&q| {
+                if q == missing {
+                    f32::NAN
+                } else {
+                    q as f32 / 4.0
+                }
+            })
+            .collect();
+        for (name, over, pitch) in [("delta_low", 400.0, 3.0), ("delta_high", 1_500.0, 9.0)] {
+            render_view_water(
+                &zf,
+                Some(&wf),
+                w,
+                128.0,
+                (ex, ey),
+                depth + over,
+                heading,
+                pitch,
+                &format!("{dir}/{name}.png"),
+            );
+        }
+    }
+    println!(
+        "the largest raised plain: {n} cells ({:.0} km²) about ({cx:.0}, {cy:.0}); the eye over ({ex:.0}, {ey:.0}) facing {heading:.0}°",
+        n as f64 * 128.0 * 128.0 / 1e6
+    );
+}
+
 fn water_game(body: &BodyDefinition, lattice: &MacroLattice, args: &[String]) {
     use vd_terrain::fine::finish::block_keys;
     use vd_terrain::fine::l1::{L1Tile, OutletRule, Waters, solve_l1_levels};
@@ -3637,6 +3948,29 @@ fn water_game(body: &BodyDefinition, lattice: &MacroLattice, args: &[String]) {
     use vd_terrain::fine::stitch::{Field, MISSING};
     use vd_terrain::fine::tile::{WET_FULL, finish_water, raw_field, water_planes};
     let a = vd_bins::artifact_file::read(args.get(2).expect("WORLD.art")).expect("the world reads");
+    // ★ THE DELTAS (ruling B121 Part 3): every step reads the bedrock view — the lakes' laid rock taken off their rows.
+    let a = if args.get(5).map(String::as_str) == Some("deltas") {
+        let bed = vd_terrain::fine::l1::bedrock_view(&a, lattice);
+        let lowered = a
+            .rows
+            .iter()
+            .zip(&bed.rows)
+            .filter(|(x, y)| x.z_m != y.z_m)
+            .count();
+        let joined = a
+            .rows
+            .iter()
+            .zip(&bed.rows)
+            .filter(|(x, y)| x.water_m != y.water_m)
+            .count();
+        println!(
+            "the bedrock view: {} records, {lowered} rows lowered, {joined} filled nodes given their lake's word",
+            a.lakes.len()
+        );
+        bed
+    } else {
+        a
+    };
     let t: Vec<i32> = args
         .get(3)
         .expect("F,TX,TY")
@@ -3646,10 +3980,11 @@ fn water_game(body: &BodyDefinition, lattice: &MacroLattice, args: &[String]) {
     let out = args.get(4).expect("OUT_DIR");
     std::fs::create_dir_all(out).expect("the output directory");
     // The rule: the game's, or `drowned` (the lake floor design's candidate).
-    let rule = if args.get(5).map(String::as_str) == Some("drowned") {
-        OutletRule::Drowned
-    } else {
-        OutletRule::StandingWater
+    let rule = match args.get(5).map(String::as_str) {
+        Some("drowned") => OutletRule::Drowned,
+        Some("graded") => OutletRule::Graded,
+        Some("deltas") => OutletRule::Deltas,
+        _ => OutletRule::StandingWater,
     };
     println!("the rule: {rule:?}");
     let key = TileKey {
@@ -3790,6 +4125,19 @@ fn water_game(body: &BodyDefinition, lattice: &MacroLattice, args: &[String]) {
             break;
         }
         fine.extend(lower);
+    }
+    for &k in &ring {
+        if let Some(t) = finals.get(&k).filter(|t| !t.deltas.is_empty()) {
+            println!(
+                "  deltas of tile ({}, {}): {} mouths, the records' rock {:.3} km³, laid {:.3} km³, no room for {:.3} km³",
+                k.tx,
+                k.ty,
+                t.deltas[0],
+                t.deltas[1] as f64 / 1e9,
+                t.deltas[2] as f64 / 1e9,
+                t.deltas[3] as f64 / 1e9
+            );
+        }
     }
     // Finish the ring, stitch it.
     let raws: BTreeMap<TileKey, (Field, Field, Field)> = finals
@@ -5684,6 +6032,31 @@ fn main() {
         Some("spill-lake") => spill_lake(&body, &lattice, &args),
         Some("store-water") => store_water(&body, &lattice, &args, planet),
         Some("water-game") => water_game(&body, &lattice, &args),
+        Some("lake-views") => lake_views(&args),
+        Some("delta-views") => delta_views(&args),
+        Some("cell-dir") => {
+            // ★ A BENCH SQUARE'S CELL AS A DIRECTION: `cell-dir PLANET F,TX,TY X,Y` — the unit direction of cell (X, Y) of the
+            // 3 × 3 square of 128 m tiles centred on tile (TX, TY) of face F (`water-game`'s dumps), for a window's stand.
+            let t: Vec<i32> = args[2].split(',').map(|v| v.parse().expect("an integer")).collect();
+            let c: Vec<i32> = args[3].split(',').map(|v| v.parse().expect("an integer")).collect();
+            let rung = vd_terrain::fine::l1::L1_RUNG;
+            let shift = vd_terrain::fine::l1::cells_per_node_shift(&body, &lattice, rung).expect("the rung nests");
+            let n_r = body.ladder().cells_per_edge(rung) as i32;
+            let tn = vd_terrain::fine::l1::TILE_NODES;
+            let (gi, gj) = ((t[1] - 1) * (tn << shift) + c[0], (t[2] - 1) * (tn << shift) + c[1]);
+            let cell = vd_terrain::fine::points::chart_cell(
+                vd_seed::bend::Face::from_index(t[0] as u8).expect("a face"),
+                gi,
+                gj,
+                n_r,
+            )
+            .expect("a cell");
+            let g = vd_recipe::bend::direction(i32::from(cell.face), cell.i, cell.j, vd_recipe::bend::inv_n_of(n_r as u32));
+            let s = (1u64 << 40) as f64;
+            let up = vd_core::glam::DVec3::new(g[0].raw() as f64 / s, g[1].raw() as f64 / s, g[2].raw() as f64 / s)
+                .normalize();
+            println!("{:?},{:?},{:?}", up.x, up.y, up.z);
+        }
         Some("l2") => {
             // ★ THE 16 m LEVEL ON THE BENCH (ruling B95): the 128 m tiles around the tile `F,TX,TY` solved and its middle
             // finished as the planet's shard does, then a 2 × 2 block of 16 m tiles at its middle under them, beside

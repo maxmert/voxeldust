@@ -555,6 +555,30 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     MEASURED: B91's macOS "utility" class kept every solve thread on the 4 efficiency cores beside 10 idle fast cores (a 128 m
     tile 17–32 s against 5.5 s on the bench); now the default class at its lowest relative priority (−15); B91's late
     frames measured again at the next window look.
+    ★ B118 (2026-10-19, the owner on the lake floor sheets: "Drowned basin, build it"): THE DROWNED BASIN IS THE GAME'S LAKE
+    FLOOR (FINE_VERSION 11) — every lake's basin is land draining along the lake's own tree to its deepest node, the water
+    floods that eroded ground at the lake's level (the pale films and the round blobs gone; amends B105 Q1 (b) for lakes);
+    the rows of coves judged in the window.
+    ★ B119 (2026-10-19, the owner on B118 in the window: "are we sure that we correctly applied the shores formation?" →
+    "Shores by law first"): A LAKE'S SHORE BY ITS LAWS FIRST — the rivers graded to the lake's level, the floor filled by
+    sediment with deltas, the waves' shoreface by the wind and the fetch; research, a short design with prices, the bench,
+    the owner's look; B118 stays until then; the underwater drawing and the shallow colours after it (client only).
+    ★ B120 (2026-10-19, every recommendation of the shore design): PARTS 1–2 NOW — the rivers end at the lake (the land over
+    a lake's level solved again with the shoreline its outlet at that level) and the floor by focusing with the wave-built
+    shoreface (Bruun/Dean to Hallermeier's closure depth; the wind and the fetch); the grain by the river's Shields
+    competence; both 128 m and 16 m; Part 3 (deltas, smoothing) with a lake-age byte at the next generator change; bench and
+    the owner's look first.
+    ★ B121 (2026-10-19, after the bench of Parts 1–2: "Lake age now"): THE NEXT GENERATOR CHANGE NOW — the 8 km solve records
+    each lake's age (when its water last rose; server-side), with B113's wind Step 1; every first solve again; then Part 3 on
+    the bench (deltas by the supply over the age, headlands by the waves' power over the age, the shoreface), the owner's
+    look, FINE_VERSION 12.
+    ★ B122 (2026-10-20, "Build deltas, then window" / "At the commit"): generator 28's lake record CURED (a node is its
+    lake's at or under its body's level; 23 353 records, the rows unchanged); THE DELTAS ARE THE GAME'S LAKE FLOOR (FINE_VERSION
+    12, amends B118: the 128 m tiles on the bedrock view, each river's rock a delta — its top at the lake's level, its front
+    at its grain's angle by the Shields competence); the window's look from the side next; the pins recorded at the commit.
+    ★ B123 (2026-10-20, "Yes, now it's better" / "Two defects, then commit"): THE SHORES' LOOK GIVEN (the tops at their
+    river's bankfull stage over the level, FINE_VERSION 15; the 16 m hold at the coarser ground, 16 m version 7); NEXT the
+    pale squares on the far water and the loading screen that never closes, THEN the commit with the pin tests.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

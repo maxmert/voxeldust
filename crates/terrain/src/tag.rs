@@ -365,7 +365,15 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 ///
 /// The column rule for a chunk with NO artifact does not move, so the SEED-ONLY golden tables stand.
 /// `ARTIFACT_VERSION` stays 9: the artifact's rows keep their form and only their values change.
-pub const GENERATOR_VERSION: u32 = 27;
+///
+/// ★ GENERATOR 28 (2026-10-19, ruling B121, with B113's queued Step 1):
+/// 1. **THE LAKES' AGE AND DEPOSIT** (`solve::MacroSolve::mark_lakes`, `lake_records_at`; `artifact::LakeRecord`): the
+///    solve keeps, for each node, when it joined its lake and the rock its basin fill laid in it since; the artifact keeps
+///    the records of the nodes in a lake at the present — under its water, or filled by rock up to its level, a delta's
+///    top (ARTIFACT_VERSION 10), for the 128 m level's deltas and shores.
+/// 2. **THE WIND'S STEP 1** (ruling B113): the cells' closure by the convecting tropics' gross moist stability and the
+///    equatorial deformation radius (`seasons::wind`), built 2026-10-18 and solved first here.
+pub const GENERATOR_VERSION: u32 = 28;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -391,14 +399,14 @@ pub fn declared_world_tag(universe_seed: u64) -> u64 {
 /// crust share and the capture, rulings B58–B62) and at 27 (generator 26 as pinned: a window preview
 /// of 2026-10-07 stored artifacts of an earlier generator-26 solve under 26, and the solve moved after
 /// it — the forearc's rock, four routings a pass, the climate and the sea every pass, rulings
-/// B63–B69) and at 28 (generator 27's seasons' climate, rulings B99–B102) the solve moved and every stored artifact solves
-/// again.
+/// B63–B69), at 28 (generator 27's seasons' climate, rulings B99–B102) and at 29 (generator 28: the lakes' record and the
+/// wind's Step 1, rulings B113 and B121) the solve moved and every stored artifact solves again.
 ///
 /// **Example.** Generator 22 removes the shore law. The home planet's shard boots, finds its
 /// artifact stored under key generation 21, opens it and ships it at once; the client builds the
 /// chunks again under the new column rule, and nobody waits 205 s for a solve that would change
 /// nothing.
-pub const ARTIFACT_KEY_GENERATION: u32 = 28;
+pub const ARTIFACT_KEY_GENERATION: u32 = 29;
 
 /// The key a realm's stored artifact is written and read under: the artifact's own generation
 /// ([`ARTIFACT_KEY_GENERATION`]) folded with the universe seed.
@@ -454,7 +462,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 27,
+            GENERATOR_VERSION, 28,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -464,12 +472,12 @@ mod tests {
         );
     }
 
-    /// The artifact's key is its own generation: at 28 the solve moved (generator 27's seasons' climate), so every
-    /// artifact stored under 27 is refused, and it folds the seed like the declared tag.
+    /// The artifact's key is its own generation: at 29 the solve moved (generator 28's lakes' record and the wind's Step 1),
+    /// so every artifact stored under 28 is refused, and it folds the seed like the declared tag.
     #[test]
     fn the_artifact_key_is_its_own_generation_folded_with_the_seed() {
         assert_eq!(
-            ARTIFACT_KEY_GENERATION, 28,
+            ARTIFACT_KEY_GENERATION, 29,
             "bump by hand when the home planet's artifact pin moves, and say so"
         );
         assert_eq!(artifact_world_tag(2298), ARTIFACT_KEY_PIN);
@@ -500,9 +508,10 @@ mod tests {
         assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 15_237_372_007_101_351_852;
+    /// Generator 28's declared tag (the fold of 28 with the home seed — the same word generation 28's artifact key was).
+    const DECLARED_PIN: u64 = 9_071_234_423_133_970_475;
 
-    /// The key the home world's artifacts are stored under: generation 28's (the solve moved at 28, generator 27's
-    /// seasons' climate, so no artifact of an older key opens).
-    const ARTIFACT_KEY_PIN: u64 = 9_071_234_423_133_970_475;
+    /// The key the home world's artifacts are stored under: generation 29's (the solve moved at 29, generator 28's lakes'
+    /// record and the wind's Step 1, so no artifact of an older key opens).
+    const ARTIFACT_KEY_PIN: u64 = 4_809_532_987_897_855_450;
 }

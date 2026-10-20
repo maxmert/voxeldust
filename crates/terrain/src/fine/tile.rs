@@ -44,16 +44,28 @@ pub const RAW_FORM: u8 = 1;
 /// into the game): only a dry hollow's pit keeps a dry end's playa; its other nodes drain to it (`l1::Waters::dry_pit`).
 /// 10 (ruling B115, the lakes together; the owner's window, a 595 m wall of water): a lake's rounds name the other lakes of
 /// each tile's domain at their settled levels, and a final solve whose raster shows a lake passing under its level reopens
-/// it (the planet's shard, `vd_bins::fine_source`), so no final raster holds a lake over its pass.
-pub const FINE_VERSION: u32 = 10;
+/// it (the planet's shard, `vd_bins::fine_source`), so no final raster holds a lake over its pass. 11 (ruling B118): THE
+/// DROWNED BASIN — every lake's basin is land draining along the lake's tree to its deepest node (`l1::drowned_exits`), the
+/// water floods that eroded ground at the lake's level. 12 (ruling B122): THE DELTAS — the 128 m tiles solved on the
+/// bedrock (`l1::bedrock_view`: each lake record's laid rock taken off its row), the rock laid back as deltas from the rivers'
+/// mouths (`l1::delta_fans`), the lakes' levels and the far lake list read on the same view. 13 (the owner at the deltas,
+/// 2026-10-20: *"Shores are not believable"*): only a river at least a cell wide builds a delta; the narrower streams' rock is
+/// the lake's shoreface, a band along its whole shore (no scallop a gully made). 14 (the same day): each lake's grain read
+/// from the water-weighted mean slope of its streams' last links (a river entering at the domain's rim had read a slope of
+/// nought, so mud). 15 (the owner: squared shores — sheets of water on the plain): a delta's top and the shoreface band
+/// stand at their river's bankfull stage over the lake's level, never a flat at the level itself.
+pub const FINE_VERSION: u32 = 15;
 
 /// ★ THE 16 m LEVEL'S OWN VERSION (ruling B95): every change to what a 16 m tile holds for the same 128 m ground is a
 /// new number; it folds into the 16 m level's input word only ([`input_word_of`]), so a 128 m tile stays valid across it.
 /// 2 (ruling B97, 2026-10-14): the 16 m law is the 128 m level's own law under tan 35° (the creep, the shared water and
 /// the pinned channels made walls and needles on steep ground). 3 (slice W2): the 16 m channels carved in the law's raster
 /// and the 16 m water map from the 128 m water. 4 (ruling B115): the 16 m water spreads only inside the 128 m water's
-/// reach (`water::raster_water_within`).
-pub const L2_VERSION: u32 = 4;
+/// reach (`water::raster_water_within`). 5 (2026-10-20, the owner at the deltas: walls of water and specks on the delta
+/// plains): a dry 128 m place's finer ground is held at the level of the water beside it (rulings W6 and W16). 6 (the same
+/// day, the held blocks' right-angle steps): the hold reads the 128 m drawn ground at each cell, not its sample's wet share.
+/// 7 (the owner: sheets of water on the plain): a held cell takes that coarser ground, never the level itself.
+pub const L2_VERSION: u32 = 7;
 
 /// ★ THE INPUT WORD of a stored tile of `level`: the 128 m level's is [`input_word`]; the 16 m level folds its own
 /// version and number in after it (a 16 m tile reads the finished 128 m ground, so it changes with it).

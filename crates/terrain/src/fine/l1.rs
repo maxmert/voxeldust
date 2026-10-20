@@ -593,11 +593,24 @@ pub enum OutletRule {
     /// points under its own row are its floor; the 8 km rivers' exits at the rim stay, each at its bed
     /// ([`exits_at_bed`]).
     StandingWater,
-    /// ★ THE DROWNED BASIN (the lake floor design, bench only): the solve takes every lake's basin as LAND that drains to the
-    /// lake's deepest node (its floor the basin's only outlet inside the lake, a dry end's rule), and the water map then
-    /// floods that eroded ground at the lake's level — so a shore follows the drowned valleys, never the smooth 8 km
-    /// surface's contour. The sea, the rivers' exits and the dry ends stay as [`OutletRule::StandingWater`] has them.
+    /// ★ THE DROWNED BASIN (the lake floor design; the game's rule since ruling B118): the solve takes every lake's basin
+    /// as LAND that drains along the lake's own tree to its deepest node ([`Waters::drowned_receiver`]; the pit's floor
+    /// the basin's outlet inside the lake, a dry end's rule; a link leaving the domain an exit, [`drowned_exits`]), and the
+    /// water map then floods that eroded ground at the lake's level — so a shore follows the drowned valleys, never the
+    /// smooth 8 km surface's contour. The sea, the rivers' exits and the dry ends stay as [`OutletRule::StandingWater`]
+    /// has them.
     Drowned,
+    /// ★ THE RIVERS END AT THE LAKE (ruling B120 Part 1, Powell 1875's base level; bench only until the owner's look): the
+    /// tile is solved as [`OutletRule::Drowned`] (the shape the basin had when its water rose), then every point under a
+    /// lake's level becomes an outlet AT that level — the water's surface is the base level — and the land over it is solved
+    /// again from there, so a river ends at the lake's surface and nothing is cut under it; the points under the water keep
+    /// the drowned basin's floor.
+    Graded,
+    /// ★ THE DELTAS (ruling B121 Part 3; Gilbert 1885; bench only until the owner's look): the tile is solved as
+    /// [`OutletRule::Drowned`] on THE BEDROCK — the artifact the caller hands in is [`bedrock_view`]'s, every lake record's
+    /// laid rock taken off its row — and the rock is then laid back by [`delta_fans`]: each river's share of its lake's
+    /// rock builds a delta from its mouth, its top at the lake's level, its front at the angle its grain rests at.
+    Deltas,
 }
 
 /// ★ THE STANDING WATERS A SOLVE READS (rulings B105 Q1 (b), B115): each macro node's standing water in quarter metres
@@ -615,6 +628,8 @@ pub struct Waters<'a> {
     drowned: bool,
     ids: std::cell::RefCell<BTreeMap<u32, u32>>,
     members: std::cell::RefCell<BTreeMap<u32, std::sync::Arc<Vec<u32>>>>,
+    /// [`OutletRule::Drowned`]'s drainage inside each lake: every lake node's receiver on the way to the lake's pit.
+    trees: std::cell::RefCell<BTreeMap<u32, std::sync::Arc<BTreeMap<u32, u32>>>>,
 }
 
 impl<'a> Waters<'a> {
@@ -633,6 +648,7 @@ impl<'a> Waters<'a> {
             drowned: false,
             ids: std::cell::RefCell::new(BTreeMap::new()),
             members: std::cell::RefCell::new(BTreeMap::new()),
+            trees: std::cell::RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -652,6 +668,55 @@ impl<'a> Waters<'a> {
             .copied()
             .min_by_key(|&k| (self.artifact.rows[k as usize].z_m, k))
             .unwrap_or(lake)
+    }
+
+    /// ★ THE DROWNED BASIN'S DRAINAGE (the lake floor design, ruling B118; 2026-10-19): under [`OutletRule::Drowned`] a
+    /// lake node's receiver on the way to its lake's pit — the pit's own is [`NO_NODE`] — so a tile whose domain does not
+    /// hold the pit still drains its part of the basin, through an exit at its rim as a river leaves a tile; `None` for a
+    /// node no lake holds, or outside the drowned view. The tree is a priority flood from the pit over the lake's nodes
+    /// (each node reached through the lowest pass of rows, ties by the node's index): one answer on every host. MEASURED
+    /// before (the drowned bench at 3,96,22): a tile without the pit filled its part of the basin lake to its domain's
+    /// lowest rim point — a dry plate of 17 nodes at exactly −1 707.8 m, a kilometre over their own rows.
+    #[must_use]
+    pub fn drowned_receiver(&self, node: u32) -> Option<u32> {
+        if !self.drowned || !self.under_lake(node) {
+            return None;
+        }
+        let lake = self.lake_of(node);
+        let tree = {
+            let cached = self.trees.borrow().get(&lake).map(std::sync::Arc::clone);
+            match cached {
+                Some(t) => t,
+                None => {
+                    let t = std::sync::Arc::new(self.lake_tree(lake));
+                    self.trees
+                        .borrow_mut()
+                        .insert(lake, std::sync::Arc::clone(&t));
+                    t
+                }
+            }
+        };
+        tree.get(&node).copied()
+    }
+
+    /// The drowned lake's tree: each of its nodes' receiver toward its pit ([`Self::drowned_receiver`]).
+    fn lake_tree(&self, lake: u32) -> BTreeMap<u32, u32> {
+        use std::cmp::Reverse;
+        let nodes = self.lake_nodes(lake);
+        let members: std::collections::BTreeSet<u32> = nodes.iter().copied().collect();
+        let z = |k: u32| self.artifact.rows[k as usize].z_m;
+        let pit = self.lake_pit(lake);
+        let mut receiver = BTreeMap::from([(pit, NO_NODE)]);
+        let mut heap = std::collections::BinaryHeap::from([Reverse((z(pit), pit))]);
+        while let Some(Reverse((h, k))) = heap.pop() {
+            for m in self.lattice.neighbours(k) {
+                if m != NO_NODE && members.contains(&m) && !receiver.contains_key(&m) {
+                    receiver.insert(m, k);
+                    heap.push(Reverse((h.max(z(m)), m)));
+                }
+            }
+        }
+        receiver
     }
 
     /// Whether the node is the sea's.
@@ -866,6 +931,490 @@ impl<'a> Waters<'a> {
     }
 }
 
+/// ★ THE POINTS UNDER EACH LAKE (ruling B120 Part 1): each lake's level spread from its own nodes' points under it through
+/// the points of `h` under it (the sea keeps its own rule); `None` for a point no lake's water reaches.
+fn lake_points(d: &Domain, waters: &Waters<'_>, h: &[Gf]) -> Vec<Option<Gf>> {
+    let n = d.dirs.len();
+    let level: Vec<Option<Gf>> = d
+        .nodes
+        .iter()
+        .map(|&k| waters.under_lake(k).then(|| waters.level_m(k)).flatten())
+        .collect();
+    let mut out: Vec<Option<Gf>> = vec![None; n];
+    let mut levels: Vec<Gf> = level.iter().flatten().copied().collect();
+    levels.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    levels.dedup();
+    for lam in levels {
+        let mut stack: Vec<usize> = (0..n)
+            .filter(|&p| level[d.pnode[p] as usize] == Some(lam) && h[p] < lam && out[p].is_none())
+            .collect();
+        for &p in &stack {
+            out[p] = Some(lam);
+        }
+        while let Some(p) = stack.pop() {
+            for &q in d.graph.neighbours(p) {
+                let q = q as usize;
+                if out[q].is_none() && h[q] < lam {
+                    out[q] = Some(lam);
+                    stack.push(q);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// ★ THE LAND GRADED TO ITS LAKES AND THE FLOOR FILLED (ruling B120 Parts 1–2; Powell 1875, Davis 1899/1902; the infill
+/// of Einsele & Hinderer 1997, focused to the deep floor, Lehman 1975 / Hilton 1985): after the drowned basin's rounds,
+/// every point under a lake becomes an outlet at the lake's level and the rounds run again, so the land's rivers end at the
+/// water's surface (a node with a point under the water is not held). The floor under the water is then the drowned basin's
+/// FILLED from the bottom up to the 8 km world's own floor — its smooth surface `smooth`, the rows the 8 km solve leaves
+/// after it kept each closed basin's rock (B51) — and never over the lake's level: a canyon under the water fills to a flat
+/// floor, a rock spur over the fill stays a shoal or an island, and a drowned arm outside the 8 km lake fills to the
+/// lake's level, a flat valley floor (Davis: as the delta builds forward the valley floor aggrades). Returns the rounds run.
+fn graded_rounds(
+    d: &mut Domain,
+    waters: &Waters<'_>,
+    smooth: &[Gf],
+    u: &mut [Gf],
+    h: &mut [Gf],
+) -> usize {
+    let under = lake_points(d, waters, h);
+    let floor: Vec<Gf> = h.to_vec();
+    for (p, lam) in under.iter().enumerate() {
+        if let Some(lam) = *lam {
+            d.outlet[p] = true;
+            d.base[p] = lam;
+            h[p] = lam;
+            d.held[d.pnode[p] as usize] = false;
+        }
+    }
+    let rounds = fine_rounds(d, u, h);
+    for (p, lam) in under.iter().enumerate() {
+        if let Some(lam) = *lam {
+            h[p] = floor[p].greater(smooth[p]).lesser(lam);
+        }
+    }
+    rounds
+}
+
+/// ★ THE BEDROCK UNDER THE LAKES (ruling B121 Part 3; bench only until the owner's look): `artifact` with each lake
+/// record's laid rock taken off its node's row (the 8 km solve laid it there since the node joined its lake), and each
+/// record node the rock had filled up to its lake's level — dry on the rows — given the word of the lake beside it, so the
+/// 128 m solve shapes the basin the water rose into and [`delta_fans`] lays the rock back by its own law. A record node
+/// no lake word reaches keeps its row.
+///
+/// **Example.** A node of an old lake that 310 m of rock filled up to the lake's level reads 310 m lower and under the
+/// lake; its neighbour, still 40 m under the water with 12 m laid, reads 52 m under it.
+#[must_use]
+pub fn bedrock_view(artifact: &Artifact, lattice: &MacroLattice) -> Artifact {
+    use crate::artifact::DRY_M;
+    let mut bed = artifact.clone();
+    let none = BTreeMap::new();
+    let waters = Waters::new(lattice, artifact, &none);
+    // Each record node's lake word: its own where the rows hold it under its water, else that of a record node beside
+    // it, walked out from the lakes' own nodes in node order.
+    let mut queue: std::collections::VecDeque<u32> = artifact
+        .lakes
+        .iter()
+        .map(|r| r.node)
+        .filter(|&k| waters.under_lake(k))
+        .collect();
+    let mut word: BTreeMap<u32, i16> = queue
+        .iter()
+        .map(|&k| (k, artifact.rows[k as usize].water_m))
+        .collect();
+    while let Some(k) = queue.pop_front() {
+        let w = word[&k];
+        for m in lattice.neighbours(k) {
+            if m != NO_NODE
+                && !word.contains_key(&m)
+                && artifact.rows[m as usize].water_m == DRY_M
+                && artifact.lake_record(m).is_some()
+            {
+                word.insert(m, w);
+                queue.push_back(m);
+            }
+        }
+    }
+    for r in &artifact.lakes {
+        let Some(&w) = word.get(&r.node) else {
+            continue;
+        };
+        let row = &mut bed.rows[r.node as usize];
+        let laid_m = i16::try_from(r.laid_q.div_ceil(4)).unwrap_or(i16::MAX);
+        row.z_m = row.z_m.saturating_sub(laid_m);
+        row.water_m = w;
+    }
+    bed
+}
+
+/// The submerged weight of a quartz grain over the water's, `s − 1` (quartz 2 650 kg/m³ in water 1 000 kg/m³; the
+/// calibration body Earth's rivers, whose sand and gravel are mostly quartz).
+const SUBMERGED_RATIO: f64 = 1.65;
+/// The water's kinematic viscosity, m²/s (water at 20 °C).
+const WATER_NU_M2_S: f64 = 1.0e-6;
+/// The grain the water holds in cohesion under, metres: the sand–silt limit of Wentworth 1922 (63 µm).
+const MUD_LIMIT_M: f64 = 63.0e-6;
+/// ★ THE FRONT OF A MUD DELTA (Adams, Schlager & Anselmetti 2001, *Sedimentology* 48:661–679, the Swiss lakes' deltas):
+/// fine-grained delta slopes stand at about 10°, `tan 10°`; sand and gravel rest at their angle of repose
+/// ([`TAN_REPOSE`], the talus law's 35°).
+const TAN_MUD_FRONT: f64 = 0.1763;
+
+/// ★ THE RIVER'S COMPETENCE (Shields 1936; the critical Shields number by Soulsby & Whitehouse 1997,
+/// `θcr = 0.30/(1 + 1.2·D*) + 0.055·(1 − e^(−0.020·D*))`, `D* = D·((s−1)·g/ν²)^(1/3)`): the largest grain, metres, a
+/// river of mean depth `depth_m` on the slope `slope` moves — the fixed point of `D = depth·S / ((s−1)·θcr(D))` (the bed's
+/// shear `ρ·g·depth·S` over the grain's submerged weight). The body's gravity `g_m_s2` enters through `D*`.
+///
+/// **Example.** A river 2 m deep on a slope of 1/1 000 moves gravel of about 2.7 cm; the same river on a slope of
+/// 1/100 000 moves fine sand of about 0.16 mm — a mountain stream into the basin lake brings gravel, a lowland river sand.
+#[must_use]
+pub fn competence_m(depth_m: Gf, slope: Gf, g_m_s2: Gf) -> Gf {
+    let s1 = Gf::from_f64(SUBMERGED_RATIO);
+    let push = depth_m * slope / s1;
+    if push <= Gf::ZERO {
+        return Gf::ZERO;
+    }
+    let scale = (s1 * g_m_s2 / Gf::from_f64(WATER_NU_M2_S * WATER_NU_M2_S))
+        .powf_fine(Gf::ONE / Gf::from_i64(3));
+    let mut d = push / Gf::from_f64(0.045);
+    for _ in 0..40 {
+        let star = d * scale;
+        let theta = Gf::from_f64(0.30) / (Gf::ONE + Gf::from_f64(1.2) * star)
+            + Gf::from_f64(0.055) * (Gf::ONE - (Gf::from_f64(-0.020) * star).exp_fine());
+        d = push / theta;
+    }
+    d
+}
+
+/// ★ THE DELTAS AND THE SHOREFACE (ruling B121 Part 3; Gilbert 1885, USGS 5th Annual Report; the owner at the old lake,
+/// 2026-10-20: *"Shores are not believable"* — a cone about each of thousands of gully mouths made rows of round scallops
+/// and small circles): on `h`, the bedrock the drowned basin solved, each lake's rock in the domain — every domain node's
+/// record, its laid metres over its area, the rock the 8 km solve laid in the lake since the node joined it — is shared
+/// among the streams that enter that lake by their water (the stated closure: one sediment load per cubic metre of water).
+/// - A RIVER — a stream whose channel the width law makes at least a cell wide (`river::channel_width_mm`, the carve's own
+///   rule for a drawn channel) — builds a delta from its mouth: its top at the lake's level, its front falling from the
+///   top's edge at the angle its grain rests at ([`competence_m`]: sand and gravel at [`TAN_REPOSE`], mud at
+///   [`TAN_MUD_FRONT`]), the top's reach along the water found so the delta holds its share; a share too small for the
+///   whole front from the mouth fills the floor at its foot first; rock a water has no room for runs on down the
+///   drainage to the next water (the 8 km deposit's own rule).
+/// - The narrower streams' rock, joined per lake, is the SHOREFACE the waves spread along the whole shore (longshore
+///   drift; the waves' forms need far less than any lake's age): a band of the same reach from every shore point, its
+///   top at the lake's level, its front at the angle of the lake's largest river's grain — so narrow arms fill and the
+///   shore runs smooth, never a scallop a gully made.
+///
+/// The walks go only through the lake's water and over earlier tops, so nothing crosses a headland. Returns the readings:
+/// the rivers' mouths, the rock the records hold, the rock laid, the rock no water had room for (cubic metres).
+///
+/// **Example.** A river that carries a quarter of the old lake's water in the domain and is 300 m wide builds a quarter of
+/// the lake's rock into a plain up the drowned arm it enters, its front at 35° where it brings sand or gravel; the gullies
+/// on the arm's sides lay theirs along the whole shore, a band that closes the arm's narrow side bays.
+#[allow(clippy::too_many_lines)]
+fn delta_fans(
+    d: &Domain,
+    waters: &Waters<'_>,
+    artifact: &Artifact,
+    lattice: &MacroLattice,
+    gravity_mm_s2: u32,
+    h: &mut [Gf],
+) -> Vec<u64> {
+    use std::cmp::Reverse;
+    let n = d.dirs.len();
+    let under = lake_points(d, waters, h);
+    let key = |lam: Gf| lam.to_bits();
+    let thousand = Gf::from_i64(1_000);
+    let to_mm = |v: Gf| (v * thousand).to_i64_floor();
+    let adj = |x: usize| d.graph.start[x] as usize..d.graph.start[x + 1] as usize;
+    // Each lake's rock in the domain, by its level.
+    let mut rock: BTreeMap<u64, Gf> = BTreeMap::new();
+    for &k in &d.nodes {
+        if let (true, Some(lam), Some(r)) = (
+            waters.under_lake(k),
+            waters.level_m(k),
+            artifact.lake_record(k),
+        ) {
+            *rock.entry(key(lam)).or_insert(Gf::ZERO) +=
+                Gf::from_i64(i64::from(r.laid_q)) / Gf::from_i64(4) * Gf::from_i64(lattice.area_m2(k) as i64);
+        }
+    }
+    // The drainage on the bedrock and each mouth: a point over its lake's level whose receiver stands under it.
+    let (t, _) = network(d, h);
+    let q = accumulate(&t, &d.water);
+    let mut best_donor = vec![NONE; n];
+    for x in 0..n {
+        let r = t.recv[x];
+        if r != NONE && (best_donor[r as usize] == NONE || q[x] > q[best_donor[r as usize] as usize]) {
+            best_donor[r as usize] = x as u32;
+        }
+    }
+    let g_m_s2 = Gf::from_i64(i64::from(gravity_mm_s2)) / thousand;
+    let cell_m = Gf::from_i64(1i64 << L1_RUNG);
+    let class_of = |qx: Gf| crate::artifact::log2_class((qx * thousand).to_i64_floor().max(0) as u64, 2);
+    let slope_of_mouth = |x: usize| -> Gf {
+        let donor = best_donor[x];
+        if donor == NONE {
+            Gf::ZERO
+        } else {
+            ((h[donor as usize] - h[x]) / t.link[donor as usize]).greater(Gf::ZERO)
+        }
+    };
+    let tan_of_mouth = |x: usize| -> Gf {
+        let slope = slope_of_mouth(x);
+        let depth = Gf::from_i64(crate::river::channel_depth_mm(class_of(q[x]), gravity_mm_s2)) / thousand;
+        if competence_m(depth, slope, g_m_s2) >= Gf::from_f64(MUD_LIMIT_M) {
+            Gf::from_f64(TAN_REPOSE)
+        } else {
+            Gf::from_f64(TAN_MUD_FRONT)
+        }
+    };
+    let mut mouths: Vec<(usize, u64)> = Vec::new();
+    let mut inflow: BTreeMap<u64, Gf> = BTreeMap::new();
+    let mut main_river: BTreeMap<u64, usize> = BTreeMap::new();
+    for x in 0..n {
+        let r = t.recv[x];
+        if under[x].is_some() || r == NONE {
+            continue;
+        }
+        if let Some(lam) = under[r as usize]
+            && h[x] >= lam
+            && q[x] > Gf::ZERO
+        {
+            mouths.push((x, key(lam)));
+            *inflow.entry(key(lam)).or_insert(Gf::ZERO) += q[x];
+            // The lake's main river: its largest stream with a slope read here (a river entering at the domain's rim has
+            // no point upstream in it).
+            if best_donor[x] != NONE {
+                let e = main_river.entry(key(lam)).or_insert(x);
+                if q[x] > q[*e] {
+                    *e = x;
+                }
+            }
+        }
+    }
+    let mut laid_total = Gf::ZERO;
+    for v in rock.values() {
+        laid_total += *v;
+    }
+    // Each lake's grain: what its main river's depth moves on the water-weighted mean slope of its streams' last links read
+    // here (one link is a weak reading: a flat one reads nought).
+    let mut grade_of: BTreeMap<u64, Gf> = BTreeMap::new();
+    {
+        let mut sums: BTreeMap<u64, (Gf, Gf)> = BTreeMap::new();
+        for &(x, lk) in &mouths {
+            if best_donor[x] != NONE {
+                let e = sums.entry(lk).or_insert((Gf::ZERO, Gf::ZERO));
+                e.0 += q[x] * slope_of_mouth(x);
+                e.1 += q[x];
+            }
+        }
+        for (lk, (sq, qq)) in sums {
+            if qq > Gf::ZERO {
+                grade_of.insert(lk, sq / qq);
+            }
+        }
+    }
+    // ★ THE TOP'S STAGE: a delta's top is built by the floods that overtop its river's banks, so it stands at the river's
+    // BANKFULL depth over the lake's level (the channel law's depth for its water, `river::channel_depth_mm`); the
+    // shoreface band at the lake's main river's. Never a flat at the level itself (MEASURED 2026-10-20 at the old lake: a
+    // top at the level turned whole 128 m blocks of plain into sheets of water by a centimetre's rounding).
+    let stage_of = |x: usize| -> Gf { Gf::from_i64(crate::river::channel_depth_mm(class_of(q[x]), gravity_mm_s2)) / thousand };
+    let lake_tan = |lk: u64| -> Gf {
+        let (Some(&x), Some(&grade)) = (main_river.get(&lk), grade_of.get(&lk)) else {
+            return Gf::from_f64(TAN_REPOSE);
+        };
+        let depth = Gf::from_i64(crate::river::channel_depth_mm(class_of(q[x]), gravity_mm_s2)) / thousand;
+        if competence_m(depth, grade, g_m_s2) >= Gf::from_f64(MUD_LIMIT_M) {
+            Gf::from_f64(TAN_REPOSE)
+        } else {
+            Gf::from_f64(TAN_MUD_FRONT)
+        }
+    };
+    // The rivers' shares (a delta each) and the narrower streams' (the lake's shoreface).
+    let mut fans: Vec<(Gf, Vec<usize>, u64, Gf, Gf, bool)> = Vec::new();
+    let mut shoreface: BTreeMap<u64, Gf> = BTreeMap::new();
+    let mut river_mouths = 0u64;
+    for &(x, lk) in &mouths {
+        let Some(&total) = rock.get(&lk) else { continue };
+        let share = total * q[x] / inflow[&lk];
+        if share <= Gf::ZERO {
+            continue;
+        }
+        let wide = Gf::from_i64(crate::river::channel_width_mm(class_of(q[x]), gravity_mm_s2)) / thousand >= cell_m;
+        if wide {
+            river_mouths += 1;
+            // A river entering at the domain's rim, or on a flat last link, reads its lake's grain.
+            let tan = if best_donor[x] == NONE || slope_of_mouth(x) <= Gf::ZERO {
+                lake_tan(lk)
+            } else {
+                tan_of_mouth(x)
+            };
+            fans.push((share, vec![x], lk, tan, stage_of(x), true));
+        } else {
+            *shoreface.entry(lk).or_insert(Gf::ZERO) += share;
+        }
+    }
+    fans.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("finite").then(a.1.cmp(&b.1)));
+    // Each lake's shoreface: from every water point beside its shore.
+    for (&lk, &share) in &shoreface {
+        let lam = Gf::from_bits(lk);
+        let shore: Vec<usize> = (0..n)
+            .filter(|&x| {
+                under[x] == Some(lam)
+                    && h[x] < lam
+                    && adj(x).any(|a| {
+                        let y = d.graph.adj[a] as usize;
+                        under[y].is_none() || h[y] >= lam
+                    })
+            })
+            .collect();
+        let tan = lake_tan(lk);
+        let stage = main_river.get(&lk).map_or(Gf::ZERO, |&x| stage_of(x));
+        if !shore.is_empty() {
+            fans.push((share, shore, lk, tan, stage, false));
+        }
+    }
+    // The deepest ground under each lake, for how far past its top a front can reach.
+    let mut deepest: BTreeMap<u64, Gf> = BTreeMap::new();
+    for x in 0..n {
+        if let Some(lam) = under[x] {
+            let e = deepest.entry(key(lam)).or_insert(h[x]);
+            *e = e.lesser(h[x]);
+        }
+    }
+    let (mut placed, mut over) = (Gf::ZERO, Gf::ZERO);
+    let mut dist = vec![Gf::from_f64(f64::INFINITY); n];
+    let mut work: std::collections::VecDeque<(Gf, Vec<usize>, u64, Gf, Gf, bool)> = fans.into_iter().collect();
+    while let Some((share, starts, lk, tan, stage, from_land)) = work.pop_front() {
+        let lam = Gf::from_bits(lk);
+        // The walk goes through the lake's water and over the tops earlier deltas laid in it; the rock fills only what
+        // stands under the level.
+        let through = |x: usize| under[x] == Some(lam);
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut touched: Vec<usize> = Vec::new();
+        for &start in &starts {
+            if from_land {
+                for a in adj(start) {
+                    let y = d.graph.adj[a] as usize;
+                    if through(y) && d.geom.len[a] < dist[y] {
+                        dist[y] = d.geom.len[a];
+                        touched.push(y);
+                        heap.push(Reverse((to_mm(dist[y]), y)));
+                    }
+                }
+            } else if dist[start] > Gf::ZERO {
+                dist[start] = Gf::ZERO;
+                touched.push(start);
+                heap.push(Reverse((0, start)));
+            }
+        }
+        // The water's points in order of their distance along the water from the start, until the ones passed would hold
+        // the share filled to the top and the front's foot is passed too.
+        let mut seen: Vec<usize> = Vec::new();
+        let mut room = Gf::ZERO;
+        let mut stop = Gf::from_f64(f64::INFINITY);
+        while let Some(Reverse((mm, x))) = heap.pop() {
+            if mm != to_mm(dist[x]) {
+                continue;
+            }
+            if dist[x] > stop {
+                break;
+            }
+            seen.push(x);
+            room += d.geom.area[x] * (lam - h[x]).greater(Gf::ZERO);
+            if room >= share && stop.to_f64().is_infinite() {
+                stop = dist[x] + (lam - deepest[&lk]) / tan;
+            }
+            for a in adj(x) {
+                let y = d.graph.adj[a] as usize;
+                let dy = dist[x] + d.geom.len[a];
+                if through(y) && dy < dist[y] {
+                    dist[y] = dy;
+                    touched.push(y);
+                    heap.push(Reverse((to_mm(dy), y)));
+                }
+            }
+        }
+        // The rock's surface: under the top and its front (`edge` the top's reach along the water), and under the level
+        // `fill` it has risen to from the floor — a share too small for the whole front from the start rolls down it and
+        // fills the floor at its foot first.
+        let crest = lam + stage;
+        let top = |x: usize, edge: Gf| crest - tan * (dist[x] - edge).greater(Gf::ZERO);
+        let held = |edge: Gf, fill: Gf| {
+            let mut v = Gf::ZERO;
+            for &x in &seen {
+                v += d.geom.area[x] * (top(x, edge).lesser(fill) - h[x]).greater(Gf::ZERO);
+            }
+            v
+        };
+        let (edge, fill) = if room < share {
+            (Gf::from_f64(f64::INFINITY), crest)
+        } else if held(Gf::ZERO, lam) >= share {
+            let (mut lo, mut hi) = (deepest[&lk], lam);
+            for _ in 0..48 {
+                let mid = (lo + hi) * Gf::HALF;
+                if held(Gf::ZERO, mid) < share {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            (Gf::ZERO, hi)
+        } else {
+            let (mut lo, mut hi) = (Gf::ZERO, seen.last().map_or(Gf::ZERO, |&x| dist[x]));
+            for _ in 0..48 {
+                let mid = (lo + hi) * Gf::HALF;
+                if held(mid, crest) < share {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            (hi, crest)
+        };
+        for &x in &seen {
+            let z = if edge.to_f64().is_infinite() {
+                crest
+            } else {
+                top(x, edge).lesser(fill)
+            };
+            if z > h[x] {
+                placed += d.geom.area[x] * (z - h[x]);
+                h[x] = z;
+            }
+        }
+        // ★ THE ROCK NO ROOM HELD GOES ON (the 8 km deposit's own rule: what a full hollow cannot hold runs on to its
+        // receiver): from a river's mouth down the drainage to the first water of the lake this walk did not reach, where
+        // it builds the next delta; a shoreface that fills its lake's water, or none found in the domain, counts it over.
+        if room < share {
+            let mut next = None;
+            if from_land {
+                let mut y = starts[0];
+                for _ in 0..n {
+                    let r = t.recv[y];
+                    if r == NONE {
+                        break;
+                    }
+                    y = r as usize;
+                    if through(y) && h[y] < lam && dist[y].to_f64().is_infinite() {
+                        next = Some(y);
+                        break;
+                    }
+                }
+            }
+            match next {
+                Some(y) => work.push_front((share - room, vec![y], lk, tan, stage, false)),
+                None => over += share - room,
+            }
+        }
+        // Every point the walk touched forgets its distance for the next delta.
+        for x in touched {
+            dist[x] = Gf::from_f64(f64::INFINITY);
+        }
+    }
+    let m3 = |v: Gf| v.to_i64_floor().max(0) as u64;
+    vec![river_mouths, m3(laid_total), m3(placed), m3(over)]
+}
+
 /// The outlets of `d` under [`OutletRule::StandingWater`]: the domain's own river exits at any height, each standing
 /// water's spread through the points under its level, and each dry end node's floor; a domain none of them reaches drains
 /// at its lowest point.
@@ -958,6 +1507,15 @@ fn base_level(waters: &Waters<'_>, node: u32) -> Gf {
         if let Some(base) = waters.lowered_base_m(k) {
             return base;
         }
+        // A drowned lake's node drains along its lake's tree to the pit, whose row is its base.
+        match waters.drowned_receiver(k) {
+            Some(NO_NODE) => return Gf::from_i32(i32::from(r.z_m) - sea),
+            Some(next) => {
+                k = next;
+                continue;
+            }
+            None => {}
+        }
         if r.receiver_facies & RECEIVER_NONE != 0 {
             // A dry hollow's node drains to its pit: the pit's floor is its base (its own row where it is the pit).
             let pit = if waters.ends_dry(k) {
@@ -1009,6 +1567,47 @@ pub const HACK_H: f64 = 1.67;
 /// The channel head's drainage area, m² (Whipple & Tucker 1999; their calibration bodies the King Range and Taiwan's
 /// Central Range). Its distance from the divide, `xc = (A_c/ka)^(1/h)` by Hack's law, is about 316 m.
 pub const CHANNEL_HEAD_AREA_M2: f64 = 1.0e5;
+
+/// ★ THE DROWNED BASIN'S EXITS (the lake floor design, ruling B118; 2026-10-19): under [`OutletRule::Drowned`] each link of
+/// a lake's tree ([`Waters::drowned_receiver`]) that leaves the domain is an exit like an 8 km river's — its node's point
+/// nearest the link's midpoint, at the lower of the two rows (then lowered to its bed by [`exits_at_bed`]).
+pub fn drowned_exits(
+    d: &mut Domain,
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    waters: &Waters<'_>,
+) {
+    let sea = i32::from(artifact.sea_m);
+    let local: std::collections::BTreeSet<u32> = d.nodes.iter().copied().collect();
+    for li in 0..d.nodes.len() {
+        let k = d.nodes[li];
+        let Some(r) = waters
+            .drowned_receiver(k)
+            .filter(|&r| r != NO_NODE && !local.contains(&r))
+        else {
+            continue;
+        };
+        let (da, db) = (lattice.direction(k), lattice.direction(r));
+        let mid = vd_recipe::bend::normalise([
+            (da[0] + db[0]) >> 1,
+            (da[1] + db[1]) >> 1,
+            (da[2] + db[2]) >> 1,
+        ]);
+        let nearest = d
+            .pnode
+            .iter()
+            .enumerate()
+            .filter(|&(_, &n)| n as usize == li)
+            .min_by_key(|&(p, _)| (chord2(&d.dirs[p], &mid), p))
+            .map(|(p, _)| p);
+        if let Some(p) = nearest {
+            d.outlet[p] = true;
+            d.base[p] =
+                d.node_z[li].lesser(Gf::from_i32(i32::from(artifact.rows[r as usize].z_m) - sea));
+            d.exits.push((p as u32, li as u32, r));
+        }
+    }
+}
 
 /// ★ THE CHANNEL'S DEPTH UNDER THE CELL'S MEAN, metres: [`exits_at_bed`]'s `HI·Rf` for a link of `len_m` whose rows drop
 /// by `slope` and whose node drains `area_m2`; nought where the law gives no relief (no drop, no area, or a link no longer
@@ -1104,6 +1703,9 @@ pub struct L1Tile {
     /// lowest path to lower ground stays under its level, and that path's height (quarter metres over the sea); empty under
     /// [`OutletRule::Today`].
     pub spills: Vec<(u32, i32)>,
+    /// ★ [`OutletRule::Deltas`]' readings (the bench): the mouths, the rock the domain's lake records hold, the rock the
+    /// deltas laid, the rock no water in the domain had room for (cubic metres); empty under every other rule.
+    pub deltas: Vec<u64>,
 }
 
 /// ★ THE 128 m TILE `key`: the coarse start, the rounds, the raster. `None` where a domain cannot be built.
@@ -1117,7 +1719,7 @@ pub fn solve_l1(
     solve_l1_with(body, lattice, artifact, key, OutletRule::Today)
 }
 
-/// [`solve_l1`] under the outlet `rule` (the game's is [`OutletRule::StandingWater`]), every lake at its 8 km word.
+/// [`solve_l1`] under the outlet `rule` (the game's is [`OutletRule::Drowned`], ruling B118), every lake at its 8 km word.
 #[must_use]
 pub fn solve_l1_with(
     body: &BodyDefinition,
@@ -1144,12 +1746,15 @@ pub fn solve_l1_levels(
     let waters = Waters::new(lattice, artifact, levels);
     // The solve's view: the same waters, or under [`OutletRule::Drowned`] every lake's basin as land.
     let solving = match rule {
-        OutletRule::Drowned => Waters::new(lattice, artifact, levels).drowned(),
+        OutletRule::Drowned | OutletRule::Graded | OutletRule::Deltas => {
+            Waters::new(lattice, artifact, levels).drowned()
+        }
         _ => Waters::new(lattice, artifact, levels),
     };
     let wet_rule = rule != OutletRule::Today;
     let mut coarse = domain(body, lattice, artifact, COARSE_RUNG, key)?;
     if wet_rule {
+        drowned_exits(&mut coarse, lattice, artifact, &solving);
         coarse.outlet = standing_water_outlets(&coarse, &solving);
         base_levels(&mut coarse, &solving);
         exits_at_bed(&mut coarse, body, lattice, artifact);
@@ -1158,7 +1763,10 @@ pub fn solve_l1_levels(
     let mut hc = coarse.base.clone();
     let mut passes = rounds(&coarse, &mut uc, &mut hc, COARSE_ROUNDS);
     let mut fine = domain(body, lattice, artifact, L1_RUNG, key)?;
+    // The smooth 8 km surface at each fine point (the domain's own base before any outlet changes it).
+    let smooth = fine.base.clone();
     if wet_rule {
+        drowned_exits(&mut fine, lattice, artifact, &solving);
         fine.outlet = standing_water_outlets(&fine, &solving);
         base_levels(&mut fine, &solving);
         exits_at_bed(&mut fine, body, lattice, artifact);
@@ -1184,6 +1792,21 @@ pub fn solve_l1_levels(
         }
     }
     passes.push(fine_rounds(&fine, &mut u, &mut h));
+    if rule == OutletRule::Graded {
+        passes.push(graded_rounds(&mut fine, &waters, &smooth, &mut u, &mut h));
+    }
+    let deltas = if rule == OutletRule::Deltas {
+        delta_fans(
+            &fine,
+            &waters,
+            artifact,
+            lattice,
+            body.facts().gravity_mm_s2,
+            &mut h,
+        )
+    } else {
+        Vec::new()
+    };
     // THE RIVER CARVE (the bench's rule only until the world move): the channels of the settled drainage.
     let carve = wet_rule.then(|| {
         let (t, _) = network(&fine, &h);
@@ -1281,6 +1904,7 @@ pub fn solve_l1_levels(
         side,
         water,
         spills,
+        deltas,
         quarters,
         points: fine.dirs.len(),
         passes,

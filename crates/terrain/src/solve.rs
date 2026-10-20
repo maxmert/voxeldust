@@ -52,6 +52,8 @@ pub const Z_STEPS_PER_M: i32 = 16;
 const Z_SHIFT: u32 = LENGTH_BITS + 3;
 /// The water level's word for a node that holds no standing water.
 pub const DRY: i32 = i32::MIN;
+/// ★ A node no water stands on (ruling B121's lake age): its [`MacroSolve::lake_since_yr`].
+pub const NOT_UNDER_WATER: u64 = u64::MAX;
 /// The rain's floor, in millimetres a year: a hyper-arid basin still carries a river's SHAPE, and a
 /// logarithm cannot hold zero (03 §4.5). Until the climate lands (C3), this is the rain everywhere.
 pub const P_MIN_MM_YR: u32 = 1;
@@ -727,6 +729,15 @@ pub struct MacroSolve {
     /// ★ THE SINKS the shipped row takes off (plan step 2b): at each spill node of a spilling lake,
     /// the water its lake hands the air, sorted by node; empty while the passes run.
     pub spill_sinks: Vec<(u32, u64)>,
+    /// ★ THE LAKES' AGE AND DEPOSIT (ruling B121): each node's time it joined its lake (years since the body formed, the
+    /// start of the pass after the one it was last out of every lake at; [`NOT_UNDER_WATER`] while out), the rock laid in
+    /// it since, net of what the sweeps cut there (sixteenths), each node's lake level by the last budget
+    /// ([`crate::lakes::Lakes::body_level`]: at or under it, the node is the lake's — filled by rock up to it too),
+    /// and the records the full solve makes of them at the present ([`MacroSolve::lake_records_at`]).
+    pub lake_since_yr: Vec<u64>,
+    pub lake_level: Vec<i32>,
+    pub laid: Vec<u32>,
+    pub lake_records: Vec<crate::artifact::LakeRecord>,
     /// ★ THE BODY'S SEED ([`BodyDefinition::seed`]): the flat step's split reads its own stream
     /// under it (plan step 2b, question 4).
     pub seed: u64,
@@ -1095,6 +1106,10 @@ impl MacroSolve {
             water_z: vec![DRY; n],
             ocean: vec![false; n],
             spill_sinks: Vec::new(),
+            lake_since_yr: vec![NOT_UNDER_WATER; n],
+            lake_level: vec![DRY; n],
+            laid: vec![0; n],
+            lake_records: Vec::new(),
             seed: body.seed(),
             dir,
             cores: crate::par::Cores::default(),
@@ -1882,6 +1897,12 @@ impl MacroSolve {
         });
         self.cut_now = crate::par::map(n, threads, |i| cell(i).map_or(self.cut_now[i], |c| c.cut));
         drop(swept);
+        // ★ THE ROCK LAID (ruling B121), NET: this sweep's cut takes rock off what a node holds since its water rose, then
+        // the fill below adds its rise. MEASURED before (generator 28's first bench solve): counted gross, a node the sweeps
+        // cut and filled again held 46.7 km "laid" in 10.6 Myr.
+        let laid = std::mem::take(&mut self.laid);
+        self.laid = crate::par::map(n, threads, |i| laid[i].saturating_sub(self.cut_now[i]));
+        let before = self.z.clone();
         let deposit = match basins {
             Some(b) => self.deposit_basins_grouped(b, groups),
             None => {
@@ -1893,6 +1914,10 @@ impl MacroSolve {
                 }
             }
         };
+        let laid = std::mem::take(&mut self.laid);
+        self.laid = crate::par::map(n, threads, |i| {
+            laid[i].saturating_add(self.z[i].saturating_sub(before[i]).max(0) as u32)
+        });
         report.filled = deposit.filled;
         report.total_fill = deposit.total_fill;
         report.rock_to_sea = deposit.to_sea;
@@ -1902,6 +1927,52 @@ impl MacroSolve {
         report.rock_remainder = deposit.remainder;
         report.rock_refused = deposit.refused;
         report
+    }
+
+    /// ★ THE LAKES AT A PASS'S END (ruling B121): a node in its lake by the pass's last budget — under the water or filled
+    /// by rock up to its level ([`MacroSolve::lake_level`]; cured 2026-10-19: the rule read `z_flood > z` and so forgot
+    /// every node the deposit had filled to the level, half the home planet's lake nodes) — keeps the time it joined
+    /// (`rose_yr`, this pass's start, where it was out at the last end); a node out of every lake forgets that time and
+    /// the rock laid in it.
+    pub fn mark_lakes(&mut self, rose_yr: u64) {
+        for i in 0..self.node_count() {
+            if self.lake_level[i] != DRY {
+                if self.lake_since_yr[i] == NOT_UNDER_WATER {
+                    self.lake_since_yr[i] = rose_yr;
+                }
+            } else {
+                self.lake_since_yr[i] = NOT_UNDER_WATER;
+                self.laid[i] = 0;
+            }
+        }
+    }
+
+    /// ★ THE LAKES' RECORD AT THE PRESENT (ruling B121): each node the final budget leaves in a lake (`lakes`: under its
+    /// water, or filled by rock up to its level — a delta's top), its age from the time it joined to `present_yr` —
+    /// `last_pass_yr` where it joined only with the final budget — and the rock laid in it since, in quarter metres.
+    #[must_use]
+    pub fn lake_records_at(
+        &self,
+        lakes: &crate::lakes::Lakes,
+        present_yr: u64,
+        last_pass_yr: u64,
+    ) -> Vec<crate::artifact::LakeRecord> {
+        (0..self.node_count())
+            .filter(|&i| lakes.body_level(i, self.z[i]) != DRY)
+            .map(|i| {
+                let since = self.lake_since_yr[i];
+                let age = if since == NOT_UNDER_WATER {
+                    last_pass_yr
+                } else {
+                    present_yr.saturating_sub(since)
+                };
+                crate::artifact::LakeRecord {
+                    node: i as u32,
+                    age_kyr: u32::try_from(age.div_ceil(1_000)).unwrap_or(u32::MAX),
+                    laid_q: self.laid[i] / 4,
+                }
+            })
+            .collect()
     }
 
     /// ★ THE DEPOSIT (2026-09-22, the lake census: 16 % of the land was lake against Earth's 3.7 %,
@@ -1995,6 +2066,7 @@ impl MacroSolve {
         self.pit = crate::par::map(n, threads, |i| {
             [(level(i) - self.z[i]) as u32, self.pit[i]][usize::from(self.ocean[i])]
         });
+        self.lake_level = crate::par::map(n, threads, |i| lakes.body_level(i, self.z[i]));
         let mut slot_of_dep = vec![u32::MAX; lakes.deps.len()];
         let mut bodies: Vec<(Vec<u32>, i32)> = Vec::new();
         let mut dep_of_body: Vec<usize> = Vec::new();
@@ -3334,6 +3406,8 @@ pub fn solve_full_shipped_on(
             report.rebounds.push(state.rebound(alpha_m));
         }
         state.cut_now = cut_sum;
+        // ★ THE LAKES' AGE (ruling B121): a node under its water keeps when its water rose; a node out of it forgets.
+        state.mark_lakes(t0);
         // ★ THE PEAK LAW after every pass, on the height that stands.
         let (collapsed, left) = state.peak_law(peak_cap);
         report.peak.0 += collapsed;
@@ -3419,6 +3493,8 @@ pub fn solve_full_shipped_on(
         report.sea_before_lakes = (state.sea_z != fix.first).then_some(fix.first);
         report.lakes = lakes.report.clone();
         state.water_z.clone_from(&lakes.water);
+        state.lake_records =
+            state.lake_records_at(&lakes, schedule.age_yr, times[passes] - times[passes - 1]);
         final_climate = climate;
         budget = Some(lakes);
     }

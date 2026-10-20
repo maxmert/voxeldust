@@ -57,6 +57,10 @@ pub fn encode(a: &Artifact) -> Vec<u8> {
     }
     put_len(&mut b, a.coast.len());
     b.extend_from_slice(&a.coast);
+    // ★ The lakes' record last (ruling B121; a file written before it ends at the coast and reads no lakes).
+    let lakes = vd_terrain::artifact::encode_lake_records(&a.lakes);
+    put_len(&mut b, lakes.len());
+    b.extend_from_slice(&lakes);
     b
 }
 
@@ -98,6 +102,14 @@ pub fn decode(b: &[u8]) -> Option<Artifact> {
     }
     let coast_n = len(take(8)?);
     let coast = take(coast_n)?.to_vec();
+    // The lakes' record where the file holds one (written from ARTIFACT_VERSION 10 on), else none.
+    let lakes = match take(8) {
+        Some(n) => {
+            let n = len(n);
+            vd_terrain::artifact::decode_lake_records(take(n)?)?
+        }
+        None => Vec::new(),
+    };
     let pyramid_water = sets.pop()?;
     let pyramid = sets.pop()?;
     Some(Artifact {
@@ -108,6 +120,7 @@ pub fn decode(b: &[u8]) -> Option<Artifact> {
         pyramid,
         pyramid_water,
         coast,
+        lakes,
     })
 }
 
@@ -127,6 +140,11 @@ mod tests {
             pyramid: vec![vec![5, -6, 7]],
             pyramid_water: vec![vec![i16::MIN, 8, 9]],
             coast: vec![0b1010_0101, 3],
+            lakes: vec![vd_terrain::artifact::LakeRecord {
+                node: 5,
+                age_kyr: 12_600,
+                laid_q: 164,
+            }],
         }
     }
 
@@ -143,6 +161,7 @@ mod tests {
         assert_eq!(back.pyramid, a.pyramid);
         assert_eq!(back.pyramid_water, a.pyramid_water);
         assert_eq!(back.coast, a.coast);
+        assert_eq!(back.lakes, a.lakes);
         assert_eq!(back.sea_m, a.sea_m);
     }
 

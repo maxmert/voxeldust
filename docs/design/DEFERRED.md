@@ -12292,7 +12292,32 @@ generation alone), so a body solves once per generation on a machine, not once p
       before it is made again (the store keys a raw by its tile, not by the levels it named); (b2) a far list made whole
       again after a reopen does not reach a gateway that already took the old one (`FineGateway::far_sent`), nor a session
       that holds it; (b3) a finished tile made again after a reopen does not reach a gateway that already holds the old
-      record; all three only during a world version's warm-up; (c) a base level read through an 8 km chain to a lake outside the
+      record; all three only during a world version's warm-up; ★ RULING B118 (2026-10-19, FINE_VERSION 11): THE DROWNED
+      BASIN is the game's lake floor (`OutletRule::Drowned`); ITS INTERIMS: (b4) the pit's floor (its points under its own
+      row at the smooth 8 km surface) stays a smooth plate under the deepest water — hidden by the depth law where the water
+      is deep, seen where a lake is shallow over its pit; (b5) a drowned lake's exit leaves at its bed by the node's 8 km
+      discharge (a closed lake's nodes carry little), so a drowned valley crossing a tile's rim may stand shallower than the
+      law's own channel; (b6) the rows of evenly spaced coves on the ridges between a lake's arms, for the owner's look;
+      ★ RULING B122 (2026-10-20, FINE_VERSION 12): THE DELTAS are the game's lake floor (`OutletRule::Deltas`: the drowned
+      basin on `l1::bedrock_view`, the records' laid rock laid back by `l1::delta_fans`); ITS INTERIMS: (b7) each stream's
+      share of its lake's rock is by its WATER (a stated closure: one load of rock per cubic metre of water); the BQART law
+      (Syvitski & Milliman 2007) replaces it when the catchments' relief and temperature are read; ★ FINE_VERSION 13 (the
+      owner: "Shores are not believable"): only a river a cell wide builds a delta, the narrower streams' rock is the lake's
+      shoreface band (one reach from every shore point, not the waves' own plan law — Ashton & Murray 2006's shoreline
+      diffusion is owed); (b8) the deltas move rock
+      between 8 km nodes (MEASURED at the old lake, face 3 tile 126,12: the record nodes' 128 m means a median 253 m under
+      their rows, the plains up to 547 m over theirs; B118 ±220 m) — the far lake list carries the 128 m truth to the far
+      rungs, the 8 km rows keep the solve's own placement; (b9) each tile places its deltas from its own domain's mouths and
+      rock, so two domains can place a delta near their shared edge differently — G-SEAM unmeasured for the deltas; (b10)
+      rock no water in a tile's domain has room for is dropped (three tiles at the old lake, 11–125 km³); (b11) a lake the
+      8 km rock filled whole (dry at its level on the rows; 6 275 record nodes reach no lake word) keeps its row and the
+      law's relief — B114's filled flats; (b12) the bedrock view is a second copy of the artifact in the planet's shard
+      (about one artifact's memory); (b13) ★ CURED 2026-10-20 (16 m version 5): the 16 m level's detail put a delta's flat top under the water — walls along
+      128 m cell edges (988 wall sides at face 3 node 1008,100); now a 16 m cell whose 128 m sample is dry is held at the
+      level of the water beside it (W6, W16); (b14) where the 16 m hold ends (16 m version 7: a held cell stands at the
+      128 m drawn ground under it), the 16 m shore can run straight along a 128 m cell line for a few cells (about 125 such
+      runs counted in the old lake's stored 16 m tiles), for the owner's look;
+      (c) a base level read through an 8 km chain to a lake outside the
       tile's domain stays that lake's 8 km word; (d) the far step (B115 item 2); (e) no test for the rounds (HR5; B74). (1) ★ WRITTEN 2026-10-18: the
       far lakes from the field's own water words (`chunks::sea_sheet`), not yet in the window. WHERE: `vd_terrain::fine::{water, carve, tile, finish, stitch, read, l1, l2, refine}`,
       `vd_bins::fine_source`, `vd_client::{chunks, artifact_book}`, `ladder_fade.wgsl`. WHEN: (1)–(3) slice W2's second
@@ -12301,12 +12326,19 @@ generation alone), so a body solves once per generation on a machine, not once p
       rough ground of B86 item 7, the 128 m ground under the 16 m level of B95, and S1's chunks built before their
       realm's coast mask) — no test in `vd-client` reaches them. WHEN: before the base freezes (B99 step 7) or on the
       owner's word.
+    - 🟥 THE WATER TOP AND THE SKIRT ORDER HAVE NO UNIT TEST (HR5; written 2026-10-20, the pale strips' cure): the one
+      water reader (`chunks::WaterReader`, its far-block, list and coast arms reached only through the sheet's tests),
+      `ladder_view::column_water_top_m` / `water_waits` (a column judged by its water) and `add_skirts`' place before the
+      cut floor; no test written, none run (B74). WHEN: before the base freezes (B99 step 7) or on the owner's word.
     - 🟨 THE LOADING SCREEN STAYS HIGH UP (seen 2026-10-18; its two reach defects CURED the same day, the status file):
       300 km up the shard names 7 656 tiles of the 128 m level and solves them on demand (~6.5 s each, seven at a time,
       about two hours), since nothing solves them ahead (B86 item 6's advance calculation, not built); the pieces stand on
       the rough ground meanwhile. From 100 m and 30 km the screen now goes (90 s, 102 s). `VD_LOADING_SCREEN=0` takes the
-      screen out for pictures (a dev switch); the client logs what the screen waits for every 600 frames. WHEN: with the
-      advance calculation.
+      screen out for pictures (a dev switch); the client logs what the screen waits for every 600 frames. ★ 2026-10-20 (the
+      owner stuck on the screen at the old lake): the bar counted pieces on the rough ground as done, and the screen waited
+      for two far planets still in their first solves — both CURED; at the old lake it now goes after 1 min 51 s – 3 min
+      36 s, the last minutes spent on 17–40 pieces on the rough ground whose tiles have all landed, rebuilt at the lane's
+      pace (`ChunkLane::upgrade`). WHEN: with the advance calculation; the rebuild pace with the loading speed.
     - 🟥 ONE MISSING ROW RELEASES A REALM'S GROUND (seen 2026-10-18): under load (four capture clients and a nine-core
       test; several shards over their tick budget) one frame's scene held no row for the client's own planet, so the
       terrain forgot the ladder ("the terrain forgets a realm's ladder") and released 1 271 + 896 pieces; the ground came

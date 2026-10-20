@@ -317,7 +317,7 @@ pub fn solve_l2_with(
         wet_rule.then_some(&carve_at as super::refine::CarveAt<'_>),
     )?;
     let quart = |z: Gf| (z * Gf::from_i64(4) + Gf::HALF).floor().to_i64_floor() as i32;
-    let quarters: Vec<i32> = out.iter().map(|z| z.map_or(i32::MIN, quart)).collect();
+    let mut quarters: Vec<i32> = out.iter().map(|z| z.map_or(i32::MIN, quart)).collect();
     let rs = rside as usize;
     let (water, river_share) = if wet_rule {
         // Each cell's identity: the 128 m water whole at its place.
@@ -350,6 +350,31 @@ pub fn solve_l2_with(
                     .unwrap_or(super::water::DRY)
             })
             .collect();
+        // ★ THE COARSER GROUND KEEPS ITS SIDE OF THE WATER (rulings W6 and W16; the owner at the old lake's deltas,
+        // 2026-10-20: *"Shores are not believable"* — walls of water along 128 m cell edges, rectangles and blue specks on
+        // the delta plains): where the 128 m drawn ground at a cell stands at or over the water beside it (the column rule
+        // names a level), the law's finer detail never carries the cell under that water's level — it is held at that
+        // coarser ground, so the 16 m shore follows the 128 m ground's own crossing and never a sample's square. MEASURED before: a delta's top stands at its lake's level, so the
+        // detail's dimples put half its cells under the water, the spread wet them up to the column rule's band and
+        // stopped there beside dry ground under the same level.
+        for b in 0..rs {
+            for a in 0..rs {
+                let k = b * rs + a;
+                if quarters[k] == i32::MIN || reach[k] == super::water::DRY || quarters[k] >= reach[k] {
+                    continue;
+                }
+                // The 128 m drawn ground at the cell: where it stands at or over that water, the finer detail may not
+                // carry the cell under it (its own crossing of the level, never the 128 m samples' blocks).
+                // Held at the coarser ground itself (never at the level, where a centimetre decides wet or dry).
+                let coarse = super::points::chart_cell(key.face, ri0 + a as i32, rj0 + b as i32, d.n4)
+                    .and_then(|c| drawn_at(&c))
+                    .map(quart)
+                    .filter(|&z| z >= reach[k]);
+                if let Some(z) = coarse {
+                    quarters[k] = z;
+                }
+            }
+        }
         let river: Vec<i32> = banks
             .iter()
             .map(|b| b.map_or(super::water::DRY, quart))

@@ -93,7 +93,70 @@ use crate::units::{LENGTH_BITS, STEPS_PER_M};
 /// hands the air — so a closed body passes nothing on and the row into the sea is the cascade's.
 /// Before it the slot was the routing fill's D8 receiver and the row carried 1 607 km³/yr to the sea
 /// out of hollows the budget held (MEASURED at generator 20).
-pub const ARTIFACT_VERSION: u32 = 9;
+/// ★ Version 10 (2026-10-19, ruling B121) adds THE LAKES' RECORD ([`Artifact::lakes`]): each lake node's age and the
+/// sediment the solve laid in it since its water rose — stored and folded into the digest, never shipped in a tile.
+pub const ARTIFACT_VERSION: u32 = 10;
+
+/// ★ ONE LAKE NODE'S RECORD (ruling B121; the lake shore design, `docs/investigation/2026-10-19/lake_shore_laws_design.md`
+/// Part 3): a node the solve leaves in a lake at the present — under its water, or filled by rock up to its level (a
+/// delta's top) — how long it has been the lake's (the time since the last pass's end it was out of every lake — the
+/// solve's passes resolve it, 250 000 years at the present's end), and the rock the solve laid in it since then (B51's
+/// fill of a closed basin from its floor), in quarter metres. The planet's shard reads it to
+/// shape the 128 m floor and shore (the deltas by the supply over the age, the waves' work over the age); no tile carries it.
+///
+/// **Example.** A node of the basin lake: its water rose 12.6 Myr ago and the solve laid 41 m of rock in it since — a
+/// delta's and a flat floor's worth to shape at 128 m.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LakeRecord {
+    pub node: u32,
+    /// The time it has been the lake's, thousands of years, rounded up.
+    pub age_kyr: u32,
+    /// The rock laid in it since, quarter metres.
+    pub laid_q: u32,
+}
+
+/// The lakes' record's form.
+pub const LAKE_RECORD_FORM: u8 = 1;
+
+/// ★ THE LAKES' RECORD AS BYTES (the store's one row): the form, the count, then each record (node, age, laid; four bytes
+/// each, little end first), in node order.
+#[must_use]
+pub fn encode_lake_records(records: &[LakeRecord]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + 12 * records.len());
+    out.push(LAKE_RECORD_FORM);
+    out.extend_from_slice(&(records.len() as u32).to_le_bytes());
+    for r in records {
+        out.extend_from_slice(&r.node.to_le_bytes());
+        out.extend_from_slice(&r.age_kyr.to_le_bytes());
+        out.extend_from_slice(&r.laid_q.to_le_bytes());
+    }
+    out
+}
+
+/// The lakes' record back; `None` for another form, a short or a long record.
+#[must_use]
+pub fn decode_lake_records(bytes: &[u8]) -> Option<Vec<LakeRecord>> {
+    let [form, c0, c1, c2, c3, rest @ ..] = bytes else {
+        return None;
+    };
+    if *form != LAKE_RECORD_FORM {
+        return None;
+    }
+    let count = u32::from_le_bytes([*c0, *c1, *c2, *c3]) as usize;
+    if rest.len() != count.checked_mul(12)? {
+        return None;
+    }
+    let word = |c: &[u8]| u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+    Some(
+        rest.chunks_exact(12)
+            .map(|c| LakeRecord {
+                node: word(&c[0..4]),
+                age_kyr: word(&c[4..8]),
+                laid_q: word(&c[8..12]),
+            })
+            .collect(),
+    )
+}
 /// A tile's edge in nodes: 64 × 64 rows of ten bytes is 40 KB — under a second on the lane.
 pub const TILE_EDGE: u32 = 64;
 /// The water level's word for a dry node.
@@ -236,6 +299,9 @@ pub struct Artifact {
     /// law is removed. The mask is still built, stored and folded into the digest, so the one-volume
     /// fill step finds it in every store.
     pub coast: Vec<u8>,
+    /// ★ THE LAKES' RECORD (ruling B121; [`LakeRecord`]): each node under a lake's water at the present, in node order —
+    /// stored and folded into the digest, never shipped in a tile (the planet's shard reads it).
+    pub lakes: Vec<LakeRecord>,
 }
 
 /// The bytes a coast mask of `nodes` fine nodes takes: a two-bit side word each, rounded up.
@@ -1799,7 +1865,17 @@ impl Artifact {
             pyramid,
             pyramid_water,
             coast,
+            lakes: state.lake_records.clone(),
         }
+    }
+
+    /// ★ A node's lake record (ruling B121), if the solve left it under a lake's water.
+    #[must_use]
+    pub fn lake_record(&self, node: u32) -> Option<LakeRecord> {
+        self.lakes
+            .binary_search_by_key(&node, |r| r.node)
+            .ok()
+            .map(|i| self.lakes[i])
     }
 
     /// ★ THE COAST COUNTS of this artifact (2026-09-22, ruling W15), folded from its own mask.
@@ -1902,6 +1978,10 @@ impl Artifact {
         }
         a = fnv1a(a, &self.coast);
         b = fnv1a(b, &self.coast);
+        // ★ The lakes' record, last (ruling B121): a store that lost it is refused like one that lost the mask.
+        let lakes = encode_lake_records(&self.lakes);
+        a = fnv1a(a, &lakes);
+        b = fnv1a(b, &lakes);
         [a, b]
     }
 

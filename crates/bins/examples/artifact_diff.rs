@@ -162,6 +162,8 @@ fn decode(b: &[u8]) -> Saved {
             pyramid,
             pyramid_water,
             coast,
+            // The saved form predates the lakes' record (ruling B121).
+            lakes: Vec::new(),
         },
         z,
         water_z,

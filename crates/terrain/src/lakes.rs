@@ -269,6 +269,33 @@ pub struct Lakes {
     pub report: LakeReport,
 }
 
+impl Lakes {
+    /// ★ A NODE IN ITS STANDING WATER'S BODY (ruling B121, its record cured 2026-10-19): the level of the water body that
+    /// covers the node's own depression where the node stands AT OR UNDER it — under the water, or filled by rock up to
+    /// it — else [`DRY`] (the ocean, a hollow no water body covers, a dry rim over the level).
+    ///
+    /// **Example.** A river fills the first node of the basin lake with rock up to the lake's level: [`Lakes::water`]
+    /// reads that node dry (no water over its ground), this reads the lake's level — the node is the delta's top, still
+    /// the lake's.
+    #[must_use]
+    pub fn body_level(&self, node: usize, z: i32) -> i32 {
+        let h = self.home[node];
+        if (h == NO_DEP) | (h == OCEAN) {
+            return DRY;
+        }
+        let body = self.body_of[h as usize];
+        if body == NO_DEP {
+            return DRY;
+        }
+        let level = self.deps[body as usize].level;
+        if (level != DRY) & (z <= level) {
+            level
+        } else {
+            DRY
+        }
+    }
+}
+
 /// The open component a depression belongs to now, with path halving.
 fn find(link: &mut [u32], mut d: u32) -> u32 {
     while link[d as usize] != d {

@@ -25,14 +25,17 @@ use vd_sim::io::Store;
 use vd_sim::stub::built_store::{
     ArtifactCoastPart, ArtifactHead, ArtifactPyramidIndex, ArtifactPyramidPart, ArtifactTile,
     COAST_PART_BYTES, PYRAMID_PART_WORDS, artifact_coast_part_key, artifact_coast_part_prefix,
-    artifact_head_key, artifact_pyramid_key, artifact_pyramid_part_key,
+    artifact_head_key, artifact_lakes_key, artifact_pyramid_key, artifact_pyramid_part_key,
     artifact_pyramid_part_prefix, artifact_tile_key, artifact_tile_prefix,
     decode_artifact_coast_part, decode_artifact_head, decode_artifact_pyramid_index,
     decode_artifact_pyramid_part, decode_artifact_tile, encode_artifact_coast_part,
     encode_artifact_head, encode_artifact_pyramid_index, encode_artifact_pyramid_part,
     encode_artifact_tile,
 };
-use vd_terrain::artifact::{Artifact, Row, Tile, TileCache, coast_bytes, tile_width};
+use vd_terrain::artifact::{
+    Artifact, Row, Tile, TileCache, coast_bytes, decode_lake_records, encode_lake_records,
+    tile_width,
+};
 use vd_terrain::macro_lattice::MacroLattice;
 
 /// ★ THE SEA'S WIND BESIDE THE WORLD (ruling B109): written (staged; the caller commits) under the artifact's digest.
@@ -177,6 +180,11 @@ pub fn write_artifact(store: &mut dyn Store, world_tag: u64, artifact: &Artifact
             store.delete(&key);
         }
     }
+    // ★ THE LAKES' RECORD (ruling B121): one row, the generator's own bytes, never shipped.
+    store.put(
+        &artifact_lakes_key(),
+        &encode_lake_records(&artifact.lakes).into(),
+    );
     let index = ArtifactPyramidIndex {
         part_words: PYRAMID_PART_WORDS as u32,
         parts_per_level,
@@ -311,6 +319,12 @@ pub fn read_artifact(
             coast_bytes(n)
         ));
     }
+    // ★ THE LAKES' RECORD (ruling B121): refused by name where missing or malformed — the digest folds it.
+    let lakes = store
+        .get(&artifact_lakes_key())
+        .ok_or_else(|| "the stored artifact is missing its lakes' record".to_owned())?;
+    let lakes = decode_lake_records(&lakes)
+        .ok_or_else(|| "the stored artifact's lakes' record is malformed".to_owned())?;
     let artifact = Artifact {
         edge: head.edge,
         version: head.version,
@@ -319,6 +333,7 @@ pub fn read_artifact(
         pyramid,
         pyramid_water,
         coast,
+        lakes,
     };
     if artifact.digest() != head.digest {
         return Err("the stored artifact's rows do not digest to its head".to_owned());

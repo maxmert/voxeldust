@@ -150,9 +150,11 @@ const FINE_RAW: u8 = 9;
 const FINE_FINISHED: u8 = 10;
 /// ★ THE SEA'S WIND (ruling B109): one row per artifact digest, the generator's own record.
 const SEA_WIND: u8 = 11;
-/// ★ THE FAR LAKES (ruling B116 part 2): one row per fine input word, the generator's own record. Append-only numbering:
-/// 13 is the next free tag.
+/// ★ THE FAR LAKES (ruling B116 part 2): one row per fine input word, the generator's own record.
 const FAR_LAKES: u8 = 12;
+/// ★ THE ARTIFACT'S LAKES' RECORD (ruling B121): one row beside the artifact's head, the generator's own bytes (each lake
+/// node's age and the rock laid in it). Append-only numbering: 14 is the next free tag.
+const ARTIFACT_LAKES: u8 = 13;
 
 /// The artifact rows' tags — their own numbering, one schema each, append-only.
 mod art {
@@ -490,6 +492,12 @@ pub fn far_lakes_key(input: u64) -> Vec<u8> {
     k
 }
 
+/// ★ The key of the artifact's lakes' record (ruling B121): the family tag alone, one row per realm store.
+#[must_use]
+pub fn artifact_lakes_key() -> Vec<u8> {
+    vec![ARTIFACT_LAKES]
+}
+
 /// The key of the artifact's head: the family tag alone.
 #[must_use]
 pub fn artifact_head_key() -> Vec<u8> {
@@ -807,7 +815,7 @@ mod tests {
     use super::{
         ArtifactCoastPart, ArtifactHead, ArtifactPyramidIndex, ArtifactPyramidPart, ArtifactTile,
         COAST_PART_BYTES, PYRAMID_PART_WORDS, artifact_coast_part_key, artifact_coast_part_prefix,
-        artifact_head_key, artifact_pyramid_key, artifact_pyramid_part_key,
+        artifact_head_key, artifact_lakes_key, artifact_pyramid_key, artifact_pyramid_part_key,
         artifact_pyramid_part_prefix, artifact_tile_key, artifact_tile_prefix,
         decode_artifact_coast_part, decode_artifact_head, decode_artifact_pyramid_index,
         decode_artifact_pyramid_part, decode_artifact_tile, encode_artifact_coast_part,
@@ -883,6 +891,7 @@ mod tests {
         );
         // ★ The far lakes' row (ruling B116): its own family, then the fine input word.
         assert_eq!(far_lakes_key(3), vec![12, 0, 0, 0, 0, 0, 0, 0, 3]);
+        assert_eq!(artifact_lakes_key(), vec![13]);
         assert_eq!(artifact_pyramid_key(), vec![6]);
         assert_eq!(artifact_tile_prefix(), vec![5]);
         assert_eq!(artifact_pyramid_part_prefix(), vec![7]);

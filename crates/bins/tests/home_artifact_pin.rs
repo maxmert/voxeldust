@@ -90,7 +90,7 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
     // `ARTIFACT_KEY_GENERATION`, or every realm opens an artifact of the old solve.
     assert_eq!(
         vd_terrain::ARTIFACT_KEY_GENERATION,
-        28,
+        29,
         "the artifact's key generation belongs to the digest above: bump both together"
     );
     assert_eq!(

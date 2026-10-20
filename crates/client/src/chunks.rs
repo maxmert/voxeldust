@@ -1716,6 +1716,146 @@ pub fn water_radius_m(under: bool, sea_r: f64, ground_r: f64, q: f64) -> f64 {
     }
 }
 
+/// ★ THE WATER OVER A DIRECTION, ONE RULE (slices S1 and W2; rulings B105 Q2, B114, B116): what the sea sheet stands each
+/// vertex's water on, and what the descent reads a column's water top from (ruling B89's occlusion, 2026-10-20), so the
+/// two never disagree. Built once for the pieces of one rung on one artifact; `None` where no water can be drawn — a body
+/// with no sea, no macro lattice, or no coast mask yet.
+///
+/// **Example.** At the old lake stand a rung-3 vertex 2.7 km out reads the 16 m water map's level, the lake's own; a
+/// rung-14 vertex over the same lake, past the fine level, reads the far lake list's level for its folded block.
+pub struct WaterReader<'a> {
+    body: &'a BodyDefinition,
+    artifact: &'a ArtifactCache,
+    mask: &'a [u8],
+    lattice: vd_terrain::macro_lattice::MacroLattice,
+    field: Option<SharedField>,
+    field_lattice: Option<vd_terrain::macro_lattice::MacroLattice>,
+    field_level: u32,
+    sea_r: f64,
+    rung: u8,
+}
+
+impl<'a> WaterReader<'a> {
+    /// The reader for the pieces of `rung` on `artifact`.
+    #[must_use]
+    pub fn new(
+        body: &'a BodyDefinition,
+        artifact: &'a ArtifactCache,
+        rung: u8,
+    ) -> Option<WaterReader<'a>> {
+        body.sea_m()?;
+        let mask: &[u8] = artifact.coast()?;
+        let lattice = body.macro_lattice()?;
+        let field = artifact.field_at_rung(&lattice, rung);
+        // ★ THE FAR LAKE (slice W2 item 8; the one-volume revision §3.6's interim far map): where the fine water map does
+        // not serve, a lake node's vertex takes its lake's level from the rung's own field — the row's water word on the
+        // 8 km tiles, the highest lake of the block on a pyramid level (the words the client already holds) — and is wet
+        // where its ground stands under it, as the sea is. MEASURED before (2026-10-18): from rung 13 up no lake was drawn
+        // at all, so a lake vanished beyond about 7 500 km.
+        let field_lattice = field.as_deref().and_then(|f| match f.level() {
+            0 => Some(lattice),
+            k => lattice.coarser(k),
+        });
+        let field_level = field.as_deref().map_or(0, |f| f.level());
+        Some(WaterReader {
+            body,
+            artifact,
+            mask,
+            lattice,
+            field,
+            field_lattice,
+            field_level,
+            sea_r: body.sea_radius_m(),
+            rung,
+        })
+    }
+
+    /// ★ THE WATER'S RADIUS OVER A DIRECTION, in metres from the body's centre; `None` where no water stands. The fine
+    /// water map's level at its place where the fine level serves the rung and its tile is held (the sea at its level, a
+    /// lake at its own, a carved river at its bank — the connection already searched by the shard); else the 8 km rule —
+    /// the sea where the direction's node's coast word lets it stand, a lake by the far lake list or the field's words.
+    #[must_use]
+    pub fn level_r(&self, dir: [f64; 3]) -> Option<f64> {
+        use vd_terrain::artifact::Side;
+        let fine = self
+            .field
+            .as_deref()
+            .map(|f| vd_terrain::height::fine_water_at(self.body, f, dir, self.rung));
+        if let Some(vd_terrain::fine::read::FineWater::Held { level, .. }) = fine {
+            return (level != vd_terrain::fine::stitch::MISSING)
+                .then(|| self.sea_r + f64::from(level) / 4.0);
+        }
+        let node = node_under(&self.lattice, dir);
+        match vd_terrain::artifact::coast_side(self.mask, node) {
+            Some(Side::Sea) => Some(self.sea_r),
+            Some(_) if self.far_block(dir) => self.lake_r(dir),
+            // ★ A PIECE ON THE 8 km ROWS TAKES ITS LAKES FROM THE 128 m DATA (ruling B116; the owner's flight, 2026-10-19:
+            // *"They should be 100% seamless"*): the far lake list's level where it holds the node.
+            Some(side) if self.field_level == 0 && self.artifact.far_applied() => {
+                // The majority class, as a coarse copy and the fold read it: a node at least half wet.
+                match self.artifact.far_node(node) {
+                    Some(r)
+                        if r.level_m != vd_terrain::artifact::DRY_M
+                            && 2 * u32::from(r.share) >= 255 =>
+                    {
+                        Some(self.metres_r(r.level_m))
+                    }
+                    Some(_) => None,
+                    None => (side == Side::Land && self.coastal(node)).then_some(self.sea_r),
+                }
+            }
+            Some(Side::Land) => self.coastal(node).then_some(self.sea_r),
+            // ★ A WAITING PIECE DRAWS NO LAKE BEFORE THE LIST (the same flight): on a rung the fine level serves, a vertex
+            // the fine water map does not hold yet stands on the 8 km ground, whose lake word can stand hundreds of metres
+            // over the lake's 128 m level (ruling B115) — MEASURED: the owner's flight saw such pieces flood their whole
+            // squares (the shard 110 tiles behind).
+            Some(Side::Lake) if self.rung <= vd_terrain::fine::level::FineLevel::L1.top_rung() => {
+                None
+            }
+            Some(Side::Lake) => self.lake_r(dir),
+            _ => None,
+        }
+    }
+
+    /// A water word in metres over the datum, as a radius.
+    fn metres_r(&self, level_m: i16) -> f64 {
+        self.sea_r + f64::from(i32::from(level_m) - i32::from(self.artifact.head.sea_m))
+    }
+
+    /// ★ THE FAR LAKES FOLDED IN (ruling B116 part 2): where the rung's level holds a block the far lake list folded, that
+    /// block's water is the list's — the lake's 128 m level where most of the block's ground is wet — whatever side the
+    /// fine node under a vertex states (a block's water reaches past its lake's 8 km nodes); the sea's own nodes keep the
+    /// sea.
+    fn far_block(&self, dir: [f64; 3]) -> bool {
+        self.field_level >= 1
+            && self.field_lattice.is_some_and(|fl| {
+                self.artifact
+                    .far_block(self.field_level, node_under(&fl, dir))
+            })
+    }
+
+    /// The lake's level the rung's own field states over the direction's node.
+    fn lake_r(&self, dir: [f64; 3]) -> Option<f64> {
+        let (f, fl) = (self.field.as_deref()?, self.field_lattice?);
+        let (water_m, _) = f.water_facies(node_under(&fl, dir))?;
+        (water_m != vd_terrain::artifact::DRY_M).then(|| self.metres_r(water_m))
+    }
+
+    /// ★ A LAND NODE HOLDS THE SEA ONLY ON THE COAST (2026-10-19, the 3 200 / 4 500 km pair over the basin): a land node
+    /// lets the sea stand where its drawn ground dips under the sea's level, so the coast follows the ground inside the
+    /// node — but only a node that touches a sea node is a coast; inland, the 8 km rule cannot know whether a hollow joins
+    /// the ocean (the fine water map can, and holds no sea there). MEASURED before: beside the lakes under the sea's level
+    /// (−200 to −1 800 m), whose folded blocks stand at their true deep floor, the smooth rung-13 ground of the land nodes
+    /// around them dipped under 0 m and drew the sea there — hundreds of dots and strips over land rung 12 draws dry.
+    fn coastal(&self, node: u32) -> bool {
+        self.lattice.neighbours(node).into_iter().any(|m| {
+            m != vd_terrain::macro_lattice::NO_NODE
+                && vd_terrain::artifact::coast_side(self.mask, m)
+                    == Some(vd_terrain::artifact::Side::Sea)
+        })
+    }
+}
+
 /// ★ THE WATER'S SHEET AND THE GROUND THAT STILL SHOWS (rulings B105 Q10, B106, B114; slices S1 and W2; ruling W18's
 /// lattice). For each ground vertex its WATER: where the fine level serves the rung and its tile is held, the tile's water
 /// map at its place (the sea at its level, a lake at its own, a carved river at its bank — the connection searched by the
@@ -1753,117 +1893,26 @@ pub fn sea_sheet(
     let Some(artifact) = artifact else {
         return none(false);
     };
-    let Some(mask) = artifact.coast() else {
+    if artifact.coast().is_none() {
         // A mask still on its way: no sea yet, and built again when it lands.
         return none(artifact.head.coast_parts > 0);
-    };
+    }
     if !artifact.wind_held() {
         // ★ A WIND STILL ON ITS WAY (ruling B109): no sea yet, and built again when it lands.
         return none(true);
     }
     let wind = sea_wind_reader(artifact.wind().map(AsRef::as_ref));
-    let Some(lattice) = body.macro_lattice() else {
+    // The reader stands now (a sea, a mask): only a body with no macro lattice has none.
+    let Some(reader) = WaterReader::new(body, artifact, key.rung) else {
         return none(false);
     };
-    let sea_r = body.sea_radius_m();
     let q =
         f64::from(vd_seed::ladder::cell_m(key.rung)) / vd_terrain::chunk::GAP_STEPS_PER_CELL as f64;
-    // ★ EACH VERTEX'S WATER (slice W2; rulings B105 Q2, B114): the fine water map's level at its place where the fine
-    // level serves the rung and its tile is held (the sea at its level, a lake at its own, a carved river at its bank — the
-    // connection already searched by the shard); else the 8 km rule — the sea where the vertex's node's coast word lets it
-    // stand. Then whether its TRUE ground stands under that level: a drawn vertex farther than two steps from the level is
-    // on the side it is drawn on; nearer, the field decides.
-    let field = artifact.field_at_rung(&lattice, key.rung);
-    // ★ THE FAR LAKE (slice W2 item 8; the one-volume revision §3.6's interim far map): where the fine water map does not
-    // serve, a lake node's vertex takes its lake's level from the rung's own field — the row's water word on the 8 km
-    // tiles, the highest lake of the block on a pyramid level (the words the client already holds) — and is wet where its
-    // ground stands under it, as the sea is. MEASURED before (2026-10-18): from rung 13 up no lake was drawn at all, so a
-    // lake vanished beyond about 7 500 km.
-    let field_lattice = field.as_deref().and_then(|f| match f.level() {
-        0 => Some(lattice),
-        k => lattice.coarser(k),
-    });
-    // ★ THE FAR LAKES FOLDED IN (ruling B116 part 2): where the rung's level holds a block the far lake list folded, that
-    // block's water is the list's — the lake's 128 m level where most of the block's ground is wet — whatever side the fine
-    // node under a vertex states (a block's water reaches past its lake's 8 km nodes); the sea's own nodes keep the sea.
-    let field_level = field.as_deref().map_or(0, |f| f.level());
-    let far_block = |dir: [f64; 3]| -> bool {
-        field_level >= 1
-            && field_lattice.is_some_and(|fl| artifact.far_block(field_level, node_under(&fl, dir)))
-    };
-    let lake_r = |dir: [f64; 3]| -> Option<f64> {
-        let (f, fl) = (field.as_deref()?, field_lattice?);
-        let (water_m, _) = f.water_facies(node_under(&fl, dir))?;
-        (water_m != vd_terrain::artifact::DRY_M)
-            .then(|| sea_r + f64::from(i32::from(water_m) - i32::from(artifact.head.sea_m)))
-    };
-    // ★ A LAND NODE HOLDS THE SEA ONLY ON THE COAST (2026-10-19, the 3 200 / 4 500 km pair over the basin): a land node
-    // lets the sea stand where its drawn ground dips under the sea's level, so the coast follows the ground inside the
-    // node — but only a node that touches a sea node is a coast; inland, the 8 km rule cannot know whether a hollow joins
-    // the ocean (the fine water map can, and holds no sea there). MEASURED before: beside the lakes under the sea's level
-    // (−200 to −1 800 m), whose folded blocks stand at their true deep floor, the smooth rung-13 ground of the land nodes
-    // around them dipped under 0 m and drew the sea there — hundreds of dots and strips over land rung 12 draws dry.
-    let coastal = |node: u32| -> bool {
-        lattice.neighbours(node).into_iter().any(|m| {
-            m != vd_terrain::macro_lattice::NO_NODE
-                && vd_terrain::artifact::coast_side(mask, m)
-                    == Some(vd_terrain::artifact::Side::Sea)
-        })
-    };
+    // ★ EACH VERTEX'S WATER ([`WaterReader::level_r`]), then whether its TRUE ground stands under that level: a drawn
+    // vertex farther than two steps from the level is on the side it is drawn on; nearer, the field decides.
     let level_r: Vec<Option<f64>> = dirs
         .iter()
-        .map(|d| {
-            let dir = [d.x, d.y, d.z];
-            let fine = field
-                .as_deref()
-                .map(|f| vd_terrain::height::fine_water_at(body, f, dir, key.rung));
-            match fine {
-                Some(vd_terrain::fine::read::FineWater::Held { level, .. }) => (level
-                    != vd_terrain::fine::stitch::MISSING)
-                    .then(|| sea_r + f64::from(level) / 4.0),
-                _ => {
-                    use vd_terrain::artifact::Side;
-                    let node = node_under(&lattice, dir);
-                    match vd_terrain::artifact::coast_side(mask, node) {
-                        Some(Side::Sea) => Some(sea_r),
-                        Some(_) if far_block(dir) => lake_r(dir),
-                        // ★ A PIECE ON THE 8 km ROWS TAKES ITS LAKES FROM THE 128 m DATA (ruling B116; the owner's flight,
-                        // 2026-10-19: *"They should be 100% seamless"*): the far lake list's level where it holds the node.
-                        Some(side) if field_level == 0 && artifact.far_applied() => {
-                            // The majority class, as a coarse copy and the fold read it: a node at least half wet.
-                            match artifact.far_node(node) {
-                                Some(r)
-                                    if r.level_m != vd_terrain::artifact::DRY_M
-                                        && 2 * u32::from(r.share) >= 255 =>
-                                {
-                                    Some(
-                                        sea_r
-                                            + f64::from(
-                                                i32::from(r.level_m)
-                                                    - i32::from(artifact.head.sea_m),
-                                            ),
-                                    )
-                                }
-                                Some(_) => None,
-                                None => (side == Side::Land && coastal(node)).then_some(sea_r),
-                            }
-                        }
-                        Some(Side::Land) => coastal(node).then_some(sea_r),
-                        // ★ A WAITING PIECE DRAWS NO LAKE BEFORE THE LIST (the same flight): on a rung the fine level
-                        // serves, a vertex the fine water map does not hold yet stands on the 8 km ground, whose lake
-                        // word can stand hundreds of metres over the lake's 128 m level (ruling B115) — MEASURED: the
-                        // owner's flight saw such pieces flood their whole squares (the shard 110 tiles behind).
-                        Some(Side::Lake)
-                            if key.rung <= vd_terrain::fine::level::FineLevel::L1.top_rung() =>
-                        {
-                            None
-                        }
-                        Some(Side::Lake) => lake_r(dir),
-                        _ => None,
-                    }
-                }
-            }
-        })
+        .map(|d| reader.level_r([d.x, d.y, d.z]))
         .collect();
     let under: Vec<bool> = dirs
         .iter()
@@ -2144,7 +2193,12 @@ fn add_skirts(g: &mut ChunkGeometry, drop_m: f64, ceiling_m: f64) {
         skirt_tris.push([[a, b, b2], [a, b2, b]][back]);
         skirt_tris.push([[a, b2, a2], [a, a2, b2]][back]);
     }
-    g.triangles.extend(skirt_tris);
+    // ★ THE DEEP FLOOR STAYS LAST (2026-10-20, the owner's pale squares on the far water): the renderer leaves out the
+    // list's last `floor_cut` triangles where it draws the sheet, so the skirts go in before them. MEASURED before: the
+    // skirts went after the cut floor, so a piece over a lake drew none of its skirts and as many deep-floor triangles in
+    // their place.
+    let at = g.triangles.len() - g.sea.floor_cut as usize;
+    g.triangles.splice(at..at, skirt_tris);
 }
 
 /// THE PACKED NORMAL (step 5's second half, ruling V18): a unit normal as two signed 16-bit
@@ -2908,6 +2962,12 @@ impl ChunkLane {
     #[must_use]
     pub fn rough_resident(&self, realm: RealmId) -> usize {
         self.rough.iter().filter(|(r, _)| *r == realm).count()
+    }
+
+    /// Whether a resident chunk stands on the rough ground (built while one of its fine tiles had not landed).
+    #[must_use]
+    pub fn is_rough(&self, realm: RealmId, key: ChunkKey) -> bool {
+        self.rough.contains(&(realm, key))
     }
 
     /// Harvest up to `max` finished chunks. A chunk released while it was building is dropped

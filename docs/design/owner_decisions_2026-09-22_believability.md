@@ -2895,3 +2895,114 @@ default threads while they got 0.68 each. Asked with these numbers, the owner ch
 
 **Example.** The home planet's shard solves the basin lake's tiles on the idle fast cores, about 5 s a tile; when the owner
 opens the window and flies, the window's frame takes about two thirds of any core it shares with a solve.
+
+## B118 (2026-10-19) — THE DROWNED BASIN IS THE GAME'S LAKE FLOOR
+
+THE LOOK (the owner in the window, FINE_VERSION 10: *"All looks good. I couldn't find any walls"*; then "Lake floors"): the
+pale films and the rounded or star-shaped shores remained — under B105 Q1 (b) a lake's floor is the smooth 8 km surface, and
+a lake B115 lowered stands as a thin film on it. The bench (`docs/investigation/2026-10-19/lake_floor_design.md` §0.7) showed
+the drowned basin beside today's rule at the two pale places, its flat plate cured by a drainage tree inside each lake. The
+owner, on the sheets: *"Drowned basin, build it"*.
+
+1. **THE DROWNED BASIN IS THE GAME'S RULE** (`fine_source::GAME_RULE = OutletRule::Drowned`; FINE_VERSION 11): every lake's
+   basin is land that drains along the lake's own tree to its deepest node (a priority flood over the lake's nodes from the
+   pit; a link that leaves a tile's domain is an exit at its bed, as a river's), and the water map floods that eroded
+   ground at the lake's level — B115's spill law and the lakes together unchanged. Amends B105 Q1 (b) for the lakes (the
+   sea keeps its rule).
+2. **THE ROWS OF COVES** (evenly spaced gullies on the ridges between a lake's arms) are judged in the window, from the side.
+
+**Example.** The basin lake keeps its 8 km level, −2 002 m, and fills the eroded valleys of its basin with branching arms,
+islands and peninsulas; its far view is the same lake.
+
+## B119 (2026-10-19) — A LAKE'S SHORE BY ITS LAWS FIRST
+
+THE LOOK (the owner in the window on B118, three pictures): *"The shores and not deep places have those weird effects. Plus
+underwater nothing is rendered, that prevents going underwater in the future. Also, are we sure that we correctly applied
+the shores formation?"* The answer given: no — the drowned basin is a flooded river landscape (a young reservoir); a
+long-lived natural lake's shore follows three laws not applied (the rivers graded to the lake's level; the floor filled by
+sediment with deltas at the river mouths; the waves' shoreface, by the wind and the fetch). Asked what first, the owner
+chose *"Shores by law first"*.
+
+1. **THE SHORES BY LAW FIRST**: research of the published laws (with their formulas, calibration bodies and how each reads
+   a body's gravity and fluids) and of how published landscape and terrain models form lake floors, deltas and shores;
+   then a short design with its prices; then the bench and the owner's look; B118 stays in the game until then.
+2. **UNDERWATER DRAWING** (the floor kept where the eye is under the water, the sheet's underside, the water's medium seen
+   from inside) and the shallow water's colours come after it, client only.
+
+**Example.** A river that reaches the basin lake ends at the lake's level, builds a delta into it, and the lake's floor
+beyond is flat sediment; along an open shore the waves cut a shallow bench and fill the bays between the headlands.
+
+## B120 (2026-10-19) — THE LAKE'S SHORE AND FLOOR BY LAW: PARTS 1–2 NOW
+
+On the short design (`docs/investigation/2026-10-19/lake_shore_laws_design.md`) the owner took every recommendation:
+
+1. **Q1 — PARTS 1–2 NOW, PART 3 LATER**: the rivers end at the lake (Powell's base level: the land over a lake's level solved
+   again with the shoreline as its outlet at that level) and the floor by sediment focusing with the wave-built shoreface
+   (`h = A·y^(2/3)` to Hallermeier's closure depth, the waves from the climate's yearly wind and the lake's fetch) — both
+   equilibrium forms, no age; deltas and the plan's smoothing wait for a lake-age byte the 8 km solve records at the next
+   generator change (with B113 / B114's queued changes).
+2. **Q2 — THE GRAIN BY THE RIVER'S COMPETENCE**: the largest grain the river moves at its mouth by the Shields threshold
+   (Shields 1936), its settling velocity by Ferguson & Church 2004, `A = 2.25·(w²/g)^(1/3)` (Kriebel, Kraus & Larson 1991) —
+   the body's gravity and fluid by law; a lake with no river reads its nearest inflow's.
+3. **Q3 — BOTH LEVELS**: Parts 1–2 at the 128 m level, the shoreface again at the 16 m level by the same law.
+4. The order stays B119's: the bench and the owner's look from the side first, then the world move (FINE_VERSION 12).
+
+**Example.** A river from the belt ends at the basin lake's level; under the water the floor beyond the shoreface is the
+basin's own; along the downwind shore a 58 m shoreface of sand falls to 1.5 m, and a small pond keeps its graded bank.
+
+## B121 (2026-10-19) — THE LAKE'S AGE NOW: THE NEXT GENERATOR CHANGE
+
+THE BENCH (`docs/investigation/2026-10-19/lake_shore_laws_design.md` §4): Part 1 alone changes almost nothing over the water
+(the drowned basin's rivers already end at its shoreline), and the floor filled without an age to the 8 km world's own
+floor brings back the round contour with wide flat mud plains. A mature lake's plan is set by the supply and the waves over
+the lake's AGE. Asked, the owner chose *"Lake age now"*.
+
+1. **THE NEXT GENERATOR CHANGE NOW**: the 8 km solve records when each node's water last rose (its lake's age, server-side,
+   no new data to the client), together with the wind's Step 1 queued by B113; every body's first solve again (the home
+   planet about an hour).
+2. **THEN PART 3 ON THE BENCH**: the deltas fill the arms from their heads by the supply over the age, the waves cut the
+   headlands by their power over the age, and the shoreface — then the owner's look, then FINE_VERSION 12.
+
+**Example.** The basin lake rose some time ago in the 8 km world's history; over that age its rivers' sediment fills the
+heads of its arms as delta plains, and its downwind headlands are cut back, so its plan is that of a lake that has stood.
+
+## B122 (2026-10-20) — THE DELTAS INTO THE GAME, THEN THE WINDOW
+
+THE BENCH (`docs/investigation/2026-10-19/lake_shore_laws_design.md` §5): generator 28's lake record was cured (a node is
+its lake's while it stands at or under its body's level — the deposit's filled nodes had forgotten their age and rock;
+solved again, the rows the same byte for byte, 23 353 records), and Part 3 was benched as `l1::OutletRule::Deltas`: the
+128 m tile solved on the bedrock (each record's laid rock taken off its row), the rock laid back as deltas — each river's
+share by its water, the top at the lake's level, the front at the angle its grain rests at by the Shields competence.
+On four places: smooth shores and delta plains in the old lake's arms, the deep lake's drowned valleys flat valley floors,
+the basin lake at −955 m against B118's −1 516 m (its word −900 m); the rock laid equals the records'; the price, the rock
+moves between 8 km nodes (the far lake list carries the 128 m truth). The waves' forms need far less than any lake's age:
+the age decides the deltas only. Asked, the owner chose *"Build deltas, then window"* and *"At the commit"*.
+
+1. **THE DELTAS ARE THE GAME'S LAKE FLOOR (FINE_VERSION 12; amends B118)**: the planet's shard keeps the bedrock view once
+   per world version and solves every 128 m tile on it under `OutletRule::Deltas`; the lake levels, the lakes together and
+   the far lake list read the same view.
+2. **THE WINDOW NEXT**: the owner's look from the side over the old lake, the deep lake and the basin lake.
+3. **THE PINS AT THE COMMIT**: generator 28's home artifact digest and golden rows are recorded again only when the owner
+   asks for the commit (one test run, B74).
+
+**Example.** The planet's shard loads generator 28's world, takes the laid rock off the lake nodes once, and solves the deep
+lake's tiles on that bedrock: its arms come back as flat valley floors at −295 m that the window shows from a stand on the
+water.
+
+## B123 (2026-10-20) — THE SHORES' LOOK GIVEN; TWO DRAWING DEFECTS, THEN THE COMMIT
+
+THE WINDOW (the old lake stand): the owner first saw squared shores and far artifacts (*"maybe we need to restart
+server?"* — a restart changed nothing). MEASURED: the delta tops and the shoreface band stood exactly at the lake's level,
+so a centimetre of rounding turned whole 128 m blocks of plain into sheets of water. CURED: the tops at their river's
+bankfull stage over the level (FINE_VERSION 15), the 16 m hold at the coarser ground (16 m version 7), after the
+shoreface band (FINE_VERSION 13), the lakes' grain from their mean grade (14) and the hold by the drawn ground (16 m 6).
+Asked, the owner: *"Yes, now it's better. What's next?"* and chose *"Two defects, then commit"*.
+
+1. **THE SHORES' LOOK GIVEN** on FINE_VERSION 15 / 16 m version 7 (the deltas and the shoreface by B122, B123's cures).
+2. **TWO DRAWING DEFECTS NEXT**: the pale flat squares on the far water (no ground under them in the probe and none in the
+   stored tiles; the suspect, the coarse copies' visible surface read as the floor by the depth law) and the loading
+   screen that never closes (stand-ins wait on finer pieces never built).
+3. **THEN THE COMMIT**: generator 28, the deltas and the cures; the pin tests run once, at the commit (B122 item 3).
+
+**Example.** From the old lake stand the near shore runs as a natural curve along a plain 0.2 m over the water; the next
+work makes the far water one colour of deep water to the horizon and lets the login's screen go once the ground is whole.
